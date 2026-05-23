@@ -63,8 +63,8 @@ Responde SOLO con JSON sin backticks ni markdown:
         "Authorization": `Bearer ${groqKey}`,
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        max_tokens: 400,
+        model: "llama-3.1-8b-instant",
+        max_tokens: 300,
         temperature: 0.3,
         messages: [
           { role: "system", content: "Eres un trader Forex experto. Responde ÚNICAMENTE con JSON válido, sin texto adicional, sin backticks, sin markdown." },
