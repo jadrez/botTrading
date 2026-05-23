@@ -254,7 +254,7 @@ function TradingViewChart({tvSymbol}){
 
     const widget=document.createElement("div");
     widget.className="tradingview-widget-container__widget";
-    widget.style.height="370px";
+    widget.style.height="100%";
     widget.style.width="100%";
     container.appendChild(widget);
 
@@ -263,11 +263,53 @@ function TradingViewChart({tvSymbol}){
     script.src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
     script.async=true;
     script.innerHTML=JSON.stringify({
-      autosize:true, symbol:tvSymbol, interval:"5",
-      timezone:"America/Bogota", theme:"dark", style:"1", locale:"es",
-      withdateranges:true, hide_side_toolbar:false, allow_symbol_change:false,
-      calendar:false, support_host:"https://www.tradingview.com",
-      backgroundColor:"rgba(8,13,28,1)", gridColor:"rgba(21,32,53,0.3)",
+      autosize:true,
+      symbol:tvSymbol,
+      interval:"5",
+      timezone:"America/Bogota",
+      theme:"dark",
+      style:"1",
+      locale:"es",
+      withdateranges:true,
+      range:"1D",
+      hide_side_toolbar:false,
+      allow_symbol_change:false,
+      save_image:true,
+      calendar:false,
+      hide_top_toolbar:false,
+      hide_legend:false,
+      support_host:"https://www.tradingview.com",
+      backgroundColor:"rgba(8,13,28,1)",
+      gridColor:"rgba(21,32,53,0.25)",
+      studies:[
+        "STD;RSI",
+        "STD;MACD",
+        "STD;Bollinger_Bands",
+        "STD;Volume",
+        "STD;EMA",
+      ],
+      studies_overrides:{
+        "bollinger bands.upper.color":"#00b8e6",
+        "bollinger bands.lower.color":"#00b8e6",
+        "bollinger bands.median.color":"#344d70",
+        "macd.histogram.color.0":"#00e676",
+        "macd.histogram.color.1":"#ff1744",
+        "volume.volume.color.0":"#ff174460",
+        "volume.volume.color.1":"#00e67660",
+      },
+      overrides:{
+        "mainSeriesProperties.candleStyle.upColor":"#00e676",
+        "mainSeriesProperties.candleStyle.downColor":"#ff1744",
+        "mainSeriesProperties.candleStyle.borderUpColor":"#00e676",
+        "mainSeriesProperties.candleStyle.borderDownColor":"#ff1744",
+        "mainSeriesProperties.candleStyle.wickUpColor":"#00e676",
+        "mainSeriesProperties.candleStyle.wickDownColor":"#ff1744",
+        "paneProperties.background":"#04060f",
+        "paneProperties.backgroundType":"solid",
+        "paneProperties.gridLinesMode":"both",
+        "scalesProperties.textColor":"#344d70",
+        "scalesProperties.lineColor":"#152035",
+      },
     });
     container.appendChild(script);
 
@@ -275,7 +317,7 @@ function TradingViewChart({tvSymbol}){
   },[tvSymbol]);
 
   return(
-    <div ref={containerRef} className="tradingview-widget-container" style={{width:"100%",height:370}}/>
+    <div ref={containerRef} className="tradingview-widget-container" style={{width:"100%",height:"100%"}}/>
   );
 }
 
@@ -688,7 +730,7 @@ export default function TradingBot(){
     <>
       <style>{STYLES}</style>
       <div className="scanlines"/>
-      <div style={{position:"relative",zIndex:1,minHeight:"100vh",padding:"14px 16px",maxWidth:940,margin:"0 auto"}}>
+      <div style={{position:"relative",zIndex:1,minHeight:"100vh",padding:"14px 20px",maxWidth:1400,margin:"0 auto"}}>
 
         {/* HEADER */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,paddingBottom:12,borderBottom:`1px solid ${T.border}`}}>
@@ -772,11 +814,21 @@ export default function TradingBot(){
 
         {/* CHART — TradingView */}
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>GRÁFICA EN VIVO • TRADINGVIEW • {symbol}</span>
-            <span style={{fontSize:8,color:T.accent}}>Intervalo 5m</span>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>GRÁFICA EN VIVO • TRADINGVIEW • {symbol}</span>
+              <span style={{fontSize:8,background:`${T.accent}18`,color:T.accent,padding:"2px 8px",borderRadius:4,letterSpacing:1}}>5M</span>
+            </div>
+            <div style={{display:"flex",gap:8,fontSize:8,color:T.muted}}>
+              <span style={{color:T.green}}>● RSI</span>
+              <span style={{color:T.accent}}>● BB</span>
+              <span style={{color:T.yellow}}>● MACD</span>
+              <span style={{color:T.muted}}>● VOL</span>
+            </div>
           </div>
-          <TradingViewChart tvSymbol={asset.tvSymbol}/>
+          <div style={{height:620,borderRadius:6,overflow:"hidden"}}>
+            <TradingViewChart tvSymbol={asset.tvSymbol}/>
+          </div>
         </div>
 
         {/* POSITIONS */}
@@ -979,7 +1031,7 @@ export default function TradingBot(){
 
         {/* DISCLAIMER */}
         <div style={{fontSize:8,color:T.muted,textAlign:"center",lineHeight:1.9,paddingTop:8,borderTop:`1px solid ${T.border}`}}>
-          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Precios crypto en vivo vía Binance · Gráficas via TradingView · TP +$1.20 · SL -$2.00<br/>
+          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Precios crypto en vivo vía Binance · Gráficas via TradingView · TP +$3.00 · SL -$2.00<br/>
           Las señales son educativas y no garantizan resultados en mercados reales. Opera siempre con responsabilidad.
         </div>
 
