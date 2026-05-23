@@ -5,7 +5,7 @@ export default async function handler(req, res) {
   if (!apiKey) return res.status(500).json({ error: "ALPHA_VANTAGE_KEY not set" });
 
   try {
-    const url = `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&topics=forex,economy_macro,financial_markets&sort=LATEST&limit=10&apikey=${apiKey}`;
+    const url = `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=FOREX:EUR,FOREX:USD&topics=forex,economy_macro&sort=LATEST&limit=10&apikey=${apiKey}`;
     const r = await fetch(url);
     const d = await r.json();
 
