@@ -1,13 +1,13 @@
-const TAKE_PROFIT_USD = 1.20;
+const TAKE_PROFIT_USD = 3.00;
 const STOP_LOSS_USD   = 2.00;
 const MAX_POSITIONS   = 5;
+const POSITION_USD    = 1000;
 
-const f5   = n => n.toFixed(5);
 const fUSD = (n, sign=true) => (sign&&n>=0?"+":"")+`$${Math.abs(n).toFixed(2)}`;
 
 function posPnL(pos, price) {
   const dir = pos.type === "BUY" ? 1 : -1;
-  return dir * (price - pos.entry) * 100000 * 0.0001;
+  return dir * (price - pos.entry) / pos.entry * POSITION_USD;
 }
 
 export default async function handler(req, res) {
@@ -16,44 +16,40 @@ export default async function handler(req, res) {
   const groqKey = process.env.GROQ_API_KEY;
   if (!groqKey) return res.status(500).json({ error: "GROQ_API_KEY not set" });
 
-  const { symbol = "ETH/USDT", price, rsi, macd, bb, positions, balance, news, reason } = req.body;
+  const {
+    symbol = "ETH/USDT", price, rsi, macd, bb,
+    ema9 = 0, ema21 = 0, volRatio = 1, trend1h = 0,
+    positions, balance, news, reason,
+  } = req.body;
 
-  const nc = (news || []).slice(0, 5)
+  const nc = (news || []).slice(0, 4)
     .map(n => `[${n.sentiment.toUpperCase()}|${n.impact}] ${n.title}`)
-    .join("\n") || "Sin noticias recientes.";
+    .join("\n") || "Sin noticias.";
 
   const pc = positions.length
-    ? positions.map((p, i) => `  #${i+1} ${p.type} @ ${f5(p.entry)} PnL:${fUSD(posPnL(p, price))}`).join("\n")
-    : "  Ninguna";
+    ? positions.map((p, i) => `#${i+1} ${p.type} PnL:${fUSD(posPnL(p, price))}`).join(" | ")
+    : "Ninguna";
 
-  const prompt = `Eres un trader experto en ${symbol}. Analiza y decide si abrir UNA nueva posición.
+  const emaCross = ema9 > ema21 ? "EMA9>EMA21 ALCISTA" : "EMA9<EMA21 BAJISTA";
+  const volStr   = volRatio > 1.5 ? "ALTO" : volRatio < 0.7 ? "BAJO" : "NORMAL";
 
-CONTEXTO DEL ANÁLISIS: ${reason}
+  const prompt = `Eres trader experto en ${symbol}. Decide si abrir UNA posición ahora.
 
-MERCADO ACTUAL:
-Par: ${symbol}
-Precio: ${price}
-RSI(14): ${rsi.toFixed(2)} ${rsi<30?"→ SOBREVENTA":rsi>70?"→ SOBRECOMPRA":"→ NEUTRAL"}
-MACD histograma: ${macd.hist.toFixed(6)} ${macd.hist>0?"→ MOMENTUM ALCISTA":"→ MOMENTUM BAJISTA"}
-Bollinger: Superior ${f5(bb.upper)} | Media ${f5(bb.mid)} | Inferior ${f5(bb.lower)}
-Precio vs BB: ${price>bb.upper?"SOBRE BANDA SUPERIOR — posible reversión bajista":price<bb.lower?"BAJO BANDA INFERIOR — posible reversión alcista":"DENTRO DE BANDAS"}
+PRECIO: ${price} | RSI: ${rsi?.toFixed(1)} ${rsi<30?"SOBREVENTA":rsi>70?"SOBRECOMPRA":"NEUTRAL"}
+MACD HIST: ${macd?.hist?.toFixed(4)} ${macd?.hist>0?"ALCISTA":"BAJISTA"}
+BB: precio ${price>bb?.upper?"SOBRE BANDA SUP":price<bb?.lower?"BAJO BANDA INF":"dentro de bandas"}
+EMA: ${emaCross} | VOLUMEN: ${volStr} (×${volRatio?.toFixed(1)}) | TENDENCIA 1H: ${trend1h>=0?"+":""}${trend1h?.toFixed(2)}%
 
-NOTICIAS EN VIVO:
+NOTICIAS:
 ${nc}
 
-PORTAFOLIO ($${balance.toFixed(2)} balance):
-Posiciones abiertas (${positions.length}/${MAX_POSITIONS}):
-${pc}
-Slots disponibles: ${MAX_POSITIONS-positions.length}
+PORTAFOLIO: $${balance?.toFixed(0)} | Posiciones: ${pc} | Slots: ${MAX_POSITIONS-positions.length}
+TP: +$${TAKE_PROFIT_USD} | SL: -$${STOP_LOSS_USD} | Máx: ${MAX_POSITIONS} pos
 
-REGLAS DEL SISTEMA:
-- Cada posición se cierra automáticamente en +$${TAKE_PROFIT_USD} (TP) o -$${STOP_LOSS_USD} (SL)
-- Máximo ${MAX_POSITIONS} posiciones simultáneas
-- Si las posiciones abiertas ya cubren la dirección del mercado, evita duplicar innecesariamente
-- Si no hay confluencia clara entre indicadores y noticias → HOLD
+REGLAS: Confluencia entre EMA + RSI + volumen + noticias. Sin confluencia → HOLD. No duplicar dirección ya cubierta.
 
-Responde SOLO con JSON sin backticks ni markdown:
-{"signal":"BUY","confidence":75,"reasoning":"análisis en español máx 80 palabras","news_impact":"BULLISH","key_factor":"factor decisivo 5 palabras","risk":"MEDIO","should_open":true}`;
+Responde SOLO JSON sin backticks:
+{"signal":"BUY","confidence":75,"reasoning":"máx 60 palabras en español","news_impact":"BULLISH","key_factor":"5 palabras","risk":"MEDIO","should_open":true}`;
 
   try {
     const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -64,10 +60,10 @@ Responde SOLO con JSON sin backticks ni markdown:
       },
       body: JSON.stringify({
         model: "llama-3.1-8b-instant",
-        max_tokens: 300,
+        max_tokens: 250,
         temperature: 0.3,
         messages: [
-          { role: "system", content: "Eres un trader Forex experto. Responde ÚNICAMENTE con JSON válido, sin texto adicional, sin backticks, sin markdown." },
+          { role: "system", content: "Trader experto. Responde SOLO JSON válido sin texto extra ni backticks." },
           { role: "user", content: prompt },
         ],
       }),
@@ -83,7 +79,7 @@ Responde SOLO con JSON sin backticks ni markdown:
     } catch {
       return res.status(200).json({
         signal: "HOLD", confidence: 40,
-        reasoning: "Error al parsear respuesta de IA.",
+        reasoning: "Error al parsear respuesta.",
         news_impact: "NEUTRAL", key_factor: "Error análisis",
         risk: "ALTO", should_open: false,
       });

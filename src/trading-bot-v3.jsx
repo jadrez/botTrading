@@ -86,6 +86,17 @@ function calcBB(closes,p=20){
   const std=Math.sqrt(sl.reduce((a,b)=>a+(b-mean)**2,0)/sl.length);
   return{upper:mean+2*std,mid:mean,lower:mean-2*std};
 }
+function calcVolumeTrend(volumes){
+  if(!volumes||volumes.length<2)return{current:0,avg:0,ratio:1};
+  const avg=volumes.slice(-20).reduce((a,b)=>a+b,0)/Math.min(20,volumes.length);
+  const current=volumes.at(-1)||0;
+  return{current,avg,ratio:avg>0?current/avg:1};
+}
+function calcTrend1h(closes){
+  if(closes.length<61)return 0;
+  const ago=closes[closes.length-61];
+  return(closes.at(-1)-ago)/ago*100;
+}
 
 /* ─── TRADINGVIEW CHART ─────────────────────────────────────────────────── */
 function TradingViewChart({tvSymbol}){
@@ -184,11 +195,11 @@ async function fetchNewsAI(symbol){
   return r.json();
 }
 
-async function analyzeMarketAI({symbol,price,rsi,macd,bb,positions,balance,news,reason}){
+async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,positions,balance,news,reason}){
   const r=await fetch("/api/analyze",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({symbol,price,rsi,macd,bb,positions,balance,news,reason}),
+    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,positions,balance,news,reason}),
   });
   if(!r.ok)return{signal:"HOLD",confidence:40,reasoning:"Error al conectar con el servidor.",news_impact:"NEUTRAL",key_factor:"Error conexión",risk:"ALTO",should_open:false};
   return r.json();
@@ -206,6 +217,10 @@ export default function TradingBot(){
   const [rsi,setRsi]             = useState(50);
   const [macd,setMacd]           = useState({macd:0,signal:0,hist:0});
   const [bb,setBB]               = useState(()=>calcBB(genCandles(ASSETS["ETH/USDT"].basePrice,80).map(c=>c.c)));
+  const [ema9,setEma9]           = useState(0);
+  const [ema21,setEma21]         = useState(0);
+  const [volTrend,setVolTrend]   = useState({current:0,avg:0,ratio:1});
+  const [trend1h,setTrend1h]     = useState(0);
   const [positions,setPositions] = useState([]);
   const [balance,setBalance]     = useState(10000);
   const [trades,setTrades]       = useState([]);
@@ -227,6 +242,10 @@ export default function TradingBot(){
   const rsiRef    = useRef(50);
   const macdRef   = useRef({macd:0,signal:0,hist:0});
   const bbRef     = useRef({upper:0,mid:0,lower:0});
+  const ema9Ref   = useRef(0);
+  const ema21Ref  = useRef(0);
+  const volRef    = useRef({current:0,avg:0,ratio:1});
+  const trend1hRef= useRef(0);
   const newsRef   = useRef([]);
   const balanceRef= useRef(10000);
   const timerRef  = useRef(null);
@@ -240,6 +259,10 @@ export default function TradingBot(){
   useEffect(()=>{rsiRef.current=rsi;},[rsi]);
   useEffect(()=>{macdRef.current=macd;},[macd]);
   useEffect(()=>{bbRef.current=bb;},[bb]);
+  useEffect(()=>{ema9Ref.current=ema9;},[ema9]);
+  useEffect(()=>{ema21Ref.current=ema21;},[ema21]);
+  useEffect(()=>{volRef.current=volTrend;},[volTrend]);
+  useEffect(()=>{trend1hRef.current=trend1h;},[trend1h]);
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
@@ -294,10 +317,13 @@ export default function TradingBot(){
             updated[updated.length-1]=last;
             const closes=updated.map(c=>c.c);
             const newBB=calcBB(closes);
-            setRsi(calcRSI(closes));
-            setMacd(calcMACD(closes));
-            setBB(newBB);
-            bbRef.current=newBB;
+            const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
+            const t1h=calcTrend1h(closes);
+            setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
+            setBB(newBB); bbRef.current=newBB;
+            setEma9(e9); ema9Ref.current=e9;
+            setEma21(e21); ema21Ref.current=e21;
+            setTrend1h(t1h); trend1hRef.current=t1h;
             return updated;
           });
         }catch{}
@@ -337,14 +363,20 @@ export default function TradingBot(){
         const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${cur.binance}&interval=1m&limit=80`);
         const d=await r.json();
         if(!Array.isArray(d))return;
-        const newCandles=d.map(k=>({o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4])}));
+        const newCandles=d.map(k=>({o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
         setCandles(newCandles);
         const closes=newCandles.map(c=>c.c);
+        const volumes=newCandles.map(c=>c.v);
         const newBB=calcBB(closes);
-        setRsi(calcRSI(closes));
-        setMacd(calcMACD(closes));
-        setBB(newBB);
-        bbRef.current=newBB;
+        const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
+        const vt=calcVolumeTrend(volumes);
+        const t1h=calcTrend1h(closes);
+        setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
+        setBB(newBB); bbRef.current=newBB;
+        setEma9(e9); ema9Ref.current=e9;
+        setEma21(e21); ema21Ref.current=e21;
+        setVolTrend(vt); volRef.current=vt;
+        setTrend1h(t1h); trend1hRef.current=t1h;
       }catch{}
     };
     load();
@@ -393,6 +425,8 @@ export default function TradingBot(){
         symbol:symbolRef.current,
         price:priceRef.current,  rsi:rsiRef.current,
         macd:macdRef.current,    bb:bbRef.current,
+        ema9:ema9Ref.current,    ema21:ema21Ref.current,
+        volRatio:volRef.current.ratio, trend1h:trend1hRef.current,
         positions:posRef.current, balance:balanceRef.current,
         news:newsRef.current,    reason,
       });
@@ -554,20 +588,34 @@ export default function TradingBot(){
         </div>
 
         {/* INDICATORS */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:10}}>
-          {[
-            {l:"RSI (14)",  v:rsi.toFixed(1),        c:rsi<30?T.green:rsi>70?T.red:T.yellow, s:rsi<30?"SOBREVENTA":rsi>70?"SOBRECOMPRA":"NEUTRAL"},
-            {l:"MACD HIST", v:macd.hist.toFixed(asset.precision>3?5:2), c:macd.hist>0?T.green:T.red, s:macd.hist>0?"ALCISTA":"BAJISTA"},
-            {l:"BB UPPER",  v:fP(bb.upper,asset.precision), c:price>bb.upper?T.red:T.muted, s:price>bb.upper?"⚠ SOBRE BANDA":"normal"},
-            {l:"BB LOWER",  v:fP(bb.lower,asset.precision), c:price<bb.lower?T.green:T.muted, s:price<bb.lower?"⚠ BAJO BANDA":"normal"},
-          ].map(({l,v,c,s})=>(
-            <div key={l} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:6,padding:"8px 12px"}}>
-              <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:2}}>{l}</div>
-              <div className="mono" style={{fontSize:13,fontWeight:700,color:c}}>{v}</div>
-              <div style={{fontSize:8,color:c,marginTop:2,opacity:.75}}>{s}</div>
+        {(()=>{
+          const emaCross=ema9>ema21?"ALCISTA":"BAJISTA";
+          const emaCrossCol=ema9>ema21?T.green:T.red;
+          const volLabel=volTrend.ratio>1.5?"ALTO":volTrend.ratio<0.7?"BAJO":"NORMAL";
+          const volCol=volTrend.ratio>1.5?T.green:volTrend.ratio<0.7?T.muted:T.yellow;
+          const trend1hCol=trend1h>0?T.green:T.red;
+          const indicators=[
+            {l:"RSI (14)",    v:rsi.toFixed(1),        c:rsi<30?T.green:rsi>70?T.red:T.yellow, s:rsi<30?"SOBREVENTA":rsi>70?"SOBRECOMPRA":"NEUTRAL"},
+            {l:"MACD HIST",  v:macd.hist.toFixed(asset.precision>3?5:2), c:macd.hist>0?T.green:T.red, s:macd.hist>0?"ALCISTA":"BAJISTA"},
+            {l:"BB UPPER",   v:fP(bb.upper,asset.precision), c:price>bb.upper?T.red:T.muted, s:price>bb.upper?"⚠ SOBRE BANDA":"normal"},
+            {l:"BB LOWER",   v:fP(bb.lower,asset.precision), c:price<bb.lower?T.green:T.muted, s:price<bb.lower?"⚠ BAJO BANDA":"normal"},
+            {l:"EMA 9/21",   v:`${fP(ema9,asset.precision>3?4:1)}`, c:emaCrossCol, s:`CRUCE ${emaCross}`},
+            {l:"VOLUMEN",    v:`×${volTrend.ratio.toFixed(2)}`, c:volCol, s:`${volLabel} vs promedio`},
+            {l:"TENDENCIA 1H",v:`${trend1h>=0?"+":""}${trend1h.toFixed(3)}%`, c:trend1hCol, s:trend1h>0?"ALCISTA 1H":"BAJISTA 1H"},
+            {l:"EMA SEÑAL",  v:ema9>ema21?"BUY":"SELL", c:emaCrossCol, s:ema9>ema21?"EMA9 > EMA21":"EMA9 < EMA21"},
+          ];
+          return(
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:10}}>
+              {indicators.map(({l,v,c,s})=>(
+                <div key={l} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:6,padding:"8px 12px"}}>
+                  <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:2}}>{l}</div>
+                  <div className="mono" style={{fontSize:13,fontWeight:700,color:c}}>{v}</div>
+                  <div style={{fontSize:8,color:c,marginTop:2,opacity:.75}}>{s}</div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          );
+        })()}
 
         {/* CHART — TradingView */}
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
