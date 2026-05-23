@@ -38,8 +38,8 @@ const ASSETS = {
 };
 
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
-const TAKE_PROFIT_USD    = 2.00;
-const STOP_LOSS_USD      = 4.40;
+const TAKE_PROFIT_USD    = 3.00;
+const STOP_LOSS_USD      = 2.00;
 const MAX_POSITIONS      = 5;
 const POSITION_USD       = 1000;
 const ANALYSIS_INTERVAL_MS = 28000;
