@@ -19,6 +19,7 @@ export default async function handler(req, res) {
   const {
     symbol = "ETH/USDT", price, rsi, macd, bb,
     ema9 = 0, ema21 = 0, volRatio = 1, trend1h = 0,
+    patterns = [],
     positions, balance, news, reason,
   } = req.body;
 
@@ -32,6 +33,9 @@ export default async function handler(req, res) {
 
   const emaCross = ema9 > ema21 ? "EMA9>EMA21 ALCISTA" : "EMA9<EMA21 BAJISTA";
   const volStr   = volRatio > 1.5 ? "ALTO" : volRatio < 0.7 ? "BAJO" : "NORMAL";
+  const patternsStr = patterns.length
+    ? patterns.map(p=>`${p.name} (${p.signal} ${p.type} ${p.conf}%)`).join(", ")
+    : "Ninguno detectado";
 
   const prompt = `Eres trader experto en ${symbol}. Decide si abrir UNA posición ahora.
 
@@ -39,6 +43,7 @@ PRECIO: ${price} | RSI: ${rsi?.toFixed(1)} ${rsi<30?"SOBREVENTA":rsi>70?"SOBRECO
 MACD HIST: ${macd?.hist?.toFixed(4)} ${macd?.hist>0?"ALCISTA":"BAJISTA"}
 BB: precio ${price>bb?.upper?"SOBRE BANDA SUP":price<bb?.lower?"BAJO BANDA INF":"dentro de bandas"}
 EMA: ${emaCross} | VOLUMEN: ${volStr} (×${volRatio?.toFixed(1)}) | TENDENCIA 1H: ${trend1h>=0?"+":""}${trend1h?.toFixed(2)}%
+PATRONES CHARTISTAS: ${patternsStr}
 
 NOTICIAS:
 ${nc}
@@ -46,7 +51,7 @@ ${nc}
 PORTAFOLIO: $${balance?.toFixed(0)} | Posiciones: ${pc} | Slots: ${MAX_POSITIONS-positions.length}
 TP: +$${TAKE_PROFIT_USD} | SL: -$${STOP_LOSS_USD} | Máx: ${MAX_POSITIONS} pos
 
-REGLAS: Confluencia entre EMA + RSI + volumen + noticias. Sin confluencia → HOLD. No duplicar dirección ya cubierta.
+REGLAS: Busca confluencia entre patrones + EMA + RSI + volumen + noticias. Si un patrón REVERSAL coincide con EMA y RSI → alta prioridad. Sin confluencia → HOLD.
 
 Responde SOLO JSON sin backticks:
 {"signal":"BUY","confidence":75,"reasoning":"máx 60 palabras en español","news_impact":"BULLISH","key_factor":"5 palabras","risk":"MEDIO","should_open":true}`;

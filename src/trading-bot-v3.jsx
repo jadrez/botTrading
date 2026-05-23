@@ -86,6 +86,101 @@ function calcBB(closes,p=20){
   const std=Math.sqrt(sl.reduce((a,b)=>a+(b-mean)**2,0)/sl.length);
   return{upper:mean+2*std,mid:mean,lower:mean-2*std};
 }
+/* ─── PATTERN DETECTION ─────────────────────────────────────────────────── */
+function findPivots(candles, lb=3){
+  const highs=[], lows=[];
+  for(let i=lb; i<candles.length-lb; i++){
+    let isH=true, isL=true;
+    for(let j=i-lb; j<=i+lb; j++){
+      if(j===i) continue;
+      if(candles[j].h>=candles[i].h) isH=false;
+      if(candles[j].l<=candles[i].l) isL=false;
+    }
+    if(isH) highs.push({idx:i, price:candles[i].h});
+    if(isL) lows.push({idx:i,  price:candles[i].l});
+  }
+  return{highs,lows};
+}
+
+function detectPatterns(candles){
+  if(candles.length<25) return [];
+  const results=[];
+  const recent=candles.slice(-60);
+  const {highs,lows}=findPivots(recent,3);
+  const tol=0.025; // 2.5% tolerancia para precios similares
+
+  // ── Double Bottom (BULLISH REVERSAL)
+  if(lows.length>=2){
+    const [l1,l2]=lows.slice(-2);
+    const diff=Math.abs(l1.price-l2.price)/l1.price;
+    const gap=l2.idx-l1.idx;
+    if(diff<tol && gap>=5 && gap<=45)
+      results.push({name:"Double Bottom", signal:"BULLISH", type:"REVERSAL", conf:72, emoji:"W"});
+  }
+
+  // ── Double Top (BEARISH REVERSAL)
+  if(highs.length>=2){
+    const [h1,h2]=highs.slice(-2);
+    const diff=Math.abs(h1.price-h2.price)/h1.price;
+    const gap=h2.idx-h1.idx;
+    if(diff<tol && gap>=5 && gap<=45)
+      results.push({name:"Double Top", signal:"BEARISH", type:"REVERSAL", conf:72, emoji:"M"});
+  }
+
+  // ── Head & Shoulders (BEARISH REVERSAL)
+  if(highs.length>=3){
+    const [h1,h2,h3]=highs.slice(-3);
+    const shoulderDiff=Math.abs(h1.price-h3.price)/h1.price;
+    if(shoulderDiff<tol && h2.price>h1.price*1.01 && h2.price>h3.price*1.01)
+      results.push({name:"Head & Shoulders", signal:"BEARISH", type:"REVERSAL", conf:76, emoji:"∩"});
+  }
+
+  // ── Inverse Head & Shoulders (BULLISH REVERSAL)
+  if(lows.length>=3){
+    const [l1,l2,l3]=lows.slice(-3);
+    const shoulderDiff=Math.abs(l1.price-l3.price)/l1.price;
+    if(shoulderDiff<tol && l2.price<l1.price*0.99 && l2.price<l3.price*0.99)
+      results.push({name:"Inv. Head & Shoulders", signal:"BULLISH", type:"REVERSAL", conf:76, emoji:"∪"});
+  }
+
+  // ── Ascending Triangle (BULLISH CONTINUATION)
+  if(highs.length>=2 && lows.length>=2){
+    const [h1,h2]=highs.slice(-2);
+    const [l1,l2]=lows.slice(-2);
+    if(Math.abs(h1.price-h2.price)/h1.price<0.015 && l2.price>l1.price*1.005)
+      results.push({name:"Ascending Triangle", signal:"BULLISH", type:"CONTINUATION", conf:68, emoji:"△"});
+  }
+
+  // ── Descending Triangle (BEARISH CONTINUATION)
+  if(highs.length>=2 && lows.length>=2){
+    const [h1,h2]=highs.slice(-2);
+    const [l1,l2]=lows.slice(-2);
+    if(Math.abs(l1.price-l2.price)/l1.price<0.015 && h2.price<h1.price*0.995)
+      results.push({name:"Descending Triangle", signal:"BEARISH", type:"CONTINUATION", conf:68, emoji:"▽"});
+  }
+
+  // ── Symmetrical Triangle (NEUTRAL → esperar ruptura)
+  if(highs.length>=2 && lows.length>=2){
+    const [h1,h2]=highs.slice(-2);
+    const [l1,l2]=lows.slice(-2);
+    if(h2.price<h1.price*0.995 && l2.price>l1.price*1.005)
+      results.push({name:"Symmetrical Triangle", signal:"NEUTRAL", type:"CONTINUATION", conf:60, emoji:"◇"});
+  }
+
+  // ── Bullish Flag (BULLISH CONTINUATION)
+  if(recent.length>=20){
+    const pole=recent.slice(-20,-10), flag=recent.slice(-10);
+    const poleChg=(pole.at(-1).c-pole[0].c)/pole[0].c;
+    const flagChg=(flag.at(-1).c-flag[0].c)/flag[0].c;
+    if(poleChg>0.015 && flagChg<0 && Math.abs(flagChg)<poleChg*0.5)
+      results.push({name:"Bullish Flag", signal:"BULLISH", type:"CONTINUATION", conf:70, emoji:"⚑"});
+    if(poleChg<-0.015 && flagChg>0 && Math.abs(flagChg)<Math.abs(poleChg)*0.5)
+      results.push({name:"Bearish Flag", signal:"BEARISH", type:"CONTINUATION", conf:70, emoji:"⚐"});
+  }
+
+  return results;
+}
+
 function calcVolumeTrend(volumes){
   if(!volumes||volumes.length<2)return{current:0,avg:0,ratio:1};
   const avg=volumes.slice(-20).reduce((a,b)=>a+b,0)/Math.min(20,volumes.length);
@@ -195,11 +290,11 @@ async function fetchNewsAI(symbol){
   return r.json();
 }
 
-async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,positions,balance,news,reason}){
+async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,positions,balance,news,reason}){
   const r=await fetch("/api/analyze",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,positions,balance,news,reason}),
+    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,positions,balance,news,reason}),
   });
   if(!r.ok)return{signal:"HOLD",confidence:40,reasoning:"Error al conectar con el servidor.",news_impact:"NEUTRAL",key_factor:"Error conexión",risk:"ALTO",should_open:false};
   return r.json();
@@ -221,6 +316,7 @@ export default function TradingBot(){
   const [ema21,setEma21]         = useState(0);
   const [volTrend,setVolTrend]   = useState({current:0,avg:0,ratio:1});
   const [trend1h,setTrend1h]     = useState(0);
+  const [patterns,setPatterns]   = useState([]);
   const [positions,setPositions] = useState([]);
   const [balance,setBalance]     = useState(10000);
   const [trades,setTrades]       = useState([]);
@@ -242,10 +338,11 @@ export default function TradingBot(){
   const rsiRef    = useRef(50);
   const macdRef   = useRef({macd:0,signal:0,hist:0});
   const bbRef     = useRef({upper:0,mid:0,lower:0});
-  const ema9Ref   = useRef(0);
-  const ema21Ref  = useRef(0);
-  const volRef    = useRef({current:0,avg:0,ratio:1});
-  const trend1hRef= useRef(0);
+  const ema9Ref    = useRef(0);
+  const ema21Ref   = useRef(0);
+  const volRef     = useRef({current:0,avg:0,ratio:1});
+  const trend1hRef = useRef(0);
+  const patternsRef= useRef([]);
   const newsRef   = useRef([]);
   const balanceRef= useRef(10000);
   const timerRef  = useRef(null);
@@ -263,6 +360,7 @@ export default function TradingBot(){
   useEffect(()=>{ema21Ref.current=ema21;},[ema21]);
   useEffect(()=>{volRef.current=volTrend;},[volTrend]);
   useEffect(()=>{trend1hRef.current=trend1h;},[trend1h]);
+  useEffect(()=>{patternsRef.current=patterns;},[patterns]);
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
@@ -319,11 +417,13 @@ export default function TradingBot(){
             const newBB=calcBB(closes);
             const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
             const t1h=calcTrend1h(closes);
+            const pts=detectPatterns(updated);
             setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
             setBB(newBB); bbRef.current=newBB;
             setEma9(e9); ema9Ref.current=e9;
             setEma21(e21); ema21Ref.current=e21;
             setTrend1h(t1h); trend1hRef.current=t1h;
+            setPatterns(pts); patternsRef.current=pts;
             return updated;
           });
         }catch{}
@@ -371,12 +471,14 @@ export default function TradingBot(){
         const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
         const vt=calcVolumeTrend(volumes);
         const t1h=calcTrend1h(closes);
+        const pts=detectPatterns(newCandles);
         setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
         setBB(newBB); bbRef.current=newBB;
         setEma9(e9); ema9Ref.current=e9;
         setEma21(e21); ema21Ref.current=e21;
         setVolTrend(vt); volRef.current=vt;
         setTrend1h(t1h); trend1hRef.current=t1h;
+        setPatterns(pts); patternsRef.current=pts;
       }catch{}
     };
     load();
@@ -427,6 +529,7 @@ export default function TradingBot(){
         macd:macdRef.current,    bb:bbRef.current,
         ema9:ema9Ref.current,    ema21:ema21Ref.current,
         volRatio:volRef.current.ratio, trend1h:trend1hRef.current,
+        patterns:patternsRef.current,
         positions:posRef.current, balance:balanceRef.current,
         news:newsRef.current,    reason,
       });
@@ -726,6 +829,34 @@ export default function TradingBot(){
               color:loadingNews?T.muted:T.yellow,borderRadius:8,padding:"11px 8px",cursor:loadingNews?"not-allowed":"pointer",fontSize:12,fontWeight:700}}>
             {loadingNews?"⏳ Cargando...":"📰 Actualizar Noticias"}
           </button>
+        </div>
+
+        {/* PATTERNS PANEL */}
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>PATRONES CHARTISTAS DETECTADOS · {symbol}</span>
+            <span style={{fontSize:8,color:T.muted}}>últimas 60 velas</span>
+          </div>
+          {patterns.length===0?(
+            <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>Sin patrones claros detectados en este momento.</div>
+          ):(
+            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+              {patterns.map((p,i)=>{
+                const col=p.signal==="BULLISH"?T.green:p.signal==="BEARISH"?T.red:T.yellow;
+                return(
+                  <div key={i} style={{background:`${col}12`,border:`1px solid ${col}40`,borderRadius:6,padding:"6px 12px",display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{fontSize:14,color:col}}>{p.emoji}</span>
+                    <div>
+                      <div style={{fontSize:11,fontWeight:700,color:col}}>{p.name}</div>
+                      <div style={{fontSize:8,color:T.muted}}>
+                        {p.type} · {p.signal} · {p.conf}% confianza
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* NEWS PANEL */}
