@@ -1,10 +1,14 @@
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  const prompt = `Busca en internet las noticias más recientes de hoy que afecten al par EUR/USD en el mercado Forex. Considera: datos macroeconómicos USA/Eurozona, declaraciones BCE/Fed, inflación, empleo, PIB, geopolítica.
+  const today = new Date().toLocaleDateString("es-ES", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
 
-Responde SOLO con JSON sin backticks:
-{"headlines":[{"title":"titular breve español","sentiment":"bullish"|"bearish"|"neutral","impact":"ALTO"|"MEDIO"|"BAJO"}],"market_bias":"bullish"|"bearish"|"neutral","summary":"resumen 40 palabras"}`;
+  const prompt = `Hoy es ${today}. Eres un analista Forex experto. Basándote en tu conocimiento del contexto macroeconómico actual de EUR/USD, genera un análisis de los factores que más probablemente estén afectando al par hoy: política monetaria BCE/Fed, inflación, empleo, PIB, geopolítica Europa/USA.
+
+Responde SOLO con JSON sin backticks ni markdown:
+{"headlines":[{"title":"titular breve en español","sentiment":"bullish","impact":"ALTO"},{"title":"titular breve en español","sentiment":"bearish","impact":"MEDIO"},{"title":"titular breve en español","sentiment":"neutral","impact":"BAJO"}],"market_bias":"bullish","summary":"resumen en 40 palabras del contexto actual EUR/USD"}
+
+Genera exactamente 5 headlines realistas basados en el contexto macroeconómico actual. Los valores de sentiment solo pueden ser: bullish, bearish o neutral. Los valores de impact solo pueden ser: ALTO, MEDIO o BAJO.`;
 
   try {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -13,12 +17,10 @@ Responde SOLO con JSON sin backticks:
         "Content-Type": "application/json",
         "x-api-key": process.env.ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": "web-search-2025-03-05",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001",
         max_tokens: 700,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
         messages: [{ role: "user", content: prompt }],
       }),
     });
