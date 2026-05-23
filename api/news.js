@@ -1,40 +1,48 @@
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  const today = new Date().toLocaleDateString("es-ES", { weekday:"long", year:"numeric", month:"long", day:"numeric" });
-
-  const prompt = `Hoy es ${today}. Eres un analista Forex experto. Basándote en tu conocimiento del contexto macroeconómico actual de EUR/USD, genera un análisis de los factores que más probablemente estén afectando al par hoy: política monetaria BCE/Fed, inflación, empleo, PIB, geopolítica Europa/USA.
-
-Responde SOLO con JSON sin backticks ni markdown:
-{"headlines":[{"title":"titular breve en español","sentiment":"bullish","impact":"ALTO"},{"title":"titular breve en español","sentiment":"bearish","impact":"MEDIO"},{"title":"titular breve en español","sentiment":"neutral","impact":"BAJO"}],"market_bias":"bullish","summary":"resumen en 40 palabras del contexto actual EUR/USD"}
-
-Genera exactamente 5 headlines realistas basados en el contexto macroeconómico actual. Los valores de sentiment solo pueden ser: bullish, bearish o neutral. Los valores de impact solo pueden ser: ALTO, MEDIO o BAJO.`;
+  const apiKey = process.env.ALPHA_VANTAGE_KEY;
+  if (!apiKey) return res.status(500).json({ error: "ALPHA_VANTAGE_KEY not set" });
 
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 700,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-
+    const url = `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&topics=forex,economy_macro,financial_markets&sort=LATEST&limit=10&apikey=${apiKey}`;
+    const r = await fetch(url);
     const d = await r.json();
-    if (!r.ok) return res.status(r.status).json(d);
 
-    const txt = (d.content || []).map((b) => b.text || "").join("");
-    try {
-      const parsed = JSON.parse(txt.replace(/```json|```/g, "").trim());
-      return res.status(200).json(parsed);
-    } catch {
-      return res.status(200).json({ headlines: [], market_bias: "neutral", summary: "Sin noticias disponibles." });
+    if (d.Note || d.Information) {
+      // rate limit hit
+      return res.status(200).json({ headlines: [], market_bias: "neutral", summary: "Límite de solicitudes alcanzado. Intenta en unos minutos." });
     }
+
+    const feed = d.feed || [];
+
+    const sentimentMap = (label = "") => {
+      const l = label.toLowerCase();
+      if (l.includes("bullish")) return "bullish";
+      if (l.includes("bearish")) return "bearish";
+      return "neutral";
+    };
+
+    const impactMap = (score = 0) => {
+      const abs = Math.abs(score);
+      if (abs >= 0.35) return "ALTO";
+      if (abs >= 0.15) return "MEDIO";
+      return "BAJO";
+    };
+
+    const headlines = feed.slice(0, 6).map(item => ({
+      title: item.title,
+      sentiment: sentimentMap(item.overall_sentiment_label),
+      impact: impactMap(item.overall_sentiment_score),
+    }));
+
+    const scores = feed.map(i => parseFloat(i.overall_sentiment_score) || 0);
+    const avg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+    const market_bias = avg > 0.1 ? "bullish" : avg < -0.1 ? "bearish" : "neutral";
+
+    const summary = `${headlines.length} noticias recientes. Sentimiento promedio del mercado: ${market_bias.toUpperCase()}. Fuente: Alpha Vantage News.`;
+
+    return res.status(200).json({ headlines, market_bias, summary });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

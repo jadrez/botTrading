@@ -13,6 +13,9 @@ function posPnL(pos, price) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
+  const groqKey = process.env.GROQ_API_KEY;
+  if (!groqKey) return res.status(500).json({ error: "GROQ_API_KEY not set" });
+
   const { price, rsi, macd, bb, positions, balance, news, reason } = req.body;
 
   const nc = (news || []).slice(0, 5)
@@ -48,44 +51,39 @@ REGLAS DEL SISTEMA:
 - Si las posiciones abiertas ya cubren la dirección del mercado, evita duplicar innecesariamente
 - Si no hay confluencia clara entre indicadores y noticias → HOLD
 
-Responde SOLO con JSON sin backticks:
-{
-  "signal": "BUY"|"SELL"|"HOLD",
-  "confidence": 0-100,
-  "reasoning": "análisis en español máx 80 palabras explicando por qué",
-  "news_impact": "BULLISH"|"BEARISH"|"NEUTRAL",
-  "key_factor": "factor decisivo en 5 palabras",
-  "risk": "BAJO"|"MEDIO"|"ALTO",
-  "should_open": true|false
-}`;
+Responde SOLO con JSON sin backticks ni markdown:
+{"signal":"BUY","confidence":75,"reasoning":"análisis en español máx 80 palabras","news_impact":"BULLISH","key_factor":"factor decisivo 5 palabras","risk":"MEDIO","should_open":true}`;
 
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
+    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
+        "Authorization": `Bearer ${groqKey}`,
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 600,
-        messages: [{ role: "user", content: prompt }],
+        model: "llama-3.3-70b-versatile",
+        max_tokens: 400,
+        temperature: 0.3,
+        messages: [
+          { role: "system", content: "Eres un trader Forex experto. Responde ÚNICAMENTE con JSON válido, sin texto adicional, sin backticks, sin markdown." },
+          { role: "user", content: prompt },
+        ],
       }),
     });
 
     const d = await r.json();
     if (!r.ok) return res.status(r.status).json(d);
 
-    const txt = (d.content || []).map(b => b.text || "").join("");
+    const txt = d.choices?.[0]?.message?.content || "";
     try {
       const parsed = JSON.parse(txt.replace(/```json|```/g, "").trim());
       return res.status(200).json(parsed);
     } catch {
       return res.status(200).json({
         signal: "HOLD", confidence: 40,
-        reasoning: "Error al parsear respuesta.",
-        news_impact: "NEUTRAL", key_factor: "Error conexión",
+        reasoning: "Error al parsear respuesta de IA.",
+        news_impact: "NEUTRAL", key_factor: "Error análisis",
         risk: "ALTO", should_open: false,
       });
     }
