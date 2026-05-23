@@ -16,7 +16,7 @@ export default async function handler(req, res) {
   const groqKey = process.env.GROQ_API_KEY;
   if (!groqKey) return res.status(500).json({ error: "GROQ_API_KEY not set" });
 
-  const { price, rsi, macd, bb, positions, balance, news, reason } = req.body;
+  const { symbol = "ETH/USDT", price, rsi, macd, bb, positions, balance, news, reason } = req.body;
 
   const nc = (news || []).slice(0, 5)
     .map(n => `[${n.sentiment.toUpperCase()}|${n.impact}] ${n.title}`)
@@ -26,12 +26,13 @@ export default async function handler(req, res) {
     ? positions.map((p, i) => `  #${i+1} ${p.type} @ ${f5(p.entry)} PnL:${fUSD(posPnL(p, price))}`).join("\n")
     : "  Ninguna";
 
-  const prompt = `Eres un trader Forex experto en EUR/USD. Analiza y decide si abrir UNA nueva posición.
+  const prompt = `Eres un trader experto en ${symbol}. Analiza y decide si abrir UNA nueva posición.
 
 CONTEXTO DEL ANÁLISIS: ${reason}
 
 MERCADO ACTUAL:
-Precio EUR/USD: ${f5(price)}
+Par: ${symbol}
+Precio: ${price}
 RSI(14): ${rsi.toFixed(2)} ${rsi<30?"→ SOBREVENTA":rsi>70?"→ SOBRECOMPRA":"→ NEUTRAL"}
 MACD histograma: ${macd.hist.toFixed(6)} ${macd.hist>0?"→ MOMENTUM ALCISTA":"→ MOMENTUM BAJISTA"}
 Bollinger: Superior ${f5(bb.upper)} | Media ${f5(bb.mid)} | Inferior ${f5(bb.lower)}

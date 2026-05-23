@@ -29,25 +29,39 @@ const STYLES = `
   .scanlines{position:fixed;inset:0;pointer-events:none;z-index:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,184,230,.008) 2px,rgba(0,184,230,.008) 4px);animation:scanPulse 5s ease-in-out infinite;}
 `;
 
+/* ─── ASSETS CONFIG ─────────────────────────────────────────────────────── */
+const ASSETS = {
+  "ETH/USDT": { label:"ETH/USDT", type:"crypto", binance:"ETHUSDT", tvSymbol:"BINANCE:ETHUSDT", avTickers:"ETH",              precision:2, basePrice:3000  },
+  "BTC/USDT": { label:"BTC/USDT", type:"crypto", binance:"BTCUSDT", tvSymbol:"BINANCE:BTCUSDT", avTickers:"BTC",              precision:2, basePrice:65000 },
+  "SOL/USDT": { label:"SOL/USDT", type:"crypto", binance:"SOLUSDT", tvSymbol:"BINANCE:SOLUSDT", avTickers:"SOL",              precision:3, basePrice:150   },
+  "EUR/USD":  { label:"EUR/USD",  type:"forex",  binance:null,      tvSymbol:"FX:EURUSD",       avTickers:"FOREX:EUR,FOREX:USD", precision:5, basePrice:1.0823 },
+};
+
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
-const TAKE_PROFIT_USD = 1.20;
-const STOP_LOSS_USD   = 2.00;
-const MAX_POSITIONS   = 5;
-const UNITS           = 1000;
-const ANALYSIS_INTERVAL_MS = 28000; // 28s entre ciclos auto
+const TAKE_PROFIT_USD    = 1.20;
+const STOP_LOSS_USD      = 2.00;
+const MAX_POSITIONS      = 5;
+const POSITION_USD       = 1000;
+const ANALYSIS_INTERVAL_MS = 28000;
 
 /* ─── UTILS ─────────────────────────────────────────────────────────────── */
-const f5   = n => n.toFixed(5);
+const fP   = (n, p) => Number(n).toFixed(p);
 const fUSD = (n, sign=true) => (sign&&n>=0?"+":"")+`$${Math.abs(n).toFixed(2)}`;
-const pip  = (a,b) => Math.round((a-b)*100000);
+const fPct = n => (n>=0?"+":"")+n.toFixed(3)+"%";
 const now  = () => new Date().toLocaleTimeString("es");
 
-function genCandles(base=1.0823, n=80) {
+function posPnL(pos, price){
+  const dir = pos.type==="BUY" ? 1 : -1;
+  return dir * (price - pos.entry) / pos.entry * POSITION_USD;
+}
+
+function genCandles(base=1.0823, n=80){
   const arr=[]; let p=base;
+  const vol = base > 100 ? base*0.003 : 0.0022;
   for(let i=0;i<n;i++){
-    const d=(Math.random()-.496)*.0022;
-    const o=p, c=Math.max(1.03,Math.min(1.18,p+d));
-    arr.push({o,c,h:Math.max(o,c)+Math.random()*.0005,l:Math.min(o,c)-Math.random()*.0005});
+    const d=(Math.random()-.496)*vol;
+    const o=p, c=p+d;
+    arr.push({o,c,h:Math.max(o,c)+Math.random()*vol*.2,l:Math.min(o,c)-Math.random()*vol*.2});
     p=c;
   }
   return arr;
@@ -67,85 +81,54 @@ function calcMACD(closes){
   return{macd,signal,hist:macd-signal};
 }
 function calcBB(closes,p=20){
-  if(closes.length<p)return{upper:closes.at(-1)+.003,mid:closes.at(-1),lower:closes.at(-1)-.003};
-  const sl=closes.slice(-p),mid=sl.reduce((a,b)=>a+b,0)/p;
-  const std=Math.sqrt(sl.reduce((a,b)=>a+(b-mid)**2,0)/p);
-  return{upper:mid+2*std,mid,lower:mid-2*std};
+  const sl=closes.slice(-p);
+  const mean=sl.reduce((a,b)=>a+b,0)/sl.length;
+  const std=Math.sqrt(sl.reduce((a,b)=>a+(b-mean)**2,0)/sl.length);
+  return{upper:mean+2*std,mid:mean,lower:mean-2*std};
 }
 
-function posPnL(pos, price){
-  return (price - pos.entry) * pos.units * (pos.type==="BUY"?1:-1);
-}
+/* ─── TRADINGVIEW CHART ─────────────────────────────────────────────────── */
+function TradingViewChart({tvSymbol}){
+  const containerRef=useRef(null);
 
-/* ─── CHART ─────────────────────────────────────────────────────────────── */
-function CandleChart({candles, positions, price}){
-  const W=700,H=175;
-  if(!candles.length)return null;
-  const ps=candles.flatMap(c=>[c.h,c.l]);
-  const mn=Math.min(...ps),mx=Math.max(...ps);
-  const sy=v=>H-((v-mn)/(mx-mn||1))*H*.9-H*.05;
-  const cw=W/candles.length;
-  const bb=calcBB(candles.map(c=>c.c));
-  const tpLines=positions.map(p=>({
-    y:sy(p.type==="BUY"?p.entry+TAKE_PROFIT_USD/UNITS:p.entry-TAKE_PROFIT_USD/UNITS),
-    col:T.green,
-  }));
-  const slLines=positions.map(p=>({
-    y:sy(p.type==="BUY"?p.entry-STOP_LOSS_USD/UNITS:p.entry+STOP_LOSS_USD/UNITS),
-    col:T.red,
-  }));
+  useEffect(()=>{
+    const container=containerRef.current;
+    if(!container)return;
+    container.innerHTML="";
+
+    const widget=document.createElement("div");
+    widget.className="tradingview-widget-container__widget";
+    widget.style.height="370px";
+    widget.style.width="100%";
+    container.appendChild(widget);
+
+    const script=document.createElement("script");
+    script.type="text/javascript";
+    script.src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+    script.async=true;
+    script.innerHTML=JSON.stringify({
+      autosize:true, symbol:tvSymbol, interval:"5",
+      timezone:"America/Bogota", theme:"dark", style:"1", locale:"es",
+      withdateranges:true, hide_side_toolbar:false, allow_symbol_change:false,
+      calendar:false, support_host:"https://www.tradingview.com",
+      backgroundColor:"rgba(8,13,28,1)", gridColor:"rgba(21,32,53,0.3)",
+    });
+    container.appendChild(script);
+
+    return()=>{container.innerHTML="";};
+  },[tvSymbol]);
 
   return(
-    <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:H,display:"block"}}>
-      <defs>
-        <linearGradient id="bbfill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={T.accent} stopOpacity=".07"/>
-          <stop offset="100%" stopColor={T.accent} stopOpacity=".01"/>
-        </linearGradient>
-      </defs>
-      {[.2,.4,.6,.8].map(p=>(
-        <line key={p} x1="0" y1={H*p} x2={W} y2={H*p} stroke={T.border} strokeWidth=".5" strokeDasharray="3,6"/>
-      ))}
-      <polygon points={`0,${sy(bb.upper)} ${W},${sy(bb.upper)} ${W},${sy(bb.lower)} 0,${sy(bb.lower)}`} fill="url(#bbfill)"/>
-      <line x1="0" y1={sy(bb.upper)} x2={W} y2={sy(bb.upper)} stroke={T.accent} strokeWidth=".7" opacity=".35" strokeDasharray="4,5"/>
-      <line x1="0" y1={sy(bb.mid)}   x2={W} y2={sy(bb.mid)}   stroke={T.accent} strokeWidth=".9" opacity=".2"/>
-      <line x1="0" y1={sy(bb.lower)} x2={W} y2={sy(bb.lower)} stroke={T.accent} strokeWidth=".7" opacity=".35" strokeDasharray="4,5"/>
-      {candles.map((c,i)=>{
-        const x=i*cw+cw/2,up=c.c>=c.o,col=up?T.green:T.red;
-        const bT=sy(Math.max(c.o,c.c)),bB=sy(Math.min(c.o,c.c));
-        return(
-          <g key={i}>
-            <line x1={x} y1={sy(c.h)} x2={x} y2={sy(c.l)} stroke={col} strokeWidth=".8" opacity=".65"/>
-            <rect x={x-cw*.38} y={bT} width={cw*.76} height={Math.max(bB-bT,1)} fill={col} opacity=".85" rx=".5"/>
-          </g>
-        );
-      })}
-      {/* Entry lines */}
-      {positions.map((p,i)=>(
-        <line key={`e${i}`} x1="0" y1={sy(p.entry)} x2={W} y2={sy(p.entry)}
-          stroke={p.type==="BUY"?T.green:T.red} strokeWidth="1" strokeDasharray="5,4" opacity=".6"/>
-      ))}
-      {/* TP lines */}
-      {tpLines.map((l,i)=>(
-        <line key={`tp${i}`} x1="0" y1={l.y} x2={W} y2={l.y} stroke={T.green} strokeWidth=".6" strokeDasharray="2,6" opacity=".4"/>
-      ))}
-      {/* SL lines */}
-      {slLines.map((l,i)=>(
-        <line key={`sl${i}`} x1="0" y1={l.y} x2={W} y2={l.y} stroke={T.red} strokeWidth=".6" strokeDasharray="2,6" opacity=".4"/>
-      ))}
-      {/* Current price line */}
-      <line x1="0" y1={sy(price)} x2={W} y2={sy(price)} stroke={T.yellow} strokeWidth=".8" opacity=".5"/>
-      <rect x={W-42} y={sy(price)-7} width={42} height={13} fill={T.yellow} opacity=".15" rx="2"/>
-      <text x={W-3} y={sy(price)+4} textAnchor="end" fill={T.yellow} fontSize="7" fontFamily="IBM Plex Mono">{f5(price)}</text>
-    </svg>
+    <div ref={containerRef} className="tradingview-widget-container" style={{width:"100%",height:370}}/>
   );
 }
 
 /* ─── POSITION ROW ───────────────────────────────────────────────────────── */
-function PosRow({pos, price, onClose}){
+function PosRow({pos, price, precision, onClose}){
   const pnl=posPnL(pos,price);
   const col=pnl>=0?T.green:T.red;
   const pct=Math.min(100,Math.max(0,(pnl/TAKE_PROFIT_USD)*100));
+  const pctChange=(price-pos.entry)/pos.entry*100;
   const isBuy=pos.type==="BUY";
   return(
     <div className="fade-up" style={{background:T.card,border:`1px solid ${col}30`,borderRadius:6,padding:"8px 12px"}}>
@@ -154,17 +137,14 @@ function PosRow({pos, price, onClose}){
           <span style={{fontSize:10,fontWeight:700,color:col,background:`${col}18`,padding:"2px 8px",borderRadius:4,letterSpacing:1}}>
             {isBuy?"▲ BUY":"▼ SELL"}
           </span>
-          <span className="mono" style={{fontSize:10,color:T.muted}}>@ {f5(pos.entry)}</span>
-          <span className="mono" style={{fontSize:10,color:T.muted}}>
-            {pip(isBuy?price:pos.entry, isBuy?pos.entry:price)>0?"+":""}{pip(isBuy?price:pos.entry,isBuy?pos.entry:price)} pip
-          </span>
+          <span className="mono" style={{fontSize:10,color:T.muted}}>@ {fP(pos.entry,precision)}</span>
+          <span className="mono" style={{fontSize:10,color:pctChange>=0?T.green:T.red}}>{fPct(pctChange)}</span>
         </div>
         <div style={{display:"flex",gap:10,alignItems:"center"}}>
           <span className="mono" style={{fontSize:14,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
           <button onClick={onClose} style={{background:"transparent",border:`1px solid ${T.muted}40`,color:T.muted,borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10}}>✕</button>
         </div>
       </div>
-      {/* Progress bar toward TP */}
       <div style={{height:3,background:T.dim,borderRadius:2,overflow:"hidden"}}>
         <div style={{height:"100%",width:`${pct}%`,background:pnl>=0?T.green:T.red,borderRadius:2,transition:"width .4s ease"}}/>
       </div>
@@ -180,12 +160,16 @@ function PosRow({pos, price, onClose}){
 function Ticker({headlines}){
   if(!headlines.length)return null;
   const d=[...headlines,...headlines];
+  const total=d.length*220;
   return(
-    <div style={{overflow:"hidden",background:T.dim,borderRadius:4,padding:"5px 0"}}>
-      <div style={{display:"inline-flex",gap:48,whiteSpace:"nowrap",animation:"ticker 50s linear infinite"}}>
+    <div style={{overflow:"hidden",background:T.dim,borderRadius:6,padding:"5px 0",borderLeft:`2px solid ${T.accent}`}}>
+      <div style={{display:"flex",gap:0,animation:`ticker ${total/60}s linear infinite`,whiteSpace:"nowrap",width:"max-content"}}>
         {d.map((h,i)=>(
-          <span key={i} style={{fontSize:10,color:h.sentiment==="bullish"?T.green:h.sentiment==="bearish"?T.red:T.muted}}>
-            {h.sentiment==="bullish"?"▲":h.sentiment==="bearish"?"▼":"◆"} {h.title}
+          <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"0 20px",fontSize:9,
+            color:h.sentiment==="bullish"?T.green:h.sentiment==="bearish"?T.red:T.muted}}>
+            <span style={{opacity:.5}}>◆</span>
+            <span style={{color:h.impact==="ALTO"?T.orange:T.muted,fontSize:8,fontWeight:700}}>{h.impact}</span>
+            {h.title}
           </span>
         ))}
       </div>
@@ -193,32 +177,35 @@ function Ticker({headlines}){
   );
 }
 
-/* ─── AI CALLS ───────────────────────────────────────────────────────────── */
-async function fetchNewsAI(){
-  const r=await fetch("/api/news",{method:"POST",headers:{"Content-Type":"application/json"}});
+/* ─── API CALLS ─────────────────────────────────────────────────────────── */
+async function fetchNewsAI(symbol){
+  const r=await fetch("/api/news",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbol})});
   if(!r.ok)return{headlines:[],market_bias:"neutral",summary:"Sin noticias disponibles."};
   return r.json();
 }
 
-async function analyzeMarketAI({price,rsi,macd,bb,positions,balance,news,reason}){
+async function analyzeMarketAI({symbol,price,rsi,macd,bb,positions,balance,news,reason}){
   const r=await fetch("/api/analyze",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({price,rsi,macd,bb,positions,balance,news,reason})
+    body:JSON.stringify({symbol,price,rsi,macd,bb,positions,balance,news,reason}),
   });
   if(!r.ok)return{signal:"HOLD",confidence:40,reasoning:"Error al conectar con el servidor.",news_impact:"NEUTRAL",key_factor:"Error conexión",risk:"ALTO",should_open:false};
   return r.json();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   APP
+   MAIN COMPONENT
 ═══════════════════════════════════════════════════════════════════════════ */
 export default function TradingBot(){
-  const [candles,setCandles]     = useState(()=>genCandles(1.0823,80));
-  const [price,setPrice]         = useState(1.0823);
+  const [symbol,setSymbol]       = useState("ETH/USDT");
+  const asset                    = ASSETS[symbol];
+
+  const [candles,setCandles]     = useState(()=>genCandles(ASSETS["ETH/USDT"].basePrice,80));
+  const [price,setPrice]         = useState(ASSETS["ETH/USDT"].basePrice);
   const [rsi,setRsi]             = useState(50);
   const [macd,setMacd]           = useState({macd:0,signal:0,hist:0});
-  const [bb,setBB]               = useState({upper:1.085,mid:1.082,lower:1.079});
+  const [bb,setBB]               = useState(()=>calcBB(genCandles(ASSETS["ETH/USDT"].basePrice,80).map(c=>c.c)));
   const [positions,setPositions] = useState([]);
   const [balance,setBalance]     = useState(10000);
   const [trades,setTrades]       = useState([]);
@@ -229,25 +216,23 @@ export default function TradingBot(){
   const [autoMode,setAutoMode]   = useState(false);
   const [analyzing,setAnalyzing] = useState(false);
   const [loadingNews,setLoadingNews] = useState(false);
-  // Auto state machine
   const [autoPhase,setAutoPhase] = useState("idle");
-  // "idle" | "analyzing" | "waiting_conditions" | "monitoring" | "tp_hit_analyzing"
-  const [nextAnalysis,setNextAnalysis] = useState(null); // countdown ms
+  const [nextAnalysis,setNextAnalysis] = useState(null);
   const [closedCount,setClosedCount]   = useState(0);
   const [totalProfit,setTotalProfit]   = useState(0);
 
-  // Refs for closures
   const posRef    = useRef([]);
-  const priceRef  = useRef(1.0823);
+  const priceRef  = useRef(ASSETS["ETH/USDT"].basePrice);
   const autoRef   = useRef(false);
   const rsiRef    = useRef(50);
   const macdRef   = useRef({macd:0,signal:0,hist:0});
-  const bbRef     = useRef({upper:1.085,mid:1.082,lower:1.079});
+  const bbRef     = useRef({upper:0,mid:0,lower:0});
   const newsRef   = useRef([]);
   const balanceRef= useRef(10000);
   const timerRef  = useRef(null);
   const countRef  = useRef(null);
   const pendingAnalysisRef = useRef(false);
+  const symbolRef = useRef("ETH/USDT");
 
   useEffect(()=>{posRef.current=positions;},[positions]);
   useEffect(()=>{priceRef.current=price;},[price]);
@@ -257,43 +242,130 @@ export default function TradingBot(){
   useEffect(()=>{bbRef.current=bb;},[bb]);
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
+  useEffect(()=>{symbolRef.current=symbol;},[symbol]);
 
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
   },[]);
 
-  /* ── Tick ─────────────────────────────────────────────────────────────── */
-  useEffect(()=>{
-    const iv=setInterval(()=>{
-      setCandles(prev=>{
-        const last=prev.at(-1);
-        const d=(Math.random()-.496)*.0009;
-        const np=Math.max(1.04,Math.min(1.17,last.c+d));
-        const nc={o:last.c,c:np,h:Math.max(last.c,np)+Math.random()*.0003,l:Math.min(last.c,np)-Math.random()*.0003};
-        const updated=[...prev.slice(-79),nc];
-        const closes=updated.map(c=>c.c);
-        setPrice(np); setRsi(calcRSI(closes));
-        setMacd(calcMACD(closes)); setBB(calcBB(closes));
-        return updated;
-      });
-    },1500);
-    return()=>clearInterval(iv);
-  },[]);
+  /* ── Symbol change ───────────────────────────────────────────────────── */
+  const handleSymbolChange=useCallback((newSym)=>{
+    if(newSym===symbolRef.current)return;
+    const newAsset=ASSETS[newSym];
+    setSymbol(newSym);
+    setAutoMode(false);
+    setAutoPhase("idle");
+    setPositions([]);
+    setAiResult(null);
+    setNextAnalysis(null);
+    const initCandles=genCandles(newAsset.basePrice,80);
+    setCandles(initCandles);
+    setPrice(newAsset.basePrice);
+    priceRef.current=newAsset.basePrice;
+    const closes=initCandles.map(c=>c.c);
+    const initBB=calcBB(closes);
+    setRsi(calcRSI(closes));
+    setMacd(calcMACD(closes));
+    setBB(initBB);
+    bbRef.current=initBB;
+    addLog(`🔄 Cambiando a ${newSym}...`,"info");
+  },[addLog]);
 
-  /* ── Close position (internal) ───────────────────────────────────────── */
-  const closePosition=useCallback((posId, currentPrice, reason)=>{
+  /* ── Price tick ──────────────────────────────────────────────────────── */
+  useEffect(()=>{
+    const cur=ASSETS[symbol];
+    let iv;
+
+    if(cur.type==="crypto"){
+      const fetchPrice=async()=>{
+        try{
+          const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cur.binance}`);
+          const d=await r.json();
+          const np=parseFloat(d.price);
+          if(isNaN(np))return;
+          priceRef.current=np;
+          setPrice(np);
+          setCandles(prev=>{
+            const updated=[...prev];
+            const last={...updated[updated.length-1]};
+            last.c=np;
+            last.h=Math.max(last.h,np);
+            last.l=Math.min(last.l,np);
+            updated[updated.length-1]=last;
+            const closes=updated.map(c=>c.c);
+            const newBB=calcBB(closes);
+            setRsi(calcRSI(closes));
+            setMacd(calcMACD(closes));
+            setBB(newBB);
+            bbRef.current=newBB;
+            return updated;
+          });
+        }catch{}
+      };
+      fetchPrice();
+      iv=setInterval(fetchPrice,3000);
+    } else {
+      iv=setInterval(()=>{
+        setCandles(prev=>{
+          const last=prev.at(-1);
+          const d=(Math.random()-.496)*.0009;
+          const np=Math.max(1.04,Math.min(1.17,last.c+d));
+          const nc={o:last.c,c:np,h:Math.max(last.c,np)+Math.random()*.0003,l:Math.min(last.c,np)-Math.random()*.0003};
+          const updated=[...prev.slice(-79),nc];
+          const closes=updated.map(c=>c.c);
+          const newBB=calcBB(closes);
+          setPrice(np);
+          priceRef.current=np;
+          setRsi(calcRSI(closes));
+          setMacd(calcMACD(closes));
+          setBB(newBB);
+          bbRef.current=newBB;
+          return updated;
+        });
+      },1500);
+    }
+
+    return()=>clearInterval(iv);
+  },[symbol]);
+
+  /* ── Binance klines for indicators ──────────────────────────────────── */
+  useEffect(()=>{
+    const cur=ASSETS[symbol];
+    if(cur.type!=="crypto")return;
+    const load=async()=>{
+      try{
+        const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${cur.binance}&interval=1m&limit=80`);
+        const d=await r.json();
+        if(!Array.isArray(d))return;
+        const newCandles=d.map(k=>({o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4])}));
+        setCandles(newCandles);
+        const closes=newCandles.map(c=>c.c);
+        const newBB=calcBB(closes);
+        setRsi(calcRSI(closes));
+        setMacd(calcMACD(closes));
+        setBB(newBB);
+        bbRef.current=newBB;
+      }catch{}
+    };
+    load();
+    const iv=setInterval(load,60000);
+    return()=>clearInterval(iv);
+  },[symbol]);
+
+  /* ── Close position ──────────────────────────────────────────────────── */
+  const closePosition=useCallback((posId,currentPrice,reason)=>{
     setPositions(prev=>{
       const pos=prev.find(p=>p.id===posId);
       if(!pos)return prev;
       const pnl=posPnL(pos,currentPrice);
+      const prec=ASSETS[symbolRef.current].precision;
       const emoji=reason==="TP"?"✅":reason==="SL"?"🛑":"⬜";
-      addLog(`${emoji} ${reason} ${pos.type} @ ${f5(currentPrice)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
+      addLog(`${emoji} ${reason} ${pos.type} @ ${fP(currentPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
       setBalance(b=>{const nb=b+pnl;balanceRef.current=nb;return nb;});
-      setTrades(t=>[{...pos,exit:currentPrice,pnl,reason,time:now()},...t.slice(0,49)]);
+      setTrades(t=>[{...pos,exit:currentPrice,pnl,reason,time:now(),symbol:symbolRef.current},...t.slice(0,49)]);
       setClosedCount(c=>c+1);
       setTotalProfit(p=>p+pnl);
-      // If TP hit and auto mode → trigger post-close analysis
-      if(reason==="TP" && autoRef.current){
+      if(reason==="TP"&&autoRef.current){
         pendingAnalysisRef.current=true;
         setAutoPhase("tp_hit_analyzing");
       }
@@ -310,18 +382,19 @@ export default function TradingBot(){
     });
   },[price,closePosition]);
 
-  /* ── Core analyze function ───────────────────────────────────────────── */
+  /* ── Core analyze ────────────────────────────────────────────────────── */
   const runAnalysis=useCallback(async(reason="Ciclo automático")=>{
     if(analyzing)return;
     setAnalyzing(true);
     setAutoPhase("analyzing");
-    addLog(`🔍 Analizando: ${reason}`,  "info");
+    addLog(`🔍 Analizando ${symbolRef.current}: ${reason}`,"info");
     try{
       const result=await analyzeMarketAI({
-        price:priceRef.current, rsi:rsiRef.current,
-        macd:macdRef.current,   bb:bbRef.current,
+        symbol:symbolRef.current,
+        price:priceRef.current,  rsi:rsiRef.current,
+        macd:macdRef.current,    bb:bbRef.current,
         positions:posRef.current, balance:balanceRef.current,
-        news:newsRef.current, reason,
+        news:newsRef.current,    reason,
       });
       setAiResult(result);
       addLog(`📡 ${result.signal} (${result.confidence}%) — ${result.key_factor}`,
@@ -329,24 +402,19 @@ export default function TradingBot(){
 
       if(autoRef.current){
         const slots=MAX_POSITIONS-posRef.current.length;
-        if(result.should_open && result.signal!=="HOLD" && slots>0 && result.confidence>=60){
-          // Open one position
+        if(result.should_open&&result.signal!=="HOLD"&&slots>0&&result.confidence>=60){
           const isBuy=result.signal==="BUY";
           const cp=priceRef.current;
-          const newPos={
-            type:result.signal, entry:cp, units:UNITS,
-            id:Date.now()+Math.random(),
-          };
+          const prec=ASSETS[symbolRef.current].precision;
+          const newPos={type:result.signal,entry:cp,id:Date.now()+Math.random()};
           setPositions(p=>[...p,newPos]);
-          addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} abierta @ ${f5(cp)} | TP:+$${TAKE_PROFIT_USD} SL:-$${STOP_LOSS_USD}`,
-            isBuy?"buy":"sell");
+          addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} @ ${fP(cp,prec)} | TP:+$${TAKE_PROFIT_USD} SL:-$${STOP_LOSS_USD}`,isBuy?"buy":"sell");
           setAutoPhase("monitoring");
         } else {
-          // Conditions not met
           const why=!result.should_open?"sin confluencia clara"
             :result.confidence<60?`confianza baja (${result.confidence}%)`
             :slots===0?"slots llenos":"señal HOLD";
-          addLog(`⏸ Sin abrir posición — ${why}. Esperando siguiente ciclo.`,"info");
+          addLog(`⏸ Sin abrir — ${why}. Esperando próximo ciclo.`,"info");
           setAutoPhase("waiting_conditions");
         }
       }
@@ -365,25 +433,20 @@ export default function TradingBot(){
     if(!autoMode){setAutoPhase("idle");setNextAnalysis(null);return;}
 
     addLog("🤖 AUTO ACTIVADO — TP:+$"+TAKE_PROFIT_USD+" | SL:-$"+STOP_LOSS_USD+" | Máx "+MAX_POSITIONS+" pos","info");
-    // immediate first analysis
     runAnalysis("Inicio modo automático");
 
     let remaining=ANALYSIS_INTERVAL_MS;
     countRef.current=setInterval(()=>{
       remaining-=1000;
       setNextAnalysis(remaining);
-      if(remaining<=0) remaining=ANALYSIS_INTERVAL_MS;
+      if(remaining<=0)remaining=ANALYSIS_INTERVAL_MS;
     },1000);
 
     timerRef.current=setInterval(()=>{
       remaining=ANALYSIS_INTERVAL_MS;
       if(!autoRef.current)return;
-      // Only run if slots available and not currently analyzing
-      if(posRef.current.length<MAX_POSITIONS){
-        runAnalysis("Ciclo automático regular");
-      } else {
-        setAutoPhase("monitoring");
-      }
+      if(posRef.current.length<MAX_POSITIONS) runAnalysis("Ciclo automático regular");
+      else setAutoPhase("monitoring");
     },ANALYSIS_INTERVAL_MS);
 
     return()=>{clearInterval(timerRef.current);clearInterval(countRef.current);};
@@ -392,27 +455,27 @@ export default function TradingBot(){
   /* ── React to TP hit → re-analyze ───────────────────────────────────── */
   useEffect(()=>{
     if(!pendingAnalysisRef.current||analyzing)return;
-    if(autoRef.current && posRef.current.length<MAX_POSITIONS){
+    if(autoRef.current&&posRef.current.length<MAX_POSITIONS){
       setTimeout(()=>{
-        if(autoRef.current)
-          runAnalysis("Re-análisis post cierre TP — evaluando nueva entrada");
+        if(autoRef.current) runAnalysis("Re-análisis post TP — evaluando nueva entrada");
       },1500);
     }
   },[positions,analyzing,runAnalysis]);
 
   /* ── Load news ───────────────────────────────────────────────────────── */
-  const loadNews=useCallback(async()=>{
+  const loadNews=useCallback(async(sym)=>{
+    const target=sym||symbolRef.current;
     setLoadingNews(true);
-    addLog("📰 Obteniendo noticias EUR/USD...","info");
+    addLog(`📰 Obteniendo noticias ${target}...`,"info");
     try{
-      const d=await fetchNewsAI();
+      const d=await fetchNewsAI(target);
       setNewsData(d); setNews(d.headlines||[]);
       addLog(`📰 ${d.headlines?.length||0} noticias — Sesgo: ${(d.market_bias||"neutral").toUpperCase()}`,"info");
     }catch{addLog("❌ Error al cargar noticias","sell");}
     setLoadingNews(false);
   },[addLog]);
 
-  useEffect(()=>{loadNews();},[]);
+  useEffect(()=>{loadNews(symbol);},[symbol]);
 
   /* ── Manual close ────────────────────────────────────────────────────── */
   const manualClose=useCallback((id)=>{
@@ -427,11 +490,11 @@ export default function TradingBot(){
   const nextSec=nextAnalysis?Math.max(0,Math.round(nextAnalysis/1000)):null;
 
   const phaseInfo={
-    idle:           {label:"INACTIVO",            color:T.muted,  desc:"Activa el modo AUTO para comenzar."},
-    analyzing:      {label:"⏳ ANALIZANDO",        color:T.yellow, desc:"Consultando IA con indicadores y noticias en tiempo real..."},
-    monitoring:     {label:"📡 MONITOREANDO",      color:T.accent, desc:`Vigilando ${positions.length} posición(es). TP:+$${TAKE_PROFIT_USD} | SL:-$${STOP_LOSS_USD}`},
-    waiting_conditions:{label:"⏸ ESPERANDO",      color:T.orange, desc:`Sin condiciones favorables. Próximo análisis en ${nextSec??"-"}s`},
-    tp_hit_analyzing:{label:"✅ TP! RE-ANALIZANDO",color:T.green,  desc:"Posición cerrada con ganancia. Evaluando si abrir nueva..."},
+    idle:              {label:"INACTIVO",             color:T.muted,  desc:"Activa el modo AUTO para comenzar."},
+    analyzing:         {label:"⏳ ANALIZANDO",         color:T.yellow, desc:"Consultando IA con indicadores y noticias en tiempo real..."},
+    monitoring:        {label:"📡 MONITOREANDO",       color:T.accent, desc:`Vigilando ${positions.length} posición(es). TP:+$${TAKE_PROFIT_USD} | SL:-$${STOP_LOSS_USD}`},
+    waiting_conditions:{label:"⏸ ESPERANDO",          color:T.orange, desc:`Sin condiciones favorables. Próximo análisis en ${nextSec??"-"}s`},
+    tp_hit_analyzing:  {label:"✅ TP! RE-ANALIZANDO",  color:T.green,  desc:"Posición cerrada con ganancia. Evaluando si abrir nueva..."},
   }[autoPhase]||{label:"—",color:T.muted,desc:""};
 
   return(
@@ -443,18 +506,30 @@ export default function TradingBot(){
         {/* HEADER */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,paddingBottom:12,borderBottom:`1px solid ${T.border}`}}>
           <div>
-            <div style={{fontSize:9,color:T.muted,letterSpacing:4,textTransform:"uppercase",marginBottom:1}}>Robot Autónomo Forex</div>
-            <div style={{fontSize:24,fontWeight:900,letterSpacing:.5}}>
-              EUR<span style={{color:T.accent}}>/</span>USD
-              <span style={{fontSize:11,fontWeight:300,color:T.muted,marginLeft:8}}>Paper Trading</span>
+            <div style={{fontSize:9,color:T.muted,letterSpacing:4,textTransform:"uppercase",marginBottom:6}}>Robot Autónomo de Trading</div>
+            {/* PAIR SELECTOR */}
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {Object.keys(ASSETS).map(s=>(
+                <button key={s} onClick={()=>handleSymbolChange(s)}
+                  style={{
+                    background:symbol===s?`${T.accent}20`:"transparent",
+                    border:`1px solid ${symbol===s?T.accent:T.border}`,
+                    color:symbol===s?T.accent:T.muted,
+                    borderRadius:6, padding:"5px 14px", cursor:"pointer",
+                    fontSize:12, fontWeight:symbol===s?700:400, letterSpacing:.5,
+                  }}>
+                  {ASSETS[s].type==="crypto"?"◈":"€"} {s}
+                </button>
+              ))}
             </div>
           </div>
           <div style={{textAlign:"right"}}>
-            <div style={{fontSize:11,display:"flex",alignItems:"center",gap:5,justifyContent:"flex-end"}}>
+            <div style={{fontSize:11,display:"flex",alignItems:"center",gap:5,justifyContent:"flex-end",marginBottom:2}}>
               <span style={{width:7,height:7,borderRadius:"50%",background:T.green,display:"inline-block",animation:"pulse 1.4s ease-in-out infinite"}}/>
-              <span style={{color:T.green}}>EN VIVO SIMULADO</span>
+              <span style={{color:T.green}}>{asset.type==="crypto"?"EN VIVO • BINANCE":"SIMULADO"}</span>
             </div>
-            <div className="mono" style={{fontSize:24,fontWeight:700,color:T.accent,marginTop:2}}>{f5(price)}</div>
+            <div className="mono" style={{fontSize:26,fontWeight:700,color:T.accent}}>{fP(price,asset.precision)}</div>
+            <div style={{fontSize:10,color:T.muted,marginTop:1}}>{symbol} · Paper Trading</div>
           </div>
         </div>
 
@@ -482,9 +557,9 @@ export default function TradingBot(){
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:10}}>
           {[
             {l:"RSI (14)",  v:rsi.toFixed(1),        c:rsi<30?T.green:rsi>70?T.red:T.yellow, s:rsi<30?"SOBREVENTA":rsi>70?"SOBRECOMPRA":"NEUTRAL"},
-            {l:"MACD HIST", v:macd.hist.toFixed(5),  c:macd.hist>0?T.green:T.red,             s:macd.hist>0?"ALCISTA":"BAJISTA"},
-            {l:"BB UPPER",  v:f5(bb.upper),           c:price>bb.upper?T.red:T.muted,          s:price>bb.upper?"⚠ SOBRE BANDA":"normal"},
-            {l:"BB LOWER",  v:f5(bb.lower),           c:price<bb.lower?T.green:T.muted,        s:price<bb.lower?"⚠ BAJO BANDA":"normal"},
+            {l:"MACD HIST", v:macd.hist.toFixed(asset.precision>3?5:2), c:macd.hist>0?T.green:T.red, s:macd.hist>0?"ALCISTA":"BAJISTA"},
+            {l:"BB UPPER",  v:fP(bb.upper,asset.precision), c:price>bb.upper?T.red:T.muted, s:price>bb.upper?"⚠ SOBRE BANDA":"normal"},
+            {l:"BB LOWER",  v:fP(bb.lower,asset.precision), c:price<bb.lower?T.green:T.muted, s:price<bb.lower?"⚠ BAJO BANDA":"normal"},
           ].map(({l,v,c,s})=>(
             <div key={l} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:6,padding:"8px 12px"}}>
               <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:2}}>{l}</div>
@@ -494,17 +569,13 @@ export default function TradingBot(){
           ))}
         </div>
 
-        {/* CHART */}
+        {/* CHART — TradingView */}
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>GRÁFICA VELAS • BB • NIVELES TP/SL</span>
-            <div style={{display:"flex",gap:12,fontSize:8}}>
-              <span style={{color:T.green}}>— entrada / TP</span>
-              <span style={{color:T.red}}>— SL</span>
-              <span style={{color:T.yellow}}>— precio actual</span>
-            </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>GRÁFICA EN VIVO • TRADINGVIEW • {symbol}</span>
+            <span style={{fontSize:8,color:T.accent}}>Intervalo 5m</span>
           </div>
-          <CandleChart candles={candles} positions={positions} price={price}/>
+          <TradingViewChart tvSymbol={asset.tvSymbol}/>
         </div>
 
         {/* POSITIONS */}
@@ -512,7 +583,7 @@ export default function TradingBot(){
           <div style={{marginBottom:10}}>
             <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:6}}>POSICIONES ABIERTAS — TP +${TAKE_PROFIT_USD} | SL -${STOP_LOSS_USD}</div>
             <div style={{display:"flex",flexDirection:"column",gap:5}}>
-              {positions.map(pos=><PosRow key={pos.id} pos={pos} price={price} onClose={()=>manualClose(pos.id)}/>)}
+              {positions.map(pos=><PosRow key={pos.id} pos={pos} price={price} precision={asset.precision} onClose={()=>manualClose(pos.id)}/>)}
             </div>
           </div>
         )}
@@ -532,7 +603,6 @@ export default function TradingBot(){
                 </div>
               )}
             </div>
-            {/* Slot indicators */}
             <div style={{display:"flex",gap:5,marginTop:8}}>
               {Array.from({length:MAX_POSITIONS},(_,i)=>{
                 const pos=positions[i];
@@ -561,7 +631,7 @@ export default function TradingBot(){
           <div className="fade-up" style={{background:T.card,border:`1px solid ${sigCol}40`,borderRadius:8,padding:"12px 16px",marginBottom:10}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
               <div>
-                <div style={{fontSize:8,color:T.muted,letterSpacing:3,marginBottom:3}}>ÚLTIMO ANÁLISIS IA</div>
+                <div style={{fontSize:8,color:T.muted,letterSpacing:3,marginBottom:3}}>ÚLTIMO ANÁLISIS IA · {symbol}</div>
                 <div style={{fontSize:28,fontWeight:900,letterSpacing:3,color:sigCol}}>{aiResult.signal}</div>
                 <div style={{fontSize:9,color:T.muted,marginTop:2}}>
                   Confianza <span style={{color:sigCol,fontWeight:700}}>{aiResult.confidence}%</span>
@@ -578,12 +648,11 @@ export default function TradingBot(){
             <div style={{background:T.dim,borderRadius:5,padding:"9px 12px",fontSize:11,color:T.text,lineHeight:1.65,borderLeft:`3px solid ${sigCol}`}}>
               {aiResult.reasoning}
             </div>
-            {/* Manual execute button */}
             {!autoMode&&aiResult.signal!=="HOLD"&&positions.length<MAX_POSITIONS&&(
               <button onClick={()=>{
-                const pos={type:aiResult.signal,entry:priceRef.current,units:UNITS,id:Date.now()};
+                const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now()};
                 setPositions(p=>[...p,pos]);
-                addLog(`${aiResult.signal==="BUY"?"🟢":"🔴"} ${aiResult.signal} manual @ ${f5(priceRef.current)}`,aiResult.signal==="BUY"?"buy":"sell");
+                addLog(`${aiResult.signal==="BUY"?"🟢":"🔴"} ${aiResult.signal} manual @ ${fP(priceRef.current,asset.precision)}`,aiResult.signal==="BUY"?"buy":"sell");
               }} style={{marginTop:10,width:"100%",background:`${sigCol}18`,border:`1px solid ${sigCol}`,
                 color:sigCol,borderRadius:7,padding:"9px",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1}}>
                 ▶ EJECUTAR {aiResult.signal} MANUALMENTE (pos {positions.length+1}/{MAX_POSITIONS})
@@ -604,7 +673,7 @@ export default function TradingBot(){
               color:autoMode?T.green:T.muted,borderRadius:8,padding:"11px 8px",cursor:"pointer",fontSize:12,fontWeight:700}}>
             {autoMode?"🟢 AUTO ON":"⚪ AUTO OFF"}
           </button>
-          <button onClick={loadNews} disabled={loadingNews}
+          <button onClick={()=>loadNews(symbol)} disabled={loadingNews}
             style={{background:loadingNews?T.dim:`${T.yellow}10`,border:`1px solid ${loadingNews?T.border:T.yellow}`,
               color:loadingNews?T.muted:T.yellow,borderRadius:8,padding:"11px 8px",cursor:loadingNews?"not-allowed":"pointer",fontSize:12,fontWeight:700}}>
             {loadingNews?"⏳ Cargando...":"📰 Actualizar Noticias"}
@@ -615,7 +684,7 @@ export default function TradingBot(){
         {newsData&&(
           <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}>
-              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>NOTICIAS EN VIVO</span>
+              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>NOTICIAS EN VIVO · {symbol}</span>
               <span style={{fontSize:9,fontWeight:700,
                 color:newsData.market_bias==="bullish"?T.green:newsData.market_bias==="bearish"?T.red:T.muted,
                 background:`${newsData.market_bias==="bullish"?T.green:newsData.market_bias==="bearish"?T.red:T.muted}18`,
@@ -661,23 +730,27 @@ export default function TradingBot(){
           <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:12}}>
             <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:5}}>HISTORIAL ({trades.length} operaciones)</div>
             <div style={{display:"flex",flexDirection:"column",gap:3}}>
-              {trades.slice(0,10).map((t,i)=>(
-                <div key={i} style={{display:"flex",gap:8,fontSize:9,padding:"3px 0",borderBottom:`1px solid ${T.border}25`,alignItems:"center"}}>
-                  <span style={{color:t.type==="BUY"?T.green:T.red,minWidth:28,fontWeight:700}}>{t.type}</span>
-                  <span className="mono" style={{color:T.muted}}>{f5(t.entry)}→{f5(t.exit)}</span>
-                  <span style={{fontSize:8,color:t.reason==="TP"?T.green:t.reason==="SL"?T.red:T.muted,
-                    background:`${t.reason==="TP"?T.green:t.reason==="SL"?T.red:T.muted}15`,
-                    padding:"1px 5px",borderRadius:3}}>{t.reason}</span>
-                  <span className="mono" style={{color:t.pnl>=0?T.green:T.red,marginLeft:"auto",fontWeight:700}}>{fUSD(t.pnl)}</span>
-                </div>
-              ))}
+              {trades.slice(0,10).map((t,i)=>{
+                const prec=ASSETS[t.symbol]?.precision||5;
+                return(
+                  <div key={i} style={{display:"flex",gap:8,fontSize:9,padding:"3px 0",borderBottom:`1px solid ${T.border}25`,alignItems:"center"}}>
+                    <span style={{color:t.symbol?T.accent:T.muted,fontSize:8,minWidth:55}}>{t.symbol||symbol}</span>
+                    <span style={{color:t.type==="BUY"?T.green:T.red,minWidth:28,fontWeight:700}}>{t.type}</span>
+                    <span className="mono" style={{color:T.muted}}>{fP(t.entry,prec)}→{fP(t.exit,prec)}</span>
+                    <span style={{fontSize:8,color:t.reason==="TP"?T.green:t.reason==="SL"?T.red:T.muted,
+                      background:`${t.reason==="TP"?T.green:t.reason==="SL"?T.red:T.muted}15`,
+                      padding:"1px 5px",borderRadius:3}}>{t.reason}</span>
+                    <span className="mono" style={{color:t.pnl>=0?T.green:T.red,marginLeft:"auto",fontWeight:700}}>{fUSD(t.pnl)}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
 
         {/* DISCLAIMER */}
         <div style={{fontSize:8,color:T.muted,textAlign:"center",lineHeight:1.9,paddingTop:8,borderTop:`1px solid ${T.border}`}}>
-          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Noticias en tiempo real vía búsqueda web · TP +$1.20 · SL -$2.00<br/>
+          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Precios crypto en vivo vía Binance · Gráficas via TradingView · TP +$1.20 · SL -$2.00<br/>
           Las señales son educativas y no garantizan resultados en mercados reales. Opera siempre con responsabilidad.
         </div>
 
