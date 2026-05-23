@@ -178,6 +178,56 @@ function detectPatterns(candles){
       results.push({name:"Bearish Flag", signal:"BEARISH", type:"CONTINUATION", conf:70, emoji:"⚐"});
   }
 
+  // ── Slope helper
+  const slope=(p1,p2)=>(p2.price-p1.price)/(p2.idx-p1.idx||1);
+
+  // ── Rising Wedge: ambas líneas suben, superior más empinada (BEARISH)
+  if(highs.length>=2 && lows.length>=2){
+    const [h1,h2]=highs.slice(-2), [l1,l2]=lows.slice(-2);
+    const sH=slope(h1,h2), sL=slope(l1,l2);
+    if(sH>0 && sL>0 && sH>sL*1.1)  // ambas suben, highs más rápido → convergiendo
+      results.push({name:"Rising Wedge", signal:"BEARISH", type:"REVERSAL", conf:71, emoji:"↗⚠"});
+  }
+
+  // ── Falling Wedge: ambas líneas bajan, superior más empinada (BULLISH)
+  if(highs.length>=2 && lows.length>=2){
+    const [h1,h2]=highs.slice(-2), [l1,l2]=lows.slice(-2);
+    const sH=slope(h1,h2), sL=slope(l1,l2);
+    if(sH<0 && sL<0 && Math.abs(sH)>Math.abs(sL)*1.1)  // ambas bajan, highs más rápido → convergiendo
+      results.push({name:"Falling Wedge", signal:"BULLISH", type:"REVERSAL", conf:71, emoji:"↘✓"});
+  }
+
+  // ── Rectangle: líneas paralelas y planas (oscilación entre soporte y resistencia)
+  if(highs.length>=2 && lows.length>=2){
+    const [h1,h2]=highs.slice(-2), [l1,l2]=lows.slice(-2);
+    const sH=slope(h1,h2), sL=slope(l1,l2);
+    const bothFlat=Math.abs(sH)<0.0005 && Math.abs(sL)<0.0005;
+    const parallel=Math.abs(sH-sL)<0.0003;
+    if(bothFlat && parallel){
+      // Determinar dirección del movimiento previo
+      const prevChg=(recent.at(-1).c-recent[0].c)/recent[0].c;
+      if(prevChg>0.01)
+        results.push({name:"Bullish Rectangle", signal:"BULLISH", type:"CONTINUATION", conf:65, emoji:"▬↑"});
+      else if(prevChg<-0.01)
+        results.push({name:"Bearish Rectangle", signal:"BEARISH", type:"CONTINUATION", conf:65, emoji:"▬↓"});
+    }
+  }
+
+  // ── Pennant: triángulo simétrico tras movimiento fuerte (highs bajan, lows suben)
+  if(highs.length>=2 && lows.length>=2 && recent.length>=20){
+    const [h1,h2]=highs.slice(-2), [l1,l2]=lows.slice(-2);
+    const sH=slope(h1,h2), sL=slope(l1,l2);
+    const converging=sH<0 && sL>0 && Math.abs(Math.abs(sH)-Math.abs(sL))/Math.abs(sH)<0.5;
+    if(converging){
+      const pole=recent.slice(0,15);
+      const poleChg=(pole.at(-1).c-pole[0].c)/pole[0].c;
+      if(poleChg>0.012)
+        results.push({name:"Bullish Pennant", signal:"BULLISH", type:"CONTINUATION", conf:69, emoji:"⊿↑"});
+      else if(poleChg<-0.012)
+        results.push({name:"Bearish Pennant", signal:"BEARISH", type:"CONTINUATION", conf:69, emoji:"⊿↓"});
+    }
+  }
+
   return results;
 }
 
