@@ -115,7 +115,8 @@ function detectPatterns(candles){
     const diff=Math.abs(l1.price-l2.price)/l1.price;
     const gap=l2.idx-l1.idx;
     if(diff<tol && gap>=5 && gap<=45)
-      results.push({name:"Double Bottom", signal:"BULLISH", type:"REVERSAL", conf:72, emoji:"W"});
+      results.push({name:"Double Bottom", signal:"BULLISH", type:"REVERSAL", conf:72, emoji:"W",
+        desc:"Dos mínimos similares: el precio rebotó dos veces en soporte → probable subida."});
   }
 
   // ── Double Top (BEARISH REVERSAL)
@@ -124,7 +125,8 @@ function detectPatterns(candles){
     const diff=Math.abs(h1.price-h2.price)/h1.price;
     const gap=h2.idx-h1.idx;
     if(diff<tol && gap>=5 && gap<=45)
-      results.push({name:"Double Top", signal:"BEARISH", type:"REVERSAL", conf:72, emoji:"M"});
+      results.push({name:"Double Top", signal:"BEARISH", type:"REVERSAL", conf:72, emoji:"M",
+        desc:"Dos máximos similares: el precio rechazó la resistencia dos veces → probable bajada."});
   }
 
   // ── Head & Shoulders (BEARISH REVERSAL)
@@ -132,7 +134,8 @@ function detectPatterns(candles){
     const [h1,h2,h3]=highs.slice(-3);
     const shoulderDiff=Math.abs(h1.price-h3.price)/h1.price;
     if(shoulderDiff<tol && h2.price>h1.price*1.01 && h2.price>h3.price*1.01)
-      results.push({name:"Head & Shoulders", signal:"BEARISH", type:"REVERSAL", conf:76, emoji:"∩"});
+      results.push({name:"Head & Shoulders", signal:"BEARISH", type:"REVERSAL", conf:76, emoji:"∩",
+        desc:"Tres picos: hombro-cabeza-hombro. El del medio es más alto → techo de mercado, señal bajista."});
   }
 
   // ── Inverse Head & Shoulders (BULLISH REVERSAL)
@@ -140,7 +143,8 @@ function detectPatterns(candles){
     const [l1,l2,l3]=lows.slice(-3);
     const shoulderDiff=Math.abs(l1.price-l3.price)/l1.price;
     if(shoulderDiff<tol && l2.price<l1.price*0.99 && l2.price<l3.price*0.99)
-      results.push({name:"Inv. Head & Shoulders", signal:"BULLISH", type:"REVERSAL", conf:76, emoji:"∪"});
+      results.push({name:"Inv. Head & Shoulders", signal:"BULLISH", type:"REVERSAL", conf:76, emoji:"∪",
+        desc:"Tres valles: el del medio es más bajo → suelo de mercado, señal alcista clásica."});
   }
 
   // ── Ascending Triangle (BULLISH CONTINUATION)
@@ -148,7 +152,8 @@ function detectPatterns(candles){
     const [h1,h2]=highs.slice(-2);
     const [l1,l2]=lows.slice(-2);
     if(Math.abs(h1.price-h2.price)/h1.price<0.015 && l2.price>l1.price*1.005)
-      results.push({name:"Ascending Triangle", signal:"BULLISH", type:"CONTINUATION", conf:68, emoji:"△"});
+      results.push({name:"Ascending Triangle", signal:"BULLISH", type:"CONTINUATION", conf:68, emoji:"△",
+        desc:"Resistencia plana + mínimos subiendo → acumulación compradora, ruptura alcista esperada."});
   }
 
   // ── Descending Triangle (BEARISH CONTINUATION)
@@ -156,7 +161,8 @@ function detectPatterns(candles){
     const [h1,h2]=highs.slice(-2);
     const [l1,l2]=lows.slice(-2);
     if(Math.abs(l1.price-l2.price)/l1.price<0.015 && h2.price<h1.price*0.995)
-      results.push({name:"Descending Triangle", signal:"BEARISH", type:"CONTINUATION", conf:68, emoji:"▽"});
+      results.push({name:"Descending Triangle", signal:"BEARISH", type:"CONTINUATION", conf:68, emoji:"▽",
+        desc:"Soporte plano + máximos bajando → presión vendedora, ruptura bajista esperada."});
   }
 
   // ── Symmetrical Triangle (NEUTRAL → esperar ruptura)
@@ -164,7 +170,8 @@ function detectPatterns(candles){
     const [h1,h2]=highs.slice(-2);
     const [l1,l2]=lows.slice(-2);
     if(h2.price<h1.price*0.995 && l2.price>l1.price*1.005)
-      results.push({name:"Symmetrical Triangle", signal:"NEUTRAL", type:"CONTINUATION", conf:60, emoji:"◇"});
+      results.push({name:"Symmetrical Triangle", signal:"NEUTRAL", type:"BILATERAL", conf:60, emoji:"◇",
+        desc:"Máximos bajando y mínimos subiendo: precio comprimido → esperar ruptura en cualquier dirección."});
   }
 
   // ── Bullish Flag (BULLISH CONTINUATION)
@@ -173,9 +180,11 @@ function detectPatterns(candles){
     const poleChg=(pole.at(-1).c-pole[0].c)/pole[0].c;
     const flagChg=(flag.at(-1).c-flag[0].c)/flag[0].c;
     if(poleChg>0.015 && flagChg<0 && Math.abs(flagChg)<poleChg*0.5)
-      results.push({name:"Bullish Flag", signal:"BULLISH", type:"CONTINUATION", conf:70, emoji:"⚑"});
+      results.push({name:"Bullish Flag", signal:"BULLISH", type:"CONTINUATION", conf:70, emoji:"⚑",
+        desc:"Fuerte subida (asta) + pequeña corrección bajista → pausa antes de continuar al alza."});
     if(poleChg<-0.015 && flagChg>0 && Math.abs(flagChg)<Math.abs(poleChg)*0.5)
-      results.push({name:"Bearish Flag", signal:"BEARISH", type:"CONTINUATION", conf:70, emoji:"⚐"});
+      results.push({name:"Bearish Flag", signal:"BEARISH", type:"CONTINUATION", conf:70, emoji:"⚐",
+        desc:"Fuerte bajada (asta) + pequeño rebote → pausa antes de continuar a la baja."});
   }
 
   // ── Slope helper
@@ -185,16 +194,18 @@ function detectPatterns(candles){
   if(highs.length>=2 && lows.length>=2){
     const [h1,h2]=highs.slice(-2), [l1,l2]=lows.slice(-2);
     const sH=slope(h1,h2), sL=slope(l1,l2);
-    if(sH>0 && sL>0 && sH>sL*1.1)  // ambas suben, highs más rápido → convergiendo
-      results.push({name:"Rising Wedge", signal:"BEARISH", type:"REVERSAL", conf:71, emoji:"↗⚠"});
+    if(sH>0 && sL>0 && sH>sL*1.1)
+      results.push({name:"Rising Wedge", signal:"BEARISH", type:"REVERSAL", conf:71, emoji:"↗⚠",
+        desc:"Ambas líneas suben pero convergen: el impulso alcista se agota → probable caída."});
   }
 
   // ── Falling Wedge: ambas líneas bajan, superior más empinada (BULLISH)
   if(highs.length>=2 && lows.length>=2){
     const [h1,h2]=highs.slice(-2), [l1,l2]=lows.slice(-2);
     const sH=slope(h1,h2), sL=slope(l1,l2);
-    if(sH<0 && sL<0 && Math.abs(sH)>Math.abs(sL)*1.1)  // ambas bajan, highs más rápido → convergiendo
-      results.push({name:"Falling Wedge", signal:"BULLISH", type:"REVERSAL", conf:71, emoji:"↘✓"});
+    if(sH<0 && sL<0 && Math.abs(sH)>Math.abs(sL)*1.1)
+      results.push({name:"Falling Wedge", signal:"BULLISH", type:"REVERSAL", conf:71, emoji:"↘✓",
+        desc:"Ambas líneas bajan pero convergen: la presión vendedora se agota → probable subida."});
   }
 
   // ── Rectangle: líneas paralelas y planas (oscilación entre soporte y resistencia)
@@ -204,12 +215,13 @@ function detectPatterns(candles){
     const bothFlat=Math.abs(sH)<0.0005 && Math.abs(sL)<0.0005;
     const parallel=Math.abs(sH-sL)<0.0003;
     if(bothFlat && parallel){
-      // Determinar dirección del movimiento previo
       const prevChg=(recent.at(-1).c-recent[0].c)/recent[0].c;
       if(prevChg>0.01)
-        results.push({name:"Bullish Rectangle", signal:"BULLISH", type:"CONTINUATION", conf:65, emoji:"▬↑"});
+        results.push({name:"Bullish Rectangle", signal:"BULLISH", type:"CONTINUATION", conf:65, emoji:"▬↑",
+          desc:"Precio oscila entre soporte y resistencia planos en tendencia alcista → ruptura al alza."});
       else if(prevChg<-0.01)
-        results.push({name:"Bearish Rectangle", signal:"BEARISH", type:"CONTINUATION", conf:65, emoji:"▬↓"});
+        results.push({name:"Bearish Rectangle", signal:"BEARISH", type:"CONTINUATION", conf:65, emoji:"▬↓",
+          desc:"Precio oscila entre soporte y resistencia planos en tendencia bajista → ruptura a la baja."});
     }
   }
 
@@ -222,9 +234,11 @@ function detectPatterns(candles){
       const pole=recent.slice(0,15);
       const poleChg=(pole.at(-1).c-pole[0].c)/pole[0].c;
       if(poleChg>0.012)
-        results.push({name:"Bullish Pennant", signal:"BULLISH", type:"CONTINUATION", conf:69, emoji:"⊿↑"});
+        results.push({name:"Bullish Pennant", signal:"BULLISH", type:"CONTINUATION", conf:69, emoji:"⊿↑",
+          desc:"Fuerte movimiento alcista + triángulo simétrico → consolidación breve antes de continuar al alza."});
       else if(poleChg<-0.012)
-        results.push({name:"Bearish Pennant", signal:"BEARISH", type:"CONTINUATION", conf:69, emoji:"⊿↓"});
+        results.push({name:"Bearish Pennant", signal:"BEARISH", type:"CONTINUATION", conf:69, emoji:"⊿↓",
+          desc:"Fuerte movimiento bajista + triángulo simétrico → consolidación breve antes de continuar a la baja."});
     }
   }
 
@@ -942,17 +956,21 @@ export default function TradingBot(){
           {patterns.length===0?(
             <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>Sin patrones claros detectados en este momento.</div>
           ):(
-            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
               {patterns.map((p,i)=>{
                 const col=p.signal==="BULLISH"?T.green:p.signal==="BEARISH"?T.red:T.yellow;
+                const typeCol=p.type==="REVERSAL"?T.orange:p.type==="BILATERAL"?T.yellow:T.accent;
                 return(
-                  <div key={i} style={{background:`${col}12`,border:`1px solid ${col}40`,borderRadius:6,padding:"6px 12px",display:"flex",gap:8,alignItems:"center"}}>
-                    <span style={{fontSize:14,color:col}}>{p.emoji}</span>
-                    <div>
-                      <div style={{fontSize:11,fontWeight:700,color:col}}>{p.name}</div>
-                      <div style={{fontSize:8,color:T.muted}}>
-                        {p.type} · {p.signal} · {p.conf}% confianza
+                  <div key={i} style={{background:`${col}0c`,border:`1px solid ${col}35`,borderRadius:7,padding:"8px 14px",display:"flex",gap:12,alignItems:"flex-start"}}>
+                    <span style={{fontSize:18,color:col,minWidth:24,textAlign:"center",marginTop:2}}>{p.emoji}</span>
+                    <div style={{flex:1}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                        <span style={{fontSize:12,fontWeight:700,color:col}}>{p.name}</span>
+                        <span style={{fontSize:7,fontWeight:700,color:typeCol,background:`${typeCol}18`,padding:"1px 6px",borderRadius:3,letterSpacing:1}}>{p.type}</span>
+                        <span style={{fontSize:7,fontWeight:700,color:col,background:`${col}18`,padding:"1px 6px",borderRadius:3,letterSpacing:1}}>{p.signal}</span>
+                        <span style={{fontSize:7,color:T.muted,marginLeft:"auto"}}>{p.conf}% confianza</span>
                       </div>
+                      <div style={{fontSize:10,color:T.text,lineHeight:1.5,opacity:.8}}>{p.desc}</div>
                     </div>
                   </div>
                 );
