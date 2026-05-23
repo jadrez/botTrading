@@ -1,7 +1,7 @@
 const TICKER_MAP = {
-  "ETH/USDT": "ETH",
-  "BTC/USDT": "BTC",
-  "SOL/USDT": "SOL",
+  "ETH/USDT": "CRYPTO:ETH",
+  "BTC/USDT": "CRYPTO:BTC",
+  "SOL/USDT": "CRYPTO:SOL",
   "EUR/USD":  "FOREX:EUR,FOREX:USD",
 };
 
@@ -12,17 +12,20 @@ export default async function handler(req, res) {
   if (!apiKey) return res.status(500).json({ error: "ALPHA_VANTAGE_KEY not set" });
 
   const { symbol = "ETH/USDT" } = req.body || {};
-  const tickers = TICKER_MAP[symbol] || "ETH";
-  const isForex = symbol === "EUR/USD";
+  const tickers = TICKER_MAP[symbol] || "CRYPTO:ETH";
 
   try {
-    const topics = isForex ? "forex,economy_macro" : "blockchain,technology,earnings";
-    const url = `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=${tickers}&topics=${topics}&sort=LATEST&limit=10&apikey=${apiKey}`;
+    const url = `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=${tickers}&sort=LATEST&limit=10&apikey=${apiKey}`;
     const r = await fetch(url);
     const d = await r.json();
 
+    // Return raw response in debug field so we can inspect if needed
     if (d.Note || d.Information) {
-      return res.status(200).json({ headlines: [], market_bias: "neutral", summary: "Límite de solicitudes alcanzado. Intenta en unos minutos." });
+      return res.status(200).json({
+        headlines: [], market_bias: "neutral",
+        summary: "Límite de solicitudes alcanzado. Intenta en unos minutos.",
+        _debug: d.Note || d.Information,
+      });
     }
 
     const feed = d.feed || [];
@@ -52,7 +55,7 @@ export default async function handler(req, res) {
     const market_bias = avg > 0.1 ? "bullish" : avg < -0.1 ? "bearish" : "neutral";
     const summary = `${headlines.length} noticias recientes de ${symbol}. Sentimiento: ${market_bias.toUpperCase()}. Fuente: Alpha Vantage.`;
 
-    return res.status(200).json({ headlines, market_bias, summary });
+    return res.status(200).json({ headlines, market_bias, summary, _total: d.items });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
