@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createChart, LineStyle, CrosshairMode } from "lightweight-charts";
 
 /* ─── THEME ─────────────────────────────────────────────────────────────── */
 const T = {
@@ -58,10 +59,17 @@ function posPnL(pos, price){
 function genCandles(base=1.0823, n=80){
   const arr=[]; let p=base;
   const vol = base > 100 ? base*0.003 : 0.0022;
+  const nowSec = Math.floor(Date.now()/1000);
   for(let i=0;i<n;i++){
     const d=(Math.random()-.496)*vol;
     const o=p, c=p+d;
-    arr.push({o,c,h:Math.max(o,c)+Math.random()*vol*.2,l:Math.min(o,c)-Math.random()*vol*.2});
+    arr.push({
+      time: nowSec - (n-i)*60,
+      o, c,
+      h:Math.max(o,c)+Math.random()*vol*.2,
+      l:Math.min(o,c)-Math.random()*vol*.2,
+      v: Math.random()*1000+200,
+    });
     p=c;
   }
   return arr;
@@ -257,81 +265,263 @@ function calcTrend1h(closes){
   return(closes.at(-1)-ago)/ago*100;
 }
 
-/* ─── TRADINGVIEW CHART ─────────────────────────────────────────────────── */
-function TradingViewChart({tvSymbol}){
-  const containerRef=useRef(null);
+/* ─── LIGHTWEIGHT CHART ─────────────────────────────────────────────────── */
+function LWChart({ candles, positions, trades, symbol, precision }){
+  const mainRef  = useRef(null);
+  const rsiRef   = useRef(null);
+  const macdRef  = useRef(null);
+  const charts   = useRef({});   // {main, rsi, macd}
+  const series   = useRef({});   // all series refs
+  const posLines = useRef([]);
+  const [legend, setLegend] = useState(null);
 
+  /* ── init charts ── */
   useEffect(()=>{
-    const container=containerRef.current;
-    if(!container)return;
-    container.innerHTML="";
+    if(!mainRef.current||!rsiRef.current||!macdRef.current) return;
 
-    const widget=document.createElement("div");
-    widget.className="tradingview-widget-container__widget";
-    widget.style.height="100%";
-    widget.style.width="100%";
-    container.appendChild(widget);
+    const base={
+      layout:{ background:{color:"#04060f"}, textColor:"#4a6080" },
+      grid:{ vertLines:{color:"#0d1a2d"}, horzLines:{color:"#0d1a2d"} },
+      rightPriceScale:{ borderColor:"#152035" },
+      handleScroll:true, handleScale:true,
+    };
 
-    const script=document.createElement("script");
-    script.type="text/javascript";
-    script.src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
-    script.async=true;
-    script.innerHTML=JSON.stringify({
-      autosize:true,
-      symbol:tvSymbol,
-      interval:"5",
-      timezone:"America/Bogota",
-      theme:"dark",
-      style:"1",
-      locale:"es",
-      withdateranges:true,
-      range:"1D",
-      hide_side_toolbar:false,
-      allow_symbol_change:false,
-      save_image:true,
-      calendar:false,
-      hide_top_toolbar:false,
-      hide_legend:false,
-      support_host:"https://www.tradingview.com",
-      backgroundColor:"rgba(8,13,28,1)",
-      gridColor:"rgba(21,32,53,0.25)",
-      studies:[
-        "STD;RSI",
-        "STD;MACD",
-        "STD;Bollinger_Bands",
-        "STD;Volume",
-        "STD;EMA",
-      ],
-      studies_overrides:{
-        "bollinger bands.upper.color":"#00b8e6",
-        "bollinger bands.lower.color":"#00b8e6",
-        "bollinger bands.median.color":"#344d70",
-        "macd.histogram.color.0":"#00e676",
-        "macd.histogram.color.1":"#ff1744",
-        "volume.volume.color.0":"#ff174460",
-        "volume.volume.color.1":"#00e67660",
+    // ── MAIN chart
+    const main=createChart(mainRef.current,{
+      ...base,
+      crosshair:{ mode:CrosshairMode.Normal,
+        vertLine:{color:"#00b8e650",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#00b8e6"},
+        horzLine:{color:"#00b8e650",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#00b8e6"},
       },
-      overrides:{
-        "mainSeriesProperties.candleStyle.upColor":"#00e676",
-        "mainSeriesProperties.candleStyle.downColor":"#ff1744",
-        "mainSeriesProperties.candleStyle.borderUpColor":"#00e676",
-        "mainSeriesProperties.candleStyle.borderDownColor":"#ff1744",
-        "mainSeriesProperties.candleStyle.wickUpColor":"#00e676",
-        "mainSeriesProperties.candleStyle.wickDownColor":"#ff1744",
-        "paneProperties.background":"#04060f",
-        "paneProperties.backgroundType":"solid",
-        "paneProperties.gridLinesMode":"both",
-        "scalesProperties.textColor":"#344d70",
-        "scalesProperties.lineColor":"#152035",
-      },
+      timeScale:{ borderColor:"#152035", timeVisible:true, secondsVisible:false, fixLeftEdge:true },
+      watermark:{ visible:true, text:symbol, fontSize:40, color:"rgba(0,184,230,0.03)", horzAlign:"left", vertAlign:"top" },
     });
-    container.appendChild(script);
 
-    return()=>{container.innerHTML="";};
-  },[tvSymbol]);
+    const cs=main.addCandlestickSeries({
+      upColor:"#00e676", downColor:"#ff1744",
+      borderUpColor:"#00e676", borderDownColor:"#ff1744",
+      wickUpColor:"#00e676cc", wickDownColor:"#ff1744cc",
+    });
+    const vs=main.addHistogramSeries({
+      priceFormat:{type:"volume"}, priceScaleId:"vol",
+    });
+    main.priceScale("vol").applyOptions({ scaleMargins:{top:0.82,bottom:0} });
 
+    const e9s=main.addLineSeries({ color:"#00b8e6", lineWidth:1.5, title:"EMA9",  priceLineVisible:false, lastValueVisible:true,  crosshairMarkerVisible:false });
+    const e21s=main.addLineSeries({ color:"#ffd600", lineWidth:1.5, title:"EMA21", priceLineVisible:false, lastValueVisible:true,  crosshairMarkerVisible:false });
+    const bbu=main.addLineSeries({ color:"#00b8e635", lineWidth:1, lineStyle:LineStyle.Dashed, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
+    const bbm=main.addLineSeries({ color:"#344d7040", lineWidth:1, lineStyle:LineStyle.Dotted, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
+    const bbl=main.addLineSeries({ color:"#00b8e635", lineWidth:1, lineStyle:LineStyle.Dashed, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
+
+    // Crosshair legend
+    main.subscribeCrosshairMove(p=>{
+      const d=p?.seriesData?.get(cs);
+      if(d) setLegend(d);
+    });
+
+    // ── RSI chart
+    const rsiChart=createChart(rsiRef.current,{
+      ...base,
+      crosshair:{ mode:CrosshairMode.Normal,
+        vertLine:{color:"#00b8e630",width:1,style:LineStyle.Dashed,labelVisible:false},
+        horzLine:{color:"#00b8e630",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#1a0533"},
+      },
+      timeScale:{ visible:false, borderColor:"#152035" },
+      rightPriceScale:{ borderColor:"#152035", scaleMargins:{top:0.1,bottom:0.1} },
+    });
+    const rsiS=rsiChart.addLineSeries({ color:"#a855f7", lineWidth:1.5, title:"RSI", priceLineVisible:false, lastValueVisible:true });
+    rsiS.createPriceLine({ price:70, color:"#ff174445", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:"OB 70" });
+    rsiS.createPriceLine({ price:30, color:"#00e67645", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:"OS 30" });
+    rsiS.createPriceLine({ price:50, color:"#344d7040", lineWidth:1, lineStyle:LineStyle.Dotted, axisLabelVisible:false });
+
+    // ── MACD chart
+    const macdChart=createChart(macdRef.current,{
+      ...base,
+      crosshair:{ mode:CrosshairMode.Normal,
+        vertLine:{color:"#00b8e630",width:1,style:LineStyle.Dashed,labelVisible:false},
+        horzLine:{color:"#00b8e630",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#152035"},
+      },
+      timeScale:{ borderColor:"#152035", timeVisible:true, secondsVisible:false },
+      rightPriceScale:{ borderColor:"#152035" },
+    });
+    const macdHist=macdChart.addHistogramSeries({ priceLineVisible:false, lastValueVisible:false, title:"Hist" });
+    const macdLine=macdChart.addLineSeries({ color:"#00b8e6", lineWidth:1.5, title:"MACD", priceLineVisible:false, lastValueVisible:true });
+    const macdSig =macdChart.addLineSeries({ color:"#ff6d00", lineWidth:1.5, title:"Signal", priceLineVisible:false, lastValueVisible:true });
+    macdChart.addLineSeries({ color:"#344d7030", lineWidth:1, lineStyle:LineStyle.Dotted, priceLineVisible:false, lastValueVisible:false }).setData([]);
+
+    // ── Sync timescales
+    let syncing=false;
+    const syncRange=(src,targets)=>r=>{
+      if(syncing||!r)return; syncing=true;
+      targets.forEach(t=>t.timeScale().setVisibleLogicalRange(r));
+      syncing=false;
+    };
+    main.timeScale().subscribeVisibleLogicalRangeChange(syncRange(main,[rsiChart,macdChart]));
+    rsiChart.timeScale().subscribeVisibleLogicalRangeChange(syncRange(rsiChart,[main,macdChart]));
+    macdChart.timeScale().subscribeVisibleLogicalRangeChange(syncRange(macdChart,[main,rsiChart]));
+
+    // ── Resize observer
+    const ro=new ResizeObserver(()=>{
+      if(mainRef.current) main.applyOptions({width:mainRef.current.clientWidth});
+      if(rsiRef.current)  rsiChart.applyOptions({width:rsiRef.current.clientWidth});
+      if(macdRef.current) macdChart.applyOptions({width:macdRef.current.clientWidth});
+    });
+    ro.observe(mainRef.current);
+
+    charts.current={main,rsiChart,macdChart};
+    series.current={cs,vs,e9s,e21s,bbu,bbm,bbl,rsiS,macdHist,macdLine,macdSig};
+
+    return()=>{ ro.disconnect(); main.remove(); rsiChart.remove(); macdChart.remove(); };
+  },[symbol]);
+
+  /* ── update data when candles change ── */
+  useEffect(()=>{
+    const {cs,vs,e9s,e21s,bbu,bbm,bbl,rsiS,macdHist,macdLine,macdSig}=series.current;
+    if(!cs||!candles.length) return;
+
+    const closes=candles.map(c=>c.c);
+    const times =candles.map(c=>c.time);
+
+    // Candles & volume
+    cs.setData(candles.map(c=>({time:c.time,open:c.o,high:c.h,low:c.l,close:c.c})));
+    vs.setData(candles.map(c=>({time:c.time,value:c.v||0,color:c.c>=c.o?"#00e67640":"#ff174440"})));
+
+    // EMA per candle
+    const e9d=[],e21d=[];
+    let e9=closes[0],e21=closes[0];
+    const k9=2/10,k21=2/22;
+    for(let i=0;i<closes.length;i++){
+      e9=closes[i]*k9+e9*(1-k9);
+      e21=closes[i]*k21+e21*(1-k21);
+      e9d.push({time:times[i],value:e9});
+      e21d.push({time:times[i],value:e21});
+    }
+    e9s.setData(e9d); e21s.setData(e21d);
+
+    // Bollinger Bands per candle
+    const bbU=[],bbM=[],bbL=[];
+    for(let i=19;i<closes.length;i++){
+      const sl=closes.slice(i-19,i+1);
+      const mean=sl.reduce((a,b)=>a+b,0)/20;
+      const std=Math.sqrt(sl.reduce((a,b)=>a+(b-mean)**2,0)/20);
+      bbU.push({time:times[i],value:mean+2*std});
+      bbM.push({time:times[i],value:mean});
+      bbL.push({time:times[i],value:mean-2*std});
+    }
+    bbu.setData(bbU); bbm.setData(bbM); bbl.setData(bbL);
+
+    // RSI per candle (rolling 14)
+    const rsiD=[];
+    for(let i=14;i<closes.length;i++){
+      let g=0,l=0;
+      for(let j=i-13;j<=i;j++){const d=closes[j]-closes[j-1]; d>0?g+=d:l-=d;}
+      rsiD.push({time:times[i],value:100-100/(1+g/(l||0.0001))});
+    }
+    rsiS.setData(rsiD);
+
+    // MACD per candle
+    const mhD=[],mlD=[],msD=[];
+    for(let i=26;i<closes.length;i++){
+      const sl=closes.slice(i-25,i+1);
+      let e12=sl[0],e26=sl[0];
+      const k12=2/13,k26=2/27;
+      for(let j=1;j<sl.length;j++){e12=sl[j]*k12+e12*(1-k12);e26=sl[j]*k26+e26*(1-k26);}
+      const mv=e12-e26, sv=mv*0.82, hv=mv-sv;
+      mlD.push({time:times[i],value:mv});
+      msD.push({time:times[i],value:sv});
+      mhD.push({time:times[i],value:hv,color:hv>=0?"#00e67680":"#ff174480"});
+    }
+    macdHist.setData(mhD); macdLine.setData(mlD); macdSig.setData(msD);
+
+    charts.current.main?.timeScale().fitContent();
+  },[candles]);
+
+  /* ── position lines (entry, TP, SL) ── */
+  useEffect(()=>{
+    const {cs}=series.current;
+    if(!cs) return;
+    posLines.current.forEach(l=>{try{cs.removePriceLine(l);}catch{}});
+    posLines.current=[];
+
+    positions.forEach(pos=>{
+      const isBuy=pos.type==="BUY";
+      const entryCol=isBuy?"#00e676":"#ff1744";
+      const tp=isBuy
+        ? pos.entry*(1+TAKE_PROFIT_USD/POSITION_USD)
+        : pos.entry*(1-TAKE_PROFIT_USD/POSITION_USD);
+      const sl=isBuy
+        ? pos.entry*(1-STOP_LOSS_USD/POSITION_USD)
+        : pos.entry*(1+STOP_LOSS_USD/POSITION_USD);
+
+      posLines.current.push(
+        cs.createPriceLine({price:pos.entry, color:entryCol,    lineWidth:2, lineStyle:LineStyle.Solid,  axisLabelVisible:true, title:`${pos.type} entrada`}),
+        cs.createPriceLine({price:tp,         color:"#00e676",   lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:true, title:`TP +$${TAKE_PROFIT_USD}`}),
+        cs.createPriceLine({price:sl,         color:"#ff1744",   lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:true, title:`SL -$${STOP_LOSS_USD}`}),
+      );
+    });
+  },[positions]);
+
+  /* ── trade markers ── */
+  useEffect(()=>{
+    const {cs}=series.current;
+    if(!cs||!candles.length||!trades.length) return;
+    const markers=trades.slice(0,30).map(t=>{
+      const isBuy=t.type==="BUY";
+      const isProfit=t.pnl>=0;
+      // Match trade to nearest candle time
+      return{
+        time: candles.at(-1)?.time||0,
+        position: isBuy?"belowBar":"aboveBar",
+        color: isProfit?"#00e676":"#ff1744",
+        shape: isBuy?"arrowUp":"arrowDown",
+        text: `${t.type} ${t.reason} ${t.pnl>=0?"+":""}$${t.pnl?.toFixed(2)}`,
+        size:1,
+      };
+    }).filter(m=>m.time>0);
+    try{ cs.setMarkers(markers); }catch{}
+  },[trades,candles]);
+
+  /* ── render ── */
   return(
-    <div ref={containerRef} className="tradingview-widget-container" style={{width:"100%",height:"100%"}}/>
+    <div style={{display:"flex",flexDirection:"column",height:"100%",position:"relative"}}>
+
+      {/* OHLCV Legend */}
+      <div style={{position:"absolute",top:8,left:12,zIndex:10,display:"flex",gap:14,fontSize:10,
+        fontFamily:"IBM Plex Mono,monospace",pointerEvents:"none",background:"#04060fcc",padding:"4px 10px",borderRadius:4}}>
+        <span style={{color:"#4a6080"}}>{symbol}</span>
+        {legend&&<>
+          <span>O <span style={{color:legend.open>=legend.close?"#ff1744":"#00e676"}}>{Number(legend.open).toFixed(precision)}</span></span>
+          <span>H <span style={{color:"#00e676"}}>{Number(legend.high).toFixed(precision)}</span></span>
+          <span>L <span style={{color:"#ff1744"}}>{Number(legend.low).toFixed(precision)}</span></span>
+          <span>C <span style={{color:legend.close>=legend.open?"#00e676":"#ff1744",fontWeight:700}}>{Number(legend.close).toFixed(precision)}</span></span>
+        </>}
+        <span style={{color:"#00b8e6",marginLeft:8}}>── EMA9</span>
+        <span style={{color:"#ffd600"}}>── EMA21</span>
+        <span style={{color:"#00b8e640"}}>- - BB</span>
+      </div>
+
+      {/* Main chart (candles) */}
+      <div ref={mainRef} style={{flex:4,minHeight:0}}/>
+
+      {/* RSI label + chart */}
+      <div style={{borderTop:"1px solid #0d1a2d",display:"flex",alignItems:"center",
+        gap:10,padding:"2px 10px",background:"#04060f"}}>
+        <span style={{fontSize:8,color:"#a855f7",letterSpacing:2,fontFamily:"IBM Plex Mono,monospace"}}>RSI 14</span>
+        <span style={{fontSize:8,color:"#ff174460"}}>─ 70</span>
+        <span style={{fontSize:8,color:"#00e67660"}}>─ 30</span>
+      </div>
+      <div ref={rsiRef} style={{flex:1,minHeight:0}}/>
+
+      {/* MACD label + chart */}
+      <div style={{borderTop:"1px solid #0d1a2d",display:"flex",alignItems:"center",
+        gap:10,padding:"2px 10px",background:"#04060f"}}>
+        <span style={{fontSize:8,color:"#00b8e6",letterSpacing:2,fontFamily:"IBM Plex Mono,monospace"}}>MACD</span>
+        <span style={{fontSize:8,color:"#ff6d00"}}>── Signal</span>
+        <span style={{fontSize:8,color:"#00e67660"}}>▌ Hist+</span>
+        <span style={{fontSize:8,color:"#ff174460"}}>▌ Hist-</span>
+      </div>
+      <div ref={macdRef} style={{flex:1,minHeight:0}}/>
+    </div>
   );
 }
 
@@ -515,10 +705,14 @@ export default function TradingBot(){
           setCandles(prev=>{
             const updated=[...prev];
             const last={...updated[updated.length-1]};
-            last.c=np;
-            last.h=Math.max(last.h,np);
-            last.l=Math.min(last.l,np);
-            updated[updated.length-1]=last;
+            const nowSec=Math.floor(Date.now()/1000);
+            last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
+            // start new 1-min candle when needed
+            if(nowSec - last.time >= 60){
+              updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
+            } else {
+              updated[updated.length-1]=last;
+            }
             const closes=updated.map(c=>c.c);
             const newBB=calcBB(closes);
             const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
@@ -569,7 +763,7 @@ export default function TradingBot(){
         const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${cur.binance}&interval=1m&limit=80`);
         const d=await r.json();
         if(!Array.isArray(d))return;
-        const newCandles=d.map(k=>({o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
+        const newCandles=d.map(k=>({time:Math.floor(parseInt(k[0])/1000),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
         setCandles(newCandles);
         const closes=newCandles.map(c=>c.c);
         const volumes=newCandles.map(c=>c.v);
@@ -826,22 +1020,30 @@ export default function TradingBot(){
           );
         })()}
 
-        {/* CHART — TradingView */}
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        {/* CHART — Lightweight Charts */}
+        <div style={{background:"#04060f",border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 14px",borderBottom:`1px solid ${T.border}`}}>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
-              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>GRÁFICA EN VIVO • TRADINGVIEW • {symbol}</span>
-              <span style={{fontSize:8,background:`${T.accent}18`,color:T.accent,padding:"2px 8px",borderRadius:4,letterSpacing:1}}>5M</span>
+              <span className="live" style={{fontSize:9,color:T.green}}>EN VIVO</span>
+              <span style={{fontSize:9,color:T.muted,letterSpacing:2}}>{symbol} · 1M</span>
             </div>
-            <div style={{display:"flex",gap:8,fontSize:8,color:T.muted}}>
-              <span style={{color:T.green}}>● RSI</span>
-              <span style={{color:T.accent}}>● BB</span>
-              <span style={{color:T.yellow}}>● MACD</span>
-              <span style={{color:T.muted}}>● VOL</span>
+            <div style={{display:"flex",gap:10,fontSize:8}}>
+              <span style={{color:T.accent}}>EMA 9/21</span>
+              <span style={{color:"#00b8e640"}}>Bollinger</span>
+              <span style={{color:"#a855f7"}}>RSI</span>
+              <span style={{color:T.accent}}>MACD</span>
+              <span style={{color:T.green}}>Vol</span>
+              {positions.length>0&&<span style={{color:T.yellow,fontWeight:700}}>{positions.length} posición(es) activa(s)</span>}
             </div>
           </div>
-          <div style={{height:620,borderRadius:6,overflow:"hidden"}}>
-            <TradingViewChart tvSymbol={asset.tvSymbol}/>
+          <div style={{height:660}}>
+            <LWChart
+              candles={candles}
+              positions={positions}
+              trades={trades}
+              symbol={symbol}
+              precision={asset.precision}
+            />
           </div>
         </div>
 
