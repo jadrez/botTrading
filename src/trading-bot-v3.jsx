@@ -264,6 +264,16 @@ function calcTrend1h(closes){
   const ago=closes[closes.length-61];
   return(closes.at(-1)-ago)/ago*100;
 }
+// Short-term trend: % change over last N candles + bearish/bullish candle count
+function calcShortTrend(candles, n=5){
+  if(candles.length<n+1) return {pct:0, bearish:0, bullish:0, direction:"NEUTRAL"};
+  const recent=candles.slice(-n);
+  const bullish=recent.filter(c=>c.c>c.o).length;
+  const bearish=recent.filter(c=>c.c<c.o).length;
+  const pct=(recent.at(-1).c - recent[0].o) / recent[0].o * 100;
+  const direction = pct > 0.05 ? "BULLISH" : pct < -0.05 ? "BEARISH" : "NEUTRAL";
+  return{pct, bullish, bearish, direction};
+}
 
 /* ─── LIGHTWEIGHT CHART ─────────────────────────────────────────────────── */
 function LWChart({ candles, positions, trades, symbol, precision }){
@@ -625,8 +635,14 @@ export default function TradingBot(){
   const [loadingNews,setLoadingNews] = useState(false);
   const [autoPhase,setAutoPhase] = useState("idle");
   const [nextAnalysis,setNextAnalysis] = useState(null);
-  const [closedCount,setClosedCount]   = useState(0);
-  const [totalProfit,setTotalProfit]   = useState(0);
+  const [closedCount,setClosedCount]       = useState(0);
+  const [totalProfit,setTotalProfit]       = useState(0);
+  const [consecutiveLosses,setConsLosses]  = useState(0);
+  const [shortTrend,setShortTrend]         = useState({pct:0,bullish:0,bearish:0,direction:"NEUTRAL"});
+  const [skipCycles,setSkipCycles]         = useState(0);
+  const consLossesRef  = useRef(0);
+  const shortTrendRef  = useRef({pct:0,bullish:0,bearish:0,direction:"NEUTRAL"});
+  const skipCyclesRef  = useRef(0);
 
   const posRef    = useRef([]);
   const priceRef  = useRef(ASSETS["ETH/USDT"].basePrice);
@@ -660,6 +676,9 @@ export default function TradingBot(){
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
+  useEffect(()=>{consLossesRef.current=consecutiveLosses;},[consecutiveLosses]);
+  useEffect(()=>{shortTrendRef.current=shortTrend;},[shortTrend]);
+  useEffect(()=>{skipCyclesRef.current=skipCycles;},[skipCycles]);
 
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
@@ -718,12 +737,14 @@ export default function TradingBot(){
             const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
             const t1h=calcTrend1h(closes);
             const pts=detectPatterns(updated);
+            const st=calcShortTrend(updated,5);
             setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
             setBB(newBB); bbRef.current=newBB;
             setEma9(e9); ema9Ref.current=e9;
             setEma21(e21); ema21Ref.current=e21;
             setTrend1h(t1h); trend1hRef.current=t1h;
             setPatterns(pts); patternsRef.current=pts;
+            setShortTrend(st); shortTrendRef.current=st;
             return updated;
           });
         }catch{}
@@ -772,6 +793,7 @@ export default function TradingBot(){
         const vt=calcVolumeTrend(volumes);
         const t1h=calcTrend1h(closes);
         const pts=detectPatterns(newCandles);
+        const st=calcShortTrend(newCandles,5);
         setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
         setBB(newBB); bbRef.current=newBB;
         setEma9(e9); ema9Ref.current=e9;
@@ -779,6 +801,7 @@ export default function TradingBot(){
         setVolTrend(vt); volRef.current=vt;
         setTrend1h(t1h); trend1hRef.current=t1h;
         setPatterns(pts); patternsRef.current=pts;
+        setShortTrend(st); shortTrendRef.current=st;
       }catch{}
     };
     load();
@@ -799,6 +822,19 @@ export default function TradingBot(){
       setTrades(t=>[{...pos,exit:currentPrice,pnl,reason,time:now(),symbol:symbolRef.current},...t.slice(0,49)]);
       setClosedCount(c=>c+1);
       setTotalProfit(p=>p+pnl);
+      // Track consecutive losses — reset on profit, increment on SL
+      if(reason==="SL"){
+        const newLosses=consLossesRef.current+1;
+        consLossesRef.current=newLosses;
+        setConsLosses(newLosses);
+        if(newLosses>=3){
+          // Pause 2 analysis cycles to avoid revenge trading
+          skipCyclesRef.current=2; setSkipCycles(2);
+          addLog(`⚠️ ${newLosses} SL consecutivos — pausando 2 ciclos para reevaluar tendencia`,"sell");
+        }
+      } else if(pnl>0){
+        consLossesRef.current=0; setConsLosses(0);
+      }
       if(reason==="TP"&&autoRef.current){
         pendingAnalysisRef.current=true;
         setAutoPhase("tp_hit_analyzing");
@@ -819,6 +855,14 @@ export default function TradingBot(){
   /* ── Core analyze ────────────────────────────────────────────────────── */
   const runAnalysis=useCallback(async(reason="Ciclo automático")=>{
     if(analyzing)return;
+    // Skip cycles after consecutive losses
+    if(skipCyclesRef.current>0){
+      const remaining=skipCyclesRef.current-1;
+      skipCyclesRef.current=remaining; setSkipCycles(remaining);
+      addLog(`⏭ Ciclo pausado (protección racha pérdidas). Quedan ${remaining} ciclo(s).`,"info");
+      setAutoPhase("waiting_conditions");
+      return;
+    }
     setAnalyzing(true);
     setAutoPhase("analyzing");
     addLog(`🔍 Analizando ${symbolRef.current}: ${reason}`,"info");
@@ -829,6 +873,8 @@ export default function TradingBot(){
         macd:macdRef.current,    bb:bbRef.current,
         ema9:ema9Ref.current,    ema21:ema21Ref.current,
         volRatio:volRef.current.ratio, trend1h:trend1hRef.current,
+        shortTrend:shortTrendRef.current,
+        consecutiveLosses:consLossesRef.current,
         patterns:patternsRef.current,
         positions:posRef.current, balance:balanceRef.current,
         news:newsRef.current,    reason,

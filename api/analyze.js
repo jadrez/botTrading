@@ -19,6 +19,8 @@ export default async function handler(req, res) {
   const {
     symbol = "ETH/USDT", price, rsi, macd, bb,
     ema9 = 0, ema21 = 0, volRatio = 1, trend1h = 0,
+    shortTrend = { pct: 0, bullish: 0, bearish: 0, direction: "NEUTRAL" },
+    consecutiveLosses = 0,
     patterns = [],
     positions, balance, news, reason,
   } = req.body;
@@ -31,27 +33,66 @@ export default async function handler(req, res) {
     ? positions.map((p, i) => `#${i+1} ${p.type} PnL:${fUSD(posPnL(p, price))}`).join(" | ")
     : "Ninguna";
 
-  const emaCross = ema9 > ema21 ? "EMA9>EMA21 ALCISTA" : "EMA9<EMA21 BAJISTA";
-  const volStr   = volRatio > 1.5 ? "ALTO" : volRatio < 0.7 ? "BAJO" : "NORMAL";
+  const emaCross    = ema9 > ema21 ? "EMA9>EMA21 (ALCISTA)" : "EMA9<EMA21 (BAJISTA)";
+  const volStr      = volRatio > 1.5 ? "ALTO" : volRatio < 0.7 ? "BAJO" : "NORMAL";
   const patternsStr = patterns.length
-    ? patterns.map(p=>`${p.name} (${p.signal} ${p.type} ${p.conf}%)`).join(", ")
-    : "Ninguno detectado";
+    ? patterns.map(p => `${p.name}(${p.signal} ${p.conf}%)`).join(", ")
+    : "Ninguno";
 
-  const prompt = `Eres trader experto en ${symbol}. Decide si abrir UNA posición ahora.
+  // ── Derive dominant trend direction from objective signals
+  const emaDir   = ema9 > ema21 ? "BULLISH" : "BEARISH";
+  const rsiDir   = rsi < 40 ? "BEARISH" : rsi > 60 ? "BULLISH" : "NEUTRAL";
+  const t1hDir   = trend1h > 0.1 ? "BULLISH" : trend1h < -0.1 ? "BEARISH" : "NEUTRAL";
+  const stDir    = shortTrend?.direction || "NEUTRAL";
 
-PRECIO: ${price} | RSI: ${rsi?.toFixed(1)} ${rsi<30?"SOBREVENTA":rsi>70?"SOBRECOMPRA":"NEUTRAL"}
-MACD HIST: ${macd?.hist?.toFixed(4)} ${macd?.hist>0?"ALCISTA":"BAJISTA"}
-BB: precio ${price>bb?.upper?"SOBRE BANDA SUP":price<bb?.lower?"BAJO BANDA INF":"dentro de bandas"}
-EMA: ${emaCross} | VOLUMEN: ${volStr} (×${volRatio?.toFixed(1)}) | TENDENCIA 1H: ${trend1h>=0?"+":""}${trend1h?.toFixed(2)}%
-PATRONES CHARTISTAS: ${patternsStr}
+  // Count how many signals agree on direction
+  const signals  = [emaDir, rsiDir, t1hDir, stDir];
+  const bullCount = signals.filter(s => s === "BULLISH").length;
+  const bearCount = signals.filter(s => s === "BEARISH").length;
+  const dominantTrend = bearCount >= 3 ? "BAJISTA FUERTE"
+    : bearCount === 2 ? "BAJISTA"
+    : bullCount >= 3 ? "ALCISTA FUERTE"
+    : bullCount === 2 ? "ALCISTA"
+    : "LATERAL";
 
-NOTICIAS:
+  // Consecutive loss warning
+  const lossWarning = consecutiveLosses >= 2
+    ? `⚠️ ALERTA: ${consecutiveLosses} pérdidas consecutivas. Exige confluencia perfecta (conf≥75%) o responde HOLD.`
+    : consecutiveLosses === 1
+    ? `Nota: 1 pérdida reciente. Sé más estricto con la confluencia.`
+    : "";
+
+  const prompt = `Eres trader experto en ${symbol}. Analiza y decide si abrir UNA posición.
+
+═══ INDICADORES ═══
+PRECIO: ${price}
+RSI(14): ${rsi?.toFixed(1)} ${rsi<30?"⚠ SOBREVENTA":rsi>70?"⚠ SOBRECOMPRA":"neutro"}
+MACD Hist: ${macd?.hist?.toFixed(4)} ${macd?.hist>0?"▲ ALCISTA":"▼ BAJISTA"}
+BB: precio ${price>bb?.upper?"SOBRE BANDA SUP ⚠":price<bb?.lower?"BAJO BANDA INF ⚠":"dentro de bandas"}
+EMA: ${emaCross}
+VOLUMEN: ${volStr} (×${volRatio?.toFixed(1)})
+TENDENCIA 1H: ${trend1h>=0?"+":""}${trend1h?.toFixed(2)}%
+TENDENCIA 5 VELAS: ${shortTrend?.pct?.toFixed(3)}% | ${shortTrend?.bullish} alcistas / ${shortTrend?.bearish} bajistas → ${stDir}
+PATRONES: ${patternsStr}
+
+═══ TENDENCIA DOMINANTE: ${dominantTrend} ═══
+(EMA:${emaDir} | RSI:${rsiDir} | 1H:${t1hDir} | 5V:${stDir})
+
+═══ NOTICIAS ═══
 ${nc}
 
-PORTAFOLIO: $${balance?.toFixed(0)} | Posiciones: ${pc} | Slots: ${MAX_POSITIONS-positions.length}
-TP: +$${TAKE_PROFIT_USD} | SL: -$${STOP_LOSS_USD} | Máx: ${MAX_POSITIONS} pos
+═══ PORTAFOLIO ═══
+Balance: $${balance?.toFixed(0)} | Posiciones: ${pc} | Slots: ${MAX_POSITIONS-positions.length}
+TP: +$${TAKE_PROFIT_USD} | SL: -$${STOP_LOSS_USD}
+${lossWarning}
 
-REGLAS: Busca confluencia entre patrones + EMA + RSI + volumen + noticias. Si un patrón REVERSAL coincide con EMA y RSI → alta prioridad. Sin confluencia → HOLD.
+═══ REGLAS ESTRICTAS ═══
+1. SIGUE LA TENDENCIA DOMINANTE. Si es BAJISTA→ solo SELL. Si es ALCISTA→ solo BUY. Si es LATERAL→ HOLD.
+2. NUNCA operes contra la tendencia. Si EMA9<EMA21 Y tendencia 5 velas es BEARISH → NO abrir BUY bajo ningún concepto.
+3. Requiere mínimo 2 señales confirmando la dirección (EMA + RSI, o EMA + patrón, o patrón + tendencia 1H).
+4. Si tendencia es BAJISTA FUERTE y aún hay posiciones BUY abiertas → signal=HOLD, should_open=false.
+5. ${consecutiveLosses>=2?"MODO CONSERVADOR ACTIVO: conf mínima 75%, solo señales perfectas.":"Confianza mínima para abrir: 65%."}
+6. Sin confluencia clara → HOLD siempre.
 
 Responde SOLO JSON sin backticks:
 {"signal":"BUY","confidence":75,"reasoning":"máx 60 palabras en español","news_impact":"BULLISH","key_factor":"5 palabras","risk":"MEDIO","should_open":true}`;
@@ -65,10 +106,10 @@ Responde SOLO JSON sin backticks:
       },
       body: JSON.stringify({
         model: "llama-3.1-8b-instant",
-        max_tokens: 250,
-        temperature: 0.3,
+        max_tokens: 280,
+        temperature: 0.2,   // lower = más determinista, menos creativo
         messages: [
-          { role: "system", content: "Trader experto. Responde SOLO JSON válido sin texto extra ni backticks." },
+          { role: "system", content: "Eres un trader algorítmico disciplinado. Sigues la tendencia. Nunca operas contra ella. Respondes SOLO JSON válido." },
           { role: "user", content: prompt },
         ],
       }),
@@ -80,6 +121,30 @@ Responde SOLO JSON sin backticks:
     const txt = d.choices?.[0]?.message?.content || "";
     try {
       const parsed = JSON.parse(txt.replace(/```json|```/g, "").trim());
+
+      // Hard override: if dominant trend is strongly bearish and signal is BUY → force HOLD
+      if ((bearCount >= 3) && parsed.signal === "BUY") {
+        return res.status(200).json({
+          ...parsed,
+          signal: "HOLD",
+          should_open: false,
+          confidence: Math.min(parsed.confidence, 45),
+          reasoning: `[Bloqueado] Tendencia dominante BAJISTA (${dominantTrend}). ${parsed.reasoning}`,
+          key_factor: "Tendencia bajista bloqueó BUY",
+        });
+      }
+      // Hard override: if dominant trend is strongly bullish and signal is SELL → force HOLD
+      if ((bullCount >= 3) && parsed.signal === "SELL") {
+        return res.status(200).json({
+          ...parsed,
+          signal: "HOLD",
+          should_open: false,
+          confidence: Math.min(parsed.confidence, 45),
+          reasoning: `[Bloqueado] Tendencia dominante ALCISTA (${dominantTrend}). ${parsed.reasoning}`,
+          key_factor: "Tendencia alcista bloqueó SELL",
+        });
+      }
+
       return res.status(200).json(parsed);
     } catch {
       return res.status(200).json({
