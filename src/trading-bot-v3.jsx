@@ -406,6 +406,21 @@ async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,tre
   return r.json();
 }
 
+async function fetchAccount(){
+  const r=await fetch("/api/account");
+  if(!r.ok)return null;
+  return r.json();
+}
+
+async function placeOrder({action,symbol,side,positionUsd,quantity}){
+  const r=await fetch("/api/order",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action,symbol,side,positionUsd,quantity}),
+  });
+  return r.json();
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    MAIN COMPONENT
 ═══════════════════════════════════════════════════════════════════════════ */
@@ -437,6 +452,12 @@ export default function TradingBot(){
   const [nextAnalysis,setNextAnalysis] = useState(null);
   const [closedCount,setClosedCount]   = useState(0);
   const [totalProfit,setTotalProfit]   = useState(0);
+  const [realMode,setRealMode]         = useState(false);
+  const [realAccount,setRealAccount]   = useState(null);
+  const [realPositions,setRealPositions] = useState([]); // {id, type, symbol, entry, qty, orderId}
+  const [realLog,setRealLog]           = useState([]);
+  const [loadingAccount,setLoadingAccount] = useState(false);
+  const realModeRef = useRef(false);
 
   const posRef    = useRef([]);
   const priceRef  = useRef(ASSETS["ETH/USDT"].basePrice);
@@ -470,10 +491,61 @@ export default function TradingBot(){
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
+  useEffect(()=>{realModeRef.current=realMode;},[realMode]);
 
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
   },[]);
+
+  const addRealLog=useCallback((msg,type="info")=>{
+    setRealLog(p=>[{msg,type,time:now()},...p.slice(0,49)]);
+  },[]);
+
+  const loadAccount=useCallback(async()=>{
+    setLoadingAccount(true);
+    const d=await fetchAccount();
+    setRealAccount(d);
+    setLoadingAccount(false);
+    if(d?.ok) addRealLog(`Cuenta cargada — USDT: $${d.balances?.find(b=>b.asset==="USDT")?.free?.toFixed(2)||"0"}`,  "info");
+    else addRealLog("Error al cargar cuenta Binance","sell");
+  },[addRealLog]);
+
+  const openRealOrder=useCallback(async(signal)=>{
+    const sym=symbolRef.current;
+    if(ASSETS[sym]?.type!=="crypto"){
+      addRealLog(`${sym} no soportado para trading real (solo crypto)`,"sell"); return;
+    }
+    addRealLog(`Enviando orden ${signal} ${sym} a Binance...`,"info");
+    const REAL_POSITION_USD=50; // $50 por operación — ajusta según tu capital
+    const result=await placeOrder({action:"open",symbol:sym,side:signal,positionUsd:REAL_POSITION_USD});
+    if(result.error){
+      addRealLog(`Error orden: ${result.error} (${result.code})`,"sell"); return;
+    }
+    const execQty=parseFloat(result.executedQty||0);
+    const avgPrice=result.avgPrice||priceRef.current;
+    setRealPositions(p=>[...p,{
+      id:result.orderId, type:signal, symbol:sym,
+      entry:avgPrice, qty:execQty, orderId:result.orderId,
+    }]);
+    addRealLog(`ORDEN EJECUTADA: ${signal} ${execQty} ${sym.split("/")[0]} @ $${avgPrice?.toFixed(2)} | ID:${result.orderId}`,"buy");
+    loadAccount();
+  },[addRealLog,loadAccount]);
+
+  const closeRealOrder=useCallback(async(pos)=>{
+    const closeSide=pos.type==="BUY"?"SELL":"BUY";
+    addRealLog(`Cerrando posición ${pos.type} ${pos.symbol} qty:${pos.qty}...`,"info");
+    const result=await placeOrder({action:"close",symbol:pos.symbol,side:closeSide,quantity:pos.qty});
+    if(result.error){
+      addRealLog(`Error al cerrar: ${result.error} (${result.code})`,"sell"); return;
+    }
+    const exitPrice=result.avgPrice||priceRef.current;
+    const pnl=pos.type==="BUY"
+      ?(exitPrice-pos.entry)/pos.entry*50
+      :(pos.entry-exitPrice)/pos.entry*50;
+    setRealPositions(p=>p.filter(x=>x.id!==pos.id));
+    addRealLog(`CERRADA: ${pos.type} ${pos.symbol} @ $${exitPrice?.toFixed(2)} | PnL: ${pnl>=0?"+":""}$${pnl.toFixed(2)}`,"buy");
+    loadAccount();
+  },[addRealLog,loadAccount]);
 
   /* ── Symbol change ───────────────────────────────────────────────────── */
   const handleSymbolChange=useCallback((newSym)=>{
@@ -652,6 +724,8 @@ export default function TradingBot(){
           const newPos={type:result.signal,entry:cp,id:Date.now()+Math.random()};
           setPositions(p=>[...p,newPos]);
           addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} @ ${fP(cp,prec)} | TP:+$${TAKE_PROFIT_USD} SL:-$${STOP_LOSS_USD}`,isBuy?"buy":"sell");
+          // Si modo real está activo, ejecutar orden real también
+          if(realModeRef.current) openRealOrder(result.signal);
           setAutoPhase("monitoring");
         } else {
           const why=!result.should_open?"sin confluencia clara"
@@ -667,7 +741,7 @@ export default function TradingBot(){
     }
     setAnalyzing(false);
     pendingAnalysisRef.current=false;
-  },[analyzing,addLog]);
+  },[analyzing,addLog,openRealOrder]);
 
   /* ── Auto loop ───────────────────────────────────────────────────────── */
   useEffect(()=>{
@@ -927,6 +1001,111 @@ export default function TradingBot(){
             )}
           </div>
         )}
+
+        {/* REAL TRADING PANEL */}
+        <div style={{background:realMode?`${T.red}08`:`${T.card}`,border:`2px solid ${realMode?T.red:T.border}`,borderRadius:8,padding:"12px 16px",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:realMode?10:0}}>
+            <div>
+              <div style={{fontSize:11,fontWeight:700,color:realMode?T.red:T.muted,letterSpacing:2}}>
+                {realMode?"🔴 MODO REAL ACTIVO — DINERO REAL":"⚪ MODO PAPER (simulado)"}
+              </div>
+              <div style={{fontSize:9,color:T.muted,marginTop:2}}>
+                {realMode
+                  ?"Las órdenes se ejecutan en Binance con dinero real. Opera con precaución."
+                  :"Activa el modo real para conectar con Binance y operar con dinero real."}
+              </div>
+            </div>
+            <button onClick={()=>{
+              if(!realMode){
+                const ok=window.confirm("⚠️ ADVERTENCIA\n\nEstás a punto de activar el MODO REAL.\n\nLas órdenes se ejecutarán en Binance con dinero real.\n¿Confirmas que entiendes el riesgo?");
+                if(!ok)return;
+                setRealMode(true);
+                loadAccount();
+              } else {
+                setRealMode(false);
+                setRealAccount(null);
+              }
+            }} style={{
+              background:realMode?`${T.red}20`:"transparent",
+              border:`2px solid ${realMode?T.red:T.border}`,
+              color:realMode?T.red:T.muted,
+              borderRadius:8,padding:"8px 16px",cursor:"pointer",
+              fontSize:11,fontWeight:700,whiteSpace:"nowrap",minWidth:120,
+            }}>
+              {realMode?"DESACTIVAR":"ACTIVAR REAL"}
+            </button>
+          </div>
+
+          {realMode&&(
+            <>
+              {/* Account balances */}
+              <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+                {loadingAccount?(
+                  <div style={{fontSize:10,color:T.muted}}>Cargando cuenta...</div>
+                ):realAccount?.balances?.map(b=>(
+                  <div key={b.asset} style={{background:T.dim,border:`1px solid ${T.border}`,borderRadius:6,padding:"6px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:8,color:T.muted,letterSpacing:1}}>{b.asset}</div>
+                    <div className="mono" style={{fontSize:13,fontWeight:700,color:b.asset==="USDT"?T.green:T.accent}}>{b.free.toFixed(b.asset==="USDT"?2:4)}</div>
+                    {b.locked>0&&<div style={{fontSize:8,color:T.orange}}>bloq: {b.locked.toFixed(4)}</div>}
+                  </div>
+                ))}
+                <button onClick={loadAccount} disabled={loadingAccount}
+                  style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
+                    borderRadius:6,padding:"6px 10px",cursor:"pointer",fontSize:10,alignSelf:"center"}}>
+                  ↻ Actualizar
+                </button>
+                {realAccount?.testnet&&(
+                  <div style={{alignSelf:"center",background:`${T.yellow}18`,border:`1px solid ${T.yellow}40`,
+                    borderRadius:4,padding:"4px 10px",fontSize:9,color:T.yellow,fontWeight:700}}>
+                    TESTNET — sin dinero real
+                  </div>
+                )}
+              </div>
+
+              {/* Real positions */}
+              {realPositions.length>0&&(
+                <div style={{marginBottom:10}}>
+                  <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:5}}>POSICIONES REALES ABIERTAS</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                    {realPositions.map(pos=>{
+                      const pnl=pos.type==="BUY"?(price-pos.entry)/pos.entry*50:(pos.entry-price)/pos.entry*50;
+                      const col=pnl>=0?T.green:T.red;
+                      return(
+                        <div key={pos.id} style={{background:`${col}0c`,border:`1px solid ${col}40`,borderRadius:6,padding:"8px 12px",
+                          display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <div>
+                            <span style={{fontSize:10,fontWeight:700,color:col,marginRight:8}}>{pos.type==="BUY"?"▲ BUY":"▼ SELL"}</span>
+                            <span className="mono" style={{fontSize:10,color:T.muted}}>entry: ${pos.entry?.toFixed(2)} | qty: {pos.qty}</span>
+                          </div>
+                          <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                            <span className="mono" style={{fontSize:14,fontWeight:700,color:col}}>{pnl>=0?"+":""}${pnl.toFixed(2)}</span>
+                            <button onClick={()=>closeRealOrder(pos)}
+                              style={{background:`${T.red}18`,border:`1px solid ${T.red}50`,color:T.red,
+                                borderRadius:4,padding:"3px 10px",cursor:"pointer",fontSize:10,fontWeight:700}}>
+                              Cerrar
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Real log */}
+              <div style={{background:T.dim,borderRadius:5,padding:"8px 10px",maxHeight:100,overflowY:"auto"}}>
+                <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:4}}>LOG OPERACIONES REALES</div>
+                {realLog.length===0&&<div style={{fontSize:9,color:T.muted}}>Sin actividad real.</div>}
+                {realLog.map((l,i)=>(
+                  <div key={i} style={{fontSize:9,display:"flex",gap:8,color:l.type==="buy"?T.green:l.type==="sell"?T.red:T.muted}}>
+                    <span className="mono" style={{color:T.muted,minWidth:55,flexShrink:0}}>{l.time}</span>
+                    <span>{l.msg}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
 
         {/* CONTROLS */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
