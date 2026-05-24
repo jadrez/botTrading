@@ -381,7 +381,13 @@ function LWChart({ candles, positions, trades, symbol, precision }){
     charts.current={main,rsiChart,macdChart};
     series.current={cs,vs,e9s,e21s,bbu,bbm,bbl,rsiS,macdHist,macdLine,macdSig};
 
-    return()=>{ ro.disconnect(); main.remove(); rsiChart.remove(); macdChart.remove(); };
+    return()=>{
+      ro.disconnect();
+      posLines.current=[];
+      series.current={};
+      charts.current={};
+      main.remove(); rsiChart.remove(); macdChart.remove();
+    };
   },[symbol]);
 
   /* ── update data when candles change ── */
@@ -471,25 +477,33 @@ function LWChart({ candles, positions, trades, symbol, precision }){
     });
   },[positions]);
 
-  /* ── trade markers ── */
+  /* ── trade markers — only for current symbol, placed at nearest candle ── */
   useEffect(()=>{
     const {cs}=series.current;
-    if(!cs||!candles.length||!trades.length) return;
-    const markers=trades.slice(0,30).map(t=>{
+    if(!cs||!candles.length) return;
+    // Filter to current symbol only
+    const symTrades=trades.filter(t=>!t.symbol||t.symbol===symbol);
+    if(!symTrades.length){ try{cs.setMarkers([]);}catch{} return; }
+    const markers=symTrades.slice(0,20).map(t=>{
       const isBuy=t.type==="BUY";
       const isProfit=t.pnl>=0;
-      // Match trade to nearest candle time
+      // Find nearest candle time — use last candle as fallback
+      const tradeTs=t.tradeTime||0;
+      const nearest=tradeTs>0
+        ? candles.reduce((best,c)=>Math.abs(c.time-tradeTs)<Math.abs(best.time-tradeTs)?c:best).time
+        : candles.at(-1)?.time||0;
       return{
-        time: candles.at(-1)?.time||0,
+        time: nearest,
         position: isBuy?"belowBar":"aboveBar",
         color: isProfit?"#00e676":"#ff1744",
         shape: isBuy?"arrowUp":"arrowDown",
-        text: `${t.type} ${t.reason} ${t.pnl>=0?"+":""}$${t.pnl?.toFixed(2)}`,
+        text: `${t.reason} ${t.pnl>=0?"+":""}$${t.pnl?.toFixed(2)}`,
         size:1,
       };
-    }).filter(m=>m.time>0);
+    }).filter(m=>m.time>0)
+      .sort((a,b)=>a.time-b.time); // LW Charts requires sorted markers
     try{ cs.setMarkers(markers); }catch{}
-  },[trades,candles]);
+  },[trades,candles,symbol]);
 
   /* ── render ── */
   return(
@@ -755,10 +769,17 @@ export default function TradingBot(){
       iv=setInterval(()=>{
         setCandles(prev=>{
           const last=prev.at(-1);
+          const nowSec=Math.floor(Date.now()/1000);
           const d=(Math.random()-.496)*.0009;
           const np=Math.max(1.04,Math.min(1.17,last.c+d));
-          const nc={o:last.c,c:np,h:Math.max(last.c,np)+Math.random()*.0003,l:Math.min(last.c,np)-Math.random()*.0003};
-          const updated=[...prev.slice(-79),nc];
+          // Update last candle or open new one every 60s
+          let updated;
+          if(nowSec - (last.time||0) >= 60){
+            updated=[...prev.slice(-79),{time:nowSec,o:np,c:np,h:np,l:np,v:0}];
+          } else {
+            const nc={...last,c:np,h:Math.max(last.h,np),l:Math.min(last.l,np)};
+            updated=[...prev.slice(0,-1),nc];
+          }
           const closes=updated.map(c=>c.c);
           const newBB=calcBB(closes);
           setPrice(np);
@@ -819,7 +840,7 @@ export default function TradingBot(){
       const emoji=reason==="TP"?"✅":reason==="SL"?"🛑":"⬜";
       addLog(`${emoji} ${reason} ${pos.type} @ ${fP(currentPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
       setBalance(b=>{const nb=b+pnl;balanceRef.current=nb;return nb;});
-      setTrades(t=>[{...pos,exit:currentPrice,pnl,reason,time:now(),symbol:symbolRef.current},...t.slice(0,49)]);
+      setTrades(t=>[{...pos,exit:currentPrice,pnl,reason,time:now(),tradeTime:Math.floor(Date.now()/1000),symbol:symbolRef.current},...t.slice(0,49)]);
       setClosedCount(c=>c+1);
       setTotalProfit(p=>p+pnl);
       // Track consecutive losses — reset on profit, increment on SL
