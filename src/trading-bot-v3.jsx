@@ -56,7 +56,7 @@ function posPnL(pos, price){
   return dir * (price - pos.entry) / pos.entry * POSITION_USD;
 }
 
-function genCandles(base=1.0823, n=80){
+function genCandles(base=1.0823, n=200){
   const arr=[]; let p=base;
   const vol = base > 100 ? base*0.003 : 0.0022;
   const nowSec = Math.floor(Date.now()/1000);
@@ -94,6 +94,154 @@ function calcBB(closes,p=20){
   const std=Math.sqrt(sl.reduce((a,b)=>a+(b-mean)**2,0)/sl.length);
   return{upper:mean+2*std,mid:mean,lower:mean-2*std};
 }
+/* ─── SUPPORT & RESISTANCE ──────────────────────────────────────────────── */
+function calcSR(candles, tol=0.004){
+  if(candles.length<20) return {supports:[], resistances:[]};
+  const recent=candles.slice(-200);
+  const currentPrice=recent.at(-1).c;
+  const levels=[];
+
+  // Collect pivot highs and lows
+  for(let i=3; i<recent.length-3; i++){
+    let isH=true, isL=true;
+    for(let j=i-3; j<=i+3; j++){
+      if(j===i) continue;
+      if(recent[j].h>=recent[i].h) isH=false;
+      if(recent[j].l<=recent[i].l) isL=false;
+    }
+    if(isH) levels.push({price:recent[i].h, type:"resistance", idx:i});
+    if(isL) levels.push({price:recent[i].l, type:"support",    idx:i});
+  }
+
+  // Cluster nearby levels (within tol%)
+  const clusters=[];
+  for(const lv of levels){
+    const existing=clusters.find(c=>Math.abs(c.price-lv.price)/c.price < tol);
+    if(existing){
+      existing.touches++;
+      existing.price=(existing.price*existing.touches+lv.price)/(existing.touches+1);
+    } else {
+      clusters.push({price:lv.price, type:lv.type, touches:1});
+    }
+  }
+
+  const strong=clusters.filter(c=>c.touches>=2);
+  const supports=strong.filter(c=>c.price<currentPrice*0.9998)
+    .sort((a,b)=>b.price-a.price).slice(0,4); // closest above bottom
+  const resistances=strong.filter(c=>c.price>currentPrice*1.0002)
+    .sort((a,b)=>a.price-b.price).slice(0,4); // closest above top
+
+  return{supports, resistances, all:strong};
+}
+
+/* ─── CANDLE PATTERNS (Price Action) ────────────────────────────────────── */
+function detectCandlePatterns(candles){
+  if(candles.length<3) return [];
+  const results=[];
+  const c=candles.at(-1);   // last candle
+  const p=candles.at(-2);   // previous candle
+  const p2=candles.at(-3);  // two back
+
+  const body=Math.abs(c.c-c.o);
+  const range=c.h-c.l||0.00001;
+  const upperWick=c.h-Math.max(c.c,c.o);
+  const lowerWick=Math.min(c.c,c.o)-c.l;
+  const prevBody=Math.abs(p.c-p.o);
+
+  // Doji — body < 10% of range
+  if(body<range*0.1 && range>0)
+    results.push({name:"Doji", signal:"NEUTRAL", type:"REVERSAL", conf:55, emoji:"十",
+      desc:"Apertura ≈ Cierre → indecisión total del mercado. Señal de posible cambio de dirección."});
+
+  // Hammer (alcista) — mecha inferior larga en zona baja
+  if(lowerWick>body*2 && upperWick<body*0.5 && body>0)
+    results.push({name:"Hammer", signal:"BULLISH", type:"REVERSAL", conf:72, emoji:"🔨",
+      desc:"Mecha inferior larga → precio rechazó fuertemente la baja. Señal de compra en soporte."});
+
+  // Shooting Star (bajista) — mecha superior larga en zona alta
+  if(upperWick>body*2 && lowerWick<body*0.5 && body>0)
+    results.push({name:"Shooting Star", signal:"BEARISH", type:"REVERSAL", conf:72, emoji:"💫",
+      desc:"Mecha superior larga → precio rechazó fuertemente el alza. Señal de venta en resistencia."});
+
+  // Bullish Engulfing — vela verde envuelve vela roja anterior
+  if(p.c<p.o && c.c>c.o && c.o<=p.c && c.c>=p.o && body>prevBody*0.9)
+    results.push({name:"Bullish Engulfing", signal:"BULLISH", type:"REVERSAL", conf:76, emoji:"⬆",
+      desc:"Vela verde envuelve completamente la vela roja anterior → fuerte presión compradora."});
+
+  // Bearish Engulfing — vela roja envuelve vela verde anterior
+  if(p.c>p.o && c.c<c.o && c.o>=p.c && c.c<=p.o && body>prevBody*0.9)
+    results.push({name:"Bearish Engulfing", signal:"BEARISH", type:"REVERSAL", conf:76, emoji:"⬇",
+      desc:"Vela roja envuelve completamente la vela verde anterior → fuerte presión vendedora."});
+
+  // Morning Star (3 velas — alcista)
+  if(p2.c<p2.o && Math.abs(p.c-p.o)<Math.abs(p2.c-p2.o)*0.3 && c.c>c.o && c.c>p2.o)
+    results.push({name:"Morning Star", signal:"BULLISH", type:"REVERSAL", conf:74, emoji:"🌅",
+      desc:"Patrón de 3 velas: bajista → indecisión → alcista. Señal de suelo y cambio de tendencia."});
+
+  // Evening Star (3 velas — bajista)
+  if(p2.c>p2.o && Math.abs(p.c-p.o)<Math.abs(p2.c-p2.o)*0.3 && c.c<c.o && c.c<p2.o)
+    results.push({name:"Evening Star", signal:"BEARISH", type:"REVERSAL", conf:74, emoji:"🌆",
+      desc:"Patrón de 3 velas: alcista → indecisión → bajista. Señal de techo y cambio de tendencia."});
+
+  return results;
+}
+
+/* ─── LEARNING STATS (localStorage) ─────────────────────────────────────── */
+const LS_TRADES = "bot_trades_v2";
+const LS_BALANCE= "bot_balance_v2";
+
+function saveTradeLearning(trade){
+  try{
+    const arr=JSON.parse(localStorage.getItem(LS_TRADES)||"[]");
+    arr.unshift(trade);
+    localStorage.setItem(LS_TRADES, JSON.stringify(arr.slice(0,500)));
+  }catch{}
+}
+function loadTrades(){ try{return JSON.parse(localStorage.getItem(LS_TRADES)||"[]");}catch{return [];} }
+function saveBalance(b){ try{localStorage.setItem(LS_BALANCE,String(b));}catch{} }
+function loadBalance(){ try{const v=localStorage.getItem(LS_BALANCE);return v?parseFloat(v):10000;}catch{return 10000;} }
+
+function calcLearningStats(trades){
+  if(!trades.length) return null;
+  const byPattern={}, byDir={BUY:{w:0,t:0},SELL:{w:0,t:0}};
+  let streak=0, maxStreak=0, curStreak=0;
+  for(const t of trades){
+    const win=t.pnl>0;
+    // Direction stats
+    if(byDir[t.type]){byDir[t.type].t++; if(win)byDir[t.type].w++;}
+    // Pattern stats
+    for(const pat of (t.activePatterns||[])){
+      if(!byPattern[pat])byPattern[pat]={w:0,t:0};
+      byPattern[pat].t++;
+      if(win)byPattern[pat].w++;
+    }
+    // Streak
+    if(win){curStreak++;maxStreak=Math.max(maxStreak,curStreak);}
+    else curStreak=0;
+  }
+  // Recommend min confidence based on recent 20 trades
+  const recent=trades.slice(0,20);
+  const recentWR=recent.length?recent.filter(t=>t.pnl>0).length/recent.length:0.5;
+  const suggestedConf=recentWR>0.6?60:recentWR>0.4?70:75;
+
+  const sortedPat=Object.entries(byPattern)
+    .map(([name,{w,t}])=>({name,wr:t>1?Math.round(w/t*100):0,t}))
+    .filter(p=>p.t>=2)
+    .sort((a,b)=>b.wr-a.wr);
+
+  return{
+    total:trades.length,
+    wins:trades.filter(t=>t.pnl>0).length,
+    wr:Math.round(trades.filter(t=>t.pnl>0).length/trades.length*100),
+    recentWR:Math.round(recentWR*100),
+    byDir,
+    byPattern:sortedPat,
+    maxStreak,
+    suggestedConf,
+    totalPnl:trades.reduce((s,t)=>s+t.pnl,0),
+  };
+}
+
 /* ─── PATTERN DETECTION ─────────────────────────────────────────────────── */
 function findPivots(candles, lb=3){
   const highs=[], lows=[];
@@ -276,13 +424,14 @@ function calcShortTrend(candles, n=5){
 }
 
 /* ─── LIGHTWEIGHT CHART ─────────────────────────────────────────────────── */
-function LWChart({ candles, positions, trades, symbol, precision }){
+function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
   const mainRef  = useRef(null);
   const rsiRef   = useRef(null);
   const macdRef  = useRef(null);
-  const charts   = useRef({});   // {main, rsi, macd}
-  const series   = useRef({});   // all series refs
+  const charts   = useRef({});
+  const series   = useRef({});
   const posLines = useRef([]);
+  const srLines  = useRef([]);
   const [legend, setLegend] = useState(null);
 
   /* ── init charts ── */
@@ -319,6 +468,7 @@ function LWChart({ candles, positions, trades, symbol, precision }){
 
     const e9s=main.addLineSeries({ color:"#00b8e6", lineWidth:1.5, title:"EMA9",  priceLineVisible:false, lastValueVisible:true,  crosshairMarkerVisible:false });
     const e21s=main.addLineSeries({ color:"#ffd600", lineWidth:1.5, title:"EMA21", priceLineVisible:false, lastValueVisible:true,  crosshairMarkerVisible:false });
+    const e200s=main.addLineSeries({ color:"#ff6d00", lineWidth:2, lineStyle:LineStyle.Dashed, title:"EMA200", priceLineVisible:false, lastValueVisible:true, crosshairMarkerVisible:false });
     const bbu=main.addLineSeries({ color:"#00b8e635", lineWidth:1, lineStyle:LineStyle.Dashed, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
     const bbm=main.addLineSeries({ color:"#344d7040", lineWidth:1, lineStyle:LineStyle.Dotted, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
     const bbl=main.addLineSeries({ color:"#00b8e635", lineWidth:1, lineStyle:LineStyle.Dashed, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
@@ -379,7 +529,7 @@ function LWChart({ candles, positions, trades, symbol, precision }){
     ro.observe(mainRef.current);
 
     charts.current={main,rsiChart,macdChart};
-    series.current={cs,vs,e9s,e21s,bbu,bbm,bbl,rsiS,macdHist,macdLine,macdSig};
+    series.current={cs,vs,e9s,e21s,e200s,bbu,bbm,bbl,rsiS,macdHist,macdLine,macdSig};
 
     return()=>{
       ro.disconnect();
@@ -392,7 +542,7 @@ function LWChart({ candles, positions, trades, symbol, precision }){
 
   /* ── update data when candles change ── */
   useEffect(()=>{
-    const {cs,vs,e9s,e21s,bbu,bbm,bbl,rsiS,macdHist,macdLine,macdSig}=series.current;
+    const {cs,vs,e9s,e21s,e200s,bbu,bbm,bbl,rsiS,macdHist,macdLine,macdSig}=series.current;
     if(!cs||!candles.length) return;
 
     const closes=candles.map(c=>c.c);
@@ -412,7 +562,15 @@ function LWChart({ candles, positions, trades, symbol, precision }){
       e9d.push({time:times[i],value:e9});
       e21d.push({time:times[i],value:e21});
     }
+    // EMA200 per candle
+    const e200d=[];
+    let e200v=closes[0]; const k200=2/201;
+    for(let i=0;i<closes.length;i++){
+      e200v=closes[i]*k200+e200v*(1-k200);
+      if(i>=199) e200d.push({time:times[i],value:e200v});
+    }
     e9s.setData(e9d); e21s.setData(e21d);
+    if(e200s) e200s.setData(e200d);
 
     // Bollinger Bands per candle
     const bbU=[],bbM=[],bbL=[];
@@ -451,6 +609,28 @@ function LWChart({ candles, positions, trades, symbol, precision }){
 
     charts.current.main?.timeScale().fitContent();
   },[candles]);
+
+  /* ── S/R level lines ── */
+  useEffect(()=>{
+    const {cs}=series.current;
+    if(!cs||!srLevels) return;
+    srLines.current.forEach(l=>{try{cs.removePriceLine(l);}catch{}});
+    srLines.current=[];
+    (srLevels.resistances||[]).forEach(r=>{
+      srLines.current.push(cs.createPriceLine({
+        price:r.price, color:"#ff174450", lineWidth:1,
+        lineStyle:LineStyle.Dotted, axisLabelVisible:true,
+        title:`R×${r.touches}`,
+      }));
+    });
+    (srLevels.supports||[]).forEach(s=>{
+      srLines.current.push(cs.createPriceLine({
+        price:s.price, color:"#00e67650", lineWidth:1,
+        lineStyle:LineStyle.Dotted, axisLabelVisible:true,
+        title:`S×${s.touches}`,
+      }));
+    });
+  },[srLevels]);
 
   /* ── position lines (entry, TP, SL) ── */
   useEffect(()=>{
@@ -638,7 +818,7 @@ export default function TradingBot(){
   const [trend1h,setTrend1h]     = useState(0);
   const [patterns,setPatterns]   = useState([]);
   const [positions,setPositions] = useState([]);
-  const [balance,setBalance]     = useState(10000);
+  const [balance,setBalance]     = useState(()=>loadBalance());
   const [trades,setTrades]       = useState([]);
   const [log,setLog]             = useState([]);
   const [news,setNews]           = useState([]);
@@ -654,9 +834,15 @@ export default function TradingBot(){
   const [consecutiveLosses,setConsLosses]  = useState(0);
   const [shortTrend,setShortTrend]         = useState({pct:0,bullish:0,bearish:0,direction:"NEUTRAL"});
   const [skipCycles,setSkipCycles]         = useState(0);
+  const [ema200,setEma200]                 = useState(0);
+  const [srLevels,setSrLevels]             = useState({supports:[],resistances:[],all:[]});
+  const [learningStats,setLearningStats]   = useState(()=>calcLearningStats(loadTrades()));
+  const [showLearning,setShowLearning]     = useState(false);
   const consLossesRef  = useRef(0);
   const shortTrendRef  = useRef({pct:0,bullish:0,bearish:0,direction:"NEUTRAL"});
   const skipCyclesRef  = useRef(0);
+  const ema200Ref      = useRef(0);
+  const srRef          = useRef({supports:[],resistances:[],all:[]});
 
   const posRef    = useRef([]);
   const priceRef  = useRef(ASSETS["ETH/USDT"].basePrice);
@@ -693,6 +879,8 @@ export default function TradingBot(){
   useEffect(()=>{consLossesRef.current=consecutiveLosses;},[consecutiveLosses]);
   useEffect(()=>{shortTrendRef.current=shortTrend;},[shortTrend]);
   useEffect(()=>{skipCyclesRef.current=skipCycles;},[skipCycles]);
+  useEffect(()=>{ema200Ref.current=ema200;},[ema200]);
+  useEffect(()=>{srRef.current=srLevels;},[srLevels]);
 
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
@@ -751,14 +939,18 @@ export default function TradingBot(){
             const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
             const t1h=calcTrend1h(closes);
             const pts=detectPatterns(updated);
+            const cpats=detectCandlePatterns(updated);
+            const allPats=[...pts,...cpats];
             const st=calcShortTrend(updated,5);
+            const e200=calcEMA(closes,200);
             setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
             setBB(newBB); bbRef.current=newBB;
             setEma9(e9); ema9Ref.current=e9;
             setEma21(e21); ema21Ref.current=e21;
             setTrend1h(t1h); trend1hRef.current=t1h;
-            setPatterns(pts); patternsRef.current=pts;
+            setPatterns(allPats); patternsRef.current=allPats;
             setShortTrend(st); shortTrendRef.current=st;
+            setEma200(e200); ema200Ref.current=e200;
             return updated;
           });
         }catch{}
@@ -802,7 +994,7 @@ export default function TradingBot(){
     if(cur.type!=="crypto")return;
     const load=async()=>{
       try{
-        const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${cur.binance}&interval=1m&limit=80`);
+        const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${cur.binance}&interval=1m&limit=250`);
         const d=await r.json();
         if(!Array.isArray(d))return;
         const newCandles=d.map(k=>({time:Math.floor(parseInt(k[0])/1000),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
@@ -815,14 +1007,20 @@ export default function TradingBot(){
         const t1h=calcTrend1h(closes);
         const pts=detectPatterns(newCandles);
         const st=calcShortTrend(newCandles,5);
+        const e200=calcEMA(closes,200);
+        const sr=calcSR(newCandles);
+        const cpats=detectCandlePatterns(newCandles);
+        const allPats=[...pts,...cpats];
         setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
         setBB(newBB); bbRef.current=newBB;
         setEma9(e9); ema9Ref.current=e9;
         setEma21(e21); ema21Ref.current=e21;
         setVolTrend(vt); volRef.current=vt;
         setTrend1h(t1h); trend1hRef.current=t1h;
-        setPatterns(pts); patternsRef.current=pts;
+        setPatterns(allPats); patternsRef.current=allPats;
         setShortTrend(st); shortTrendRef.current=st;
+        setEma200(e200); ema200Ref.current=e200;
+        setSrLevels(sr); srRef.current=sr;
       }catch{}
     };
     load();
@@ -840,7 +1038,12 @@ export default function TradingBot(){
       const emoji=reason==="TP"?"✅":reason==="SL"?"🛑":"⬜";
       addLog(`${emoji} ${reason} ${pos.type} @ ${fP(currentPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
       setBalance(b=>{const nb=b+pnl;balanceRef.current=nb;return nb;});
-      setTrades(t=>[{...pos,exit:currentPrice,pnl,reason,time:now(),tradeTime:Math.floor(Date.now()/1000),symbol:symbolRef.current},...t.slice(0,49)]);
+      const closedTrade={...pos,exit:currentPrice,pnl,reason,time:now(),tradeTime:Math.floor(Date.now()/1000),
+        symbol:symbolRef.current, activePatterns:patternsRef.current.map(p=>p.name)};
+      setTrades(t=>[closedTrade,...t.slice(0,49)]);
+      saveTradeLearning(closedTrade);
+      setLearningStats(calcLearningStats(loadTrades()));
+      saveBalance(balanceRef.current+pnl);
       setClosedCount(c=>c+1);
       setTotalProfit(p=>p+pnl);
       // Track consecutive losses — reset on profit, increment on SL
@@ -896,6 +1099,8 @@ export default function TradingBot(){
         volRatio:volRef.current.ratio, trend1h:trend1hRef.current,
         shortTrend:shortTrendRef.current,
         consecutiveLosses:consLossesRef.current,
+        ema200:ema200Ref.current,
+        srLevels:srRef.current,
         patterns:patternsRef.current,
         positions:posRef.current, balance:balanceRef.current,
         news:newsRef.current,    reason,
@@ -1096,10 +1301,12 @@ export default function TradingBot(){
             </div>
             <div style={{display:"flex",gap:10,fontSize:8}}>
               <span style={{color:T.accent}}>EMA 9/21</span>
-              <span style={{color:"#00b8e640"}}>Bollinger</span>
+              <span style={{color:T.orange}}>EMA 200</span>
+              <span style={{color:"#00b8e640"}}>BB</span>
               <span style={{color:"#a855f7"}}>RSI</span>
               <span style={{color:T.accent}}>MACD</span>
-              <span style={{color:T.green}}>Vol</span>
+              <span style={{color:"#00e67650"}}>S</span>
+              <span style={{color:"#ff174450"}}>R</span>
               {positions.length>0&&<span style={{color:T.yellow,fontWeight:700}}>{positions.length} posición(es) activa(s)</span>}
             </div>
           </div>
@@ -1110,6 +1317,7 @@ export default function TradingBot(){
               trades={trades}
               symbol={symbol}
               precision={asset.precision}
+              srLevels={srLevels}
             />
           </div>
         </div>
@@ -1244,6 +1452,82 @@ export default function TradingBot(){
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+
+        {/* LEARNING STATS PANEL */}
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:showLearning?10:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>APRENDIZAJE AUTOMÁTICO · {learningStats?.total||0} trades guardados</span>
+              {learningStats&&<span style={{fontSize:8,fontWeight:700,
+                color:learningStats.recentWR>=60?T.green:learningStats.recentWR>=40?T.yellow:T.red,
+                background:`${learningStats.recentWR>=60?T.green:learningStats.recentWR>=40?T.yellow:T.red}18`,
+                padding:"1px 7px",borderRadius:3}}>WR {learningStats.recentWR}% (últimos 20)</span>}
+            </div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              {learningStats&&<span style={{fontSize:8,color:T.accent}}>conf. sugerida: {learningStats.suggestedConf}%</span>}
+              <button onClick={()=>setShowLearning(p=>!p)}
+                style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
+                  borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:9}}>
+                {showLearning?"▲ Ocultar":"▼ Ver stats"}
+              </button>
+              <button onClick={()=>{if(window.confirm("¿Borrar historial de aprendizaje?"))
+                {localStorage.removeItem(LS_TRADES);setLearningStats(null);}}}
+                style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
+                  borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:9}}>
+                🗑
+              </button>
+            </div>
+          </div>
+          {showLearning&&learningStats&&(
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {/* Global stats */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
+                {[
+                  {l:"TOTAL TRADES", v:learningStats.total,                              c:T.text},
+                  {l:"WIN RATE",     v:`${learningStats.wr}%`,                           c:learningStats.wr>=50?T.green:T.red},
+                  {l:"P&L ACUMULADO",v:fUSD(learningStats.totalPnl),                     c:learningStats.totalPnl>=0?T.green:T.red},
+                  {l:"BUY WR",       v:`${learningStats.byDir.BUY.t?Math.round(learningStats.byDir.BUY.w/learningStats.byDir.BUY.t*100):0}%`, c:T.green},
+                  {l:"SELL WR",      v:`${learningStats.byDir.SELL.t?Math.round(learningStats.byDir.SELL.w/learningStats.byDir.SELL.t*100):0}%`,c:T.red},
+                ].map(({l,v,c})=>(
+                  <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
+                    <div className="mono" style={{fontSize:12,fontWeight:700,color:c}}>{v}</div>
+                  </div>
+                ))}
+              </div>
+              {/* Pattern performance */}
+              {learningStats.byPattern.length>0&&(
+                <div>
+                  <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:5}}>RENDIMIENTO POR PATRÓN</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                    {learningStats.byPattern.slice(0,8).map(p=>(
+                      <div key={p.name} style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{fontSize:9,color:T.text,minWidth:160}}>{p.name}</span>
+                        <div style={{flex:1,height:6,background:T.dim,borderRadius:3,overflow:"hidden"}}>
+                          <div style={{height:"100%",width:`${p.wr}%`,
+                            background:p.wr>=60?T.green:p.wr>=40?T.yellow:T.red,
+                            borderRadius:3,transition:"width .4s"}}/>
+                        </div>
+                        <span className="mono" style={{fontSize:9,color:p.wr>=60?T.green:p.wr>=40?T.yellow:T.red,minWidth:40}}>{p.wr}%</span>
+                        <span style={{fontSize:8,color:T.muted}}>{p.t} trades</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {learningStats.total===0&&(
+                <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>
+                  Sin datos aún. El bot aprenderá automáticamente con cada trade cerrado.
+                </div>
+              )}
+            </div>
+          )}
+          {!learningStats&&(
+            <div style={{fontSize:10,color:T.muted,fontStyle:"italic",marginTop:4}}>
+              Sin trades aún. Opera con el bot para comenzar el aprendizaje.
             </div>
           )}
         </div>

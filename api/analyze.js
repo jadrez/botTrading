@@ -21,6 +21,8 @@ export default async function handler(req, res) {
     ema9 = 0, ema21 = 0, volRatio = 1, trend1h = 0,
     shortTrend = { pct: 0, bullish: 0, bearish: 0, direction: "NEUTRAL" },
     consecutiveLosses = 0,
+    ema200 = 0,
+    srLevels = { supports: [], resistances: [] },
     patterns = [],
     positions, balance, news, reason,
   } = req.body;
@@ -34,6 +36,9 @@ export default async function handler(req, res) {
     : "Ninguna";
 
   const emaCross    = ema9 > ema21 ? "EMA9>EMA21 (ALCISTA)" : "EMA9<EMA21 (BAJISTA)";
+  const ema200Dir   = ema200 > 0 ? (price > ema200 ? `precio SOBRE EMA200 → ALCISTA LARGO PLAZO` : `precio BAJO EMA200 → BAJISTA LARGO PLAZO`) : "EMA200 no disponible";
+  const nearSupport = srLevels.supports?.slice(0,2).map(s=>`S@${s.price?.toFixed(2)}(×${s.touches})`).join(" ") || "ninguno";
+  const nearResist  = srLevels.resistances?.slice(0,2).map(r=>`R@${r.price?.toFixed(2)}(×${r.touches})`).join(" ") || "ninguno";
   const volStr      = volRatio > 1.5 ? "ALTO" : volRatio < 0.7 ? "BAJO" : "NORMAL";
   const patternsStr = patterns.length
     ? patterns.map(p => `${p.name}(${p.signal} ${p.conf}%)`).join(", ")
@@ -73,7 +78,10 @@ EMA: ${emaCross}
 VOLUMEN: ${volStr} (×${volRatio?.toFixed(1)})
 TENDENCIA 1H: ${trend1h>=0?"+":""}${trend1h?.toFixed(2)}%
 TENDENCIA 5 VELAS: ${shortTrend?.pct?.toFixed(3)}% | ${shortTrend?.bullish} alcistas / ${shortTrend?.bearish} bajistas → ${stDir}
-PATRONES: ${patternsStr}
+EMA 200: ${ema200Dir}
+SOPORTE cercano: ${nearSupport}
+RESISTENCIA cercana: ${nearResist}
+PATRONES (velas + chartistas): ${patternsStr}
 
 ═══ TENDENCIA DOMINANTE: ${dominantTrend} ═══
 (EMA:${emaDir} | RSI:${rsiDir} | 1H:${t1hDir} | 5V:${stDir})
@@ -88,11 +96,14 @@ ${lossWarning}
 
 ═══ REGLAS ESTRICTAS ═══
 1. SIGUE LA TENDENCIA DOMINANTE. Si es BAJISTA→ solo SELL. Si es ALCISTA→ solo BUY. Si es LATERAL→ HOLD.
-2. NUNCA operes contra la tendencia. Si EMA9<EMA21 Y tendencia 5 velas es BEARISH → NO abrir BUY bajo ningún concepto.
-3. Requiere mínimo 2 señales confirmando la dirección (EMA + RSI, o EMA + patrón, o patrón + tendencia 1H).
-4. Si tendencia es BAJISTA FUERTE y aún hay posiciones BUY abiertas → signal=HOLD, should_open=false.
-5. ${consecutiveLosses>=2?"MODO CONSERVADOR ACTIVO: conf mínima 75%, solo señales perfectas.":"Confianza mínima para abrir: 65%."}
-6. Sin confluencia clara → HOLD siempre.
+2. NUNCA operes contra la tendencia. Si EMA9<EMA21 Y tendencia 5 velas es BEARISH → NO abrir BUY.
+3. EMA200 es la tendencia principal. Si precio < EMA200 → mercado bajista de fondo, prefiere SELL.
+4. Requiere mínimo 2 señales confirmando: EMA + RSI, o EMA + patrón vela, o S/R + patrón chartista.
+5. Si precio toca SOPORTE y hay Hammer/Engulfing alcista → alta prioridad BUY.
+6. Si precio toca RESISTENCIA y hay Shooting Star/Engulfing bajista → alta prioridad SELL.
+7. Si tendencia BAJISTA FUERTE y posiciones BUY abiertas → signal=HOLD, should_open=false.
+8. ${consecutiveLosses>=2?"MODO CONSERVADOR: conf mínima 75%.":"Confianza mínima: 65%."}
+9. Sin confluencia clara → HOLD siempre.
 
 Responde SOLO JSON sin backticks:
 {"signal":"BUY","confidence":75,"reasoning":"máx 60 palabras en español","news_impact":"BULLISH","key_factor":"5 palabras","risk":"MEDIO","should_open":true}`;
