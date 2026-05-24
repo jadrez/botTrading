@@ -428,10 +428,11 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
   const mainRef  = useRef(null);
   const rsiRef   = useRef(null);
   const macdRef  = useRef(null);
-  const charts   = useRef({});
-  const series   = useRef({});
-  const posLines = useRef([]);
-  const srLines  = useRef([]);
+  const charts      = useRef({});
+  const series      = useRef({});
+  const posLines    = useRef([]);
+  const srLines     = useRef([]);
+  const firstLoad   = useRef(true);
   const [legend, setLegend] = useState(null);
 
   /* ── init charts ── */
@@ -452,7 +453,8 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
         vertLine:{color:"#00b8e650",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#00b8e6"},
         horzLine:{color:"#00b8e650",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#00b8e6"},
       },
-      timeScale:{ borderColor:"#152035", timeVisible:true, secondsVisible:false, fixLeftEdge:true },
+      timeScale:{ borderColor:"#152035", timeVisible:true, secondsVisible:false, fixLeftEdge:true, rightOffset:10, barSpacing:8 },
+      rightPriceScale:{ borderColor:"#152035", minimumWidth:90 },
       watermark:{ visible:true, text:symbol, fontSize:40, color:"rgba(0,184,230,0.03)", horzAlign:"left", vertAlign:"top" },
     });
 
@@ -534,8 +536,10 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
     return()=>{
       ro.disconnect();
       posLines.current=[];
+      srLines.current=[];
       series.current={};
       charts.current={};
+      firstLoad.current=true;
       main.remove(); rsiChart.remove(); macdChart.remove();
     };
   },[symbol]);
@@ -607,7 +611,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
     }
     macdHist.setData(mhD); macdLine.setData(mlD); macdSig.setData(msD);
 
-    charts.current.main?.timeScale().fitContent();
+    if(firstLoad.current){ charts.current.main?.timeScale().fitContent(); firstLoad.current=false; }
   },[candles]);
 
   /* ── S/R level lines ── */
@@ -618,15 +622,15 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
     srLines.current=[];
     (srLevels.resistances||[]).forEach(r=>{
       srLines.current.push(cs.createPriceLine({
-        price:r.price, color:"#ff174450", lineWidth:1,
-        lineStyle:LineStyle.Dotted, axisLabelVisible:true,
+        price:r.price, color:"#ff174455", lineWidth:1,
+        lineStyle:LineStyle.Dotted, axisLabelVisible:false,
         title:`R×${r.touches}`,
       }));
     });
     (srLevels.supports||[]).forEach(s=>{
       srLines.current.push(cs.createPriceLine({
-        price:s.price, color:"#00e67650", lineWidth:1,
-        lineStyle:LineStyle.Dotted, axisLabelVisible:true,
+        price:s.price, color:"#00e67655", lineWidth:1,
+        lineStyle:LineStyle.Dotted, axisLabelVisible:false,
         title:`S×${s.touches}`,
       }));
     });
@@ -650,9 +654,9 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
         : pos.entry*(1+STOP_LOSS_USD/POSITION_USD);
 
       posLines.current.push(
-        cs.createPriceLine({price:pos.entry, color:entryCol,    lineWidth:2, lineStyle:LineStyle.Solid,  axisLabelVisible:true, title:`${pos.type} entrada`}),
-        cs.createPriceLine({price:tp,         color:"#00e676",   lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:true, title:`TP +$${TAKE_PROFIT_USD}`}),
-        cs.createPriceLine({price:sl,         color:"#ff1744",   lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:true, title:`SL -$${STOP_LOSS_USD}`}),
+        cs.createPriceLine({price:pos.entry, color:entryCol,  lineWidth:2, lineStyle:LineStyle.Solid,  axisLabelVisible:true,  title:`${pos.type}`}),
+        cs.createPriceLine({price:tp,        color:"#00e676", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:`TP +$${TAKE_PROFIT_USD}`}),
+        cs.createPriceLine({price:sl,        color:"#ff1744", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:`SL -$${STOP_LOSS_USD}`}),
       );
     });
   },[positions]);
@@ -838,6 +842,8 @@ export default function TradingBot(){
   const [srLevels,setSrLevels]             = useState({supports:[],resistances:[],all:[]});
   const [learningStats,setLearningStats]   = useState(()=>calcLearningStats(loadTrades()));
   const [showLearning,setShowLearning]     = useState(false);
+  const [chartInterval,setChartInterval]  = useState("1m");
+  const chartIntervalRef = useRef("1m");
   const consLossesRef  = useRef(0);
   const shortTrendRef  = useRef({pct:0,bullish:0,bearish:0,direction:"NEUTRAL"});
   const skipCyclesRef  = useRef(0);
@@ -881,6 +887,7 @@ export default function TradingBot(){
   useEffect(()=>{skipCyclesRef.current=skipCycles;},[skipCycles]);
   useEffect(()=>{ema200Ref.current=ema200;},[ema200]);
   useEffect(()=>{srRef.current=srLevels;},[srLevels]);
+  useEffect(()=>{chartIntervalRef.current=chartInterval;},[chartInterval]);
 
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
@@ -994,7 +1001,7 @@ export default function TradingBot(){
     if(cur.type!=="crypto")return;
     const load=async()=>{
       try{
-        const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${cur.binance}&interval=1m&limit=250`);
+        const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${cur.binance}&interval=${chartInterval}&limit=250`);
         const d=await r.json();
         if(!Array.isArray(d))return;
         const newCandles=d.map(k=>({time:Math.floor(parseInt(k[0])/1000),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
@@ -1023,10 +1030,11 @@ export default function TradingBot(){
         setSrLevels(sr); srRef.current=sr;
       }catch{}
     };
+    const refreshMs={"1m":60000,"5m":300000,"15m":900000,"1h":3600000,"4h":14400000}[chartInterval]||60000;
     load();
-    const iv=setInterval(load,60000);
+    const iv=setInterval(load,refreshMs);
     return()=>clearInterval(iv);
-  },[symbol]);
+  },[symbol,chartInterval]);
 
   /* ── Close position ──────────────────────────────────────────────────── */
   const closePosition=useCallback((posId,currentPrice,reason)=>{
@@ -1295,19 +1303,30 @@ export default function TradingBot(){
         {/* CHART — Lightweight Charts */}
         <div style={{background:"#04060f",border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:10}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 14px",borderBottom:`1px solid ${T.border}`}}>
-            <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
               <span className="live" style={{fontSize:9,color:T.green}}>EN VIVO</span>
-              <span style={{fontSize:9,color:T.muted,letterSpacing:2}}>{symbol} · 1M</span>
+              <span style={{fontSize:9,color:T.muted,letterSpacing:2}}>{symbol}</span>
+              {/* INTERVAL BUTTONS */}
+              <div style={{display:"flex",gap:3}}>
+                {["1m","5m","15m","1h","4h"].map(iv=>(
+                  <button key={iv} onClick={()=>setChartInterval(iv)}
+                    style={{background:chartInterval===iv?`${T.accent}25`:"transparent",
+                      border:`1px solid ${chartInterval===iv?T.accent:T.border}`,
+                      color:chartInterval===iv?T.accent:T.muted,
+                      borderRadius:4,padding:"2px 7px",cursor:"pointer",
+                      fontSize:9,fontWeight:chartInterval===iv?700:400}}>
+                    {iv.toUpperCase()}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div style={{display:"flex",gap:10,fontSize:8}}>
-              <span style={{color:T.accent}}>EMA 9/21</span>
-              <span style={{color:T.orange}}>EMA 200</span>
-              <span style={{color:"#00b8e640"}}>BB</span>
-              <span style={{color:"#a855f7"}}>RSI</span>
-              <span style={{color:T.accent}}>MACD</span>
-              <span style={{color:"#00e67650"}}>S</span>
-              <span style={{color:"#ff174450"}}>R</span>
-              {positions.length>0&&<span style={{color:T.yellow,fontWeight:700}}>{positions.length} posición(es) activa(s)</span>}
+            <div style={{display:"flex",gap:10,fontSize:8,alignItems:"center"}}>
+              <span style={{color:T.accent}}>── EMA9/21</span>
+              <span style={{color:T.orange}}>── EMA200</span>
+              <span style={{color:"#00b8e640"}}>··· BB</span>
+              <span style={{color:"#00e67670"}}>··· S</span>
+              <span style={{color:"#ff174470"}}>··· R</span>
+              {positions.length>0&&<span style={{color:T.yellow,fontWeight:700,background:`${T.yellow}15`,padding:"1px 7px",borderRadius:3}}>{positions.length} pos activa(s)</span>}
             </div>
           </div>
           <div style={{height:660}}>
