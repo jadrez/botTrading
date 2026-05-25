@@ -859,10 +859,10 @@ async function fetchForexRateCached(from,to,ttlMs=15000){
 }
 
 // Fetch real 1-min candles for forex from Yahoo Finance (via serverless proxy)
-async function fetchForexCandles(from,to,limit=200){
+async function fetchForexCandles(from,to,limit=200,interval="1m"){
   try{
     const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({from,to,candles:true,limit})});
+      body:JSON.stringify({from,to,candles:true,limit,interval})});
     if(!r.ok) return null;
     const d=await r.json();
     if(d.candles?.length>5) return d;
@@ -1058,6 +1058,7 @@ export default function TradingBot(){
   /* ── Price tick ──────────────────────────────────────────────────────── */
   useEffect(()=>{
     const cur=ASSETS[symbol];
+    const tfInterval=chartInterval||"1m";
     let iv;
 
     if(cur.type==="crypto"){
@@ -1137,9 +1138,9 @@ export default function TradingBot(){
         setForexLive(true); setPriceVerified(true);
       };
 
-      // Initial load: real candles
+      // Initial load: real candles at current timeframe
       (async()=>{
-        const data=await fetchForexCandles(forexFrom,forexTo,200);
+        const data=await fetchForexCandles(forexFrom,forexTo,200,tfInterval);
         if(data?.candles?.length>5){
           applyCandles(data.candles,data.rate);
         } else {
@@ -1187,7 +1188,7 @@ export default function TradingBot(){
     }
 
     return()=>clearInterval(iv);
-  },[symbol]);
+  },[symbol,chartInterval]);
 
   /* ── Binance klines for indicators ──────────────────────────────────── */
   useEffect(()=>{
