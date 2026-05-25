@@ -157,6 +157,19 @@ Responde SOLO JSON sin backticks:
     try {
       const parsed = JSON.parse(txt.replace(/```json|```/g, "").trim());
 
+      // Recompute confirmCount based on the AI's actual signal (fixes BUY-only bias)
+      // A corr pair CONFIRMS when it moves in the direction expected given its correlation + the signal
+      let finalConfirmCount = 0;
+      if (corrCount > 0 && parsed.signal !== "HOLD") {
+        finalConfirmCount = correlations.filter(c => {
+          if (parsed.signal === "BUY")
+            return (c.direction > 0 && c.signal === "BUY") || (c.direction < 0 && c.signal === "SELL");
+          if (parsed.signal === "SELL")
+            return (c.direction > 0 && c.signal === "SELL") || (c.direction < 0 && c.signal === "BUY");
+          return false;
+        }).length;
+      }
+
       // Hard override: if dominant trend is strongly bearish and signal is BUY → force HOLD
       if ((bearCount >= 3) && parsed.signal === "BUY") {
         return res.status(200).json({
@@ -179,19 +192,19 @@ Responde SOLO JSON sin backticks:
           key_factor: "Tendencia alcista bloqueó SELL",
         });
       }
-      // Hard override: correlations available but NONE confirm → block opening
-      if (corrCount >= 2 && confirmCount === 0 && parsed.signal !== "HOLD") {
+      // Hard override: correlations available but NONE confirm (based on actual signal direction)
+      if (corrCount >= 2 && finalConfirmCount === 0 && parsed.signal !== "HOLD") {
         return res.status(200).json({
           ...parsed,
           signal: "HOLD",
           should_open: false,
           confidence: Math.min(parsed.confidence, 38),
-          reasoning: `[Bloqueado por correlación] 0/${corrCount} pares correlacionados confirman la señal ${parsed.signal}. Sin confluencia inter-mercado. ${parsed.reasoning}`,
+          reasoning: `[Bloqueado por correlación] 0/${corrCount} pares confirman señal ${parsed.signal}. Sin confluencia inter-mercado. ${parsed.reasoning}`,
           key_factor: "Correlación contradice señal",
         });
       }
-      // Boost confidence when ALL correlations confirm
-      if (corrCount >= 2 && confirmCount === corrCount && parsed.should_open) {
+      // Boost confidence when ALL correlations confirm the actual signal
+      if (corrCount >= 2 && finalConfirmCount === corrCount && parsed.should_open) {
         return res.status(200).json({
           ...parsed,
           confidence: Math.min(99, parsed.confidence + 8),

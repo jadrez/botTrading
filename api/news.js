@@ -6,6 +6,10 @@ const TICKER_MAP = {
   "GBP/USD":  "FOREX:GBP,FOREX:USD",
   "USD/JPY":  "FOREX:USD,FOREX:JPY",
   "AUD/USD":  "FOREX:AUD,FOREX:USD",
+  "NZD/USD":  "FOREX:NZD,FOREX:USD",
+  "USD/CHF":  "FOREX:USD,FOREX:CHF",
+  "USD/CAD":  "FOREX:USD,FOREX:CAD",
+  "EUR/GBP":  "FOREX:EUR,FOREX:GBP",
 };
 
 export default async function handler(req, res) {
