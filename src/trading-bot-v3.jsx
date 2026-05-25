@@ -1528,40 +1528,76 @@ export default function TradingBot(){
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,paddingBottom:12,borderBottom:`1px solid ${T.border}`}}>
           <div>
             <div style={{fontSize:9,color:T.muted,letterSpacing:4,textTransform:"uppercase",marginBottom:6}}>Robot Autónomo de Trading</div>
-            {/* CRYPTO SELECTOR — dropdown */}
-            <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-              <div style={{display:"flex",alignItems:"center",gap:4}}>
-                <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>CRYPTO</span>
+            {/* SELECTORS ROW — crypto dropdown + forex dropdown + scanner */}
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+
+              {/* ── CRYPTO dropdown ── */}
+              <div style={{display:"flex",alignItems:"center",gap:5,
+                background:ASSETS[symbol]?.type==="crypto"?`${T.accent}10`:T.dim,
+                border:`1px solid ${ASSETS[symbol]?.type==="crypto"?T.accent:T.border}`,
+                borderRadius:7,padding:"4px 8px"}}>
+                <span style={{fontSize:7,color:ASSETS[symbol]?.type==="crypto"?T.accent:T.muted,letterSpacing:2,fontWeight:700}}>◈ CRYPTO</span>
                 <select
                   value={ASSETS[symbol]?.type==="crypto"?symbol:""}
                   onChange={e=>e.target.value&&handleSymbolChange(e.target.value)}
                   style={{
-                    background:ASSETS[symbol]?.type==="crypto"?`${T.accent}20`:T.card,
-                    border:`1px solid ${ASSETS[symbol]?.type==="crypto"?T.accent:T.border}`,
+                    background:"transparent",border:"none",
                     color:ASSETS[symbol]?.type==="crypto"?T.accent:T.muted,
-                    borderRadius:6,padding:"5px 10px",cursor:"pointer",
-                    fontSize:11,fontWeight:700,outline:"none",
+                    cursor:"pointer",fontSize:11,fontWeight:700,outline:"none",
+                    minWidth:90,
                   }}>
-                  {ASSETS[symbol]?.type!=="crypto"&&<option value="">◈ Seleccionar crypto</option>}
+                  {ASSETS[symbol]?.type!=="crypto"&&<option value="">Seleccionar...</option>}
                   {Object.entries(ASSETS).filter(([,v])=>v.type==="crypto").map(([s])=>{
-                    const sig=assetSignals[s];
-                    const badgeCol=sig?.color||"";
-                    return(
-                      <option key={s} value={s}>
-                        ◈ {s}{sig&&sig.signal!=="—"?" · "+sig.signal:""}
-                      </option>
-                    );
+                    const sig=multiMonitor?assetSignals[s]:null;
+                    return(<option key={s} value={s}>{s}{sig&&sig.signal!=="—"?" · "+sig.signal:""}</option>);
                   })}
                 </select>
-                {ASSETS[symbol]?.type==="crypto"&&assetSignals[symbol]&&(
-                  <span style={{fontSize:8,fontWeight:700,
-                    color:assetSignals[symbol].color||T.muted,
-                    background:`${assetSignals[symbol].color||T.muted}20`,
-                    padding:"2px 7px",borderRadius:3}}>
+                {ASSETS[symbol]?.type==="crypto"&&assetSignals[symbol]?.signal&&assetSignals[symbol].signal!=="—"&&(
+                  <span style={{fontSize:8,fontWeight:700,color:"#04060f",
+                    background:assetSignals[symbol].color||T.muted,
+                    padding:"1px 5px",borderRadius:3,lineHeight:1.4}}>
                     {assetSignals[symbol].signal}
                   </span>
                 )}
               </div>
+
+              {/* ── FOREX dropdown ── */}
+              <div style={{display:"flex",alignItems:"center",gap:5,
+                background:ASSETS[symbol]?.type==="forex"?`${T.green}10`:T.dim,
+                border:`1px solid ${ASSETS[symbol]?.type==="forex"?T.green:T.border}`,
+                borderRadius:7,padding:"4px 8px"}}>
+                <span style={{fontSize:7,color:ASSETS[symbol]?.type==="forex"?T.green:T.muted,letterSpacing:2,fontWeight:700}}>€ FOREX</span>
+                <select
+                  value={ASSETS[symbol]?.type==="forex"?symbol:""}
+                  onChange={e=>e.target.value&&handleSymbolChange(e.target.value)}
+                  style={{
+                    background:"transparent",border:"none",
+                    color:ASSETS[symbol]?.type==="forex"?T.green:T.muted,
+                    cursor:"pointer",fontSize:11,fontWeight:700,outline:"none",
+                    minWidth:100,
+                  }}>
+                  {ASSETS[symbol]?.type!=="forex"&&<option value="">Seleccionar...</option>}
+                  {Object.entries(ASSETS).filter(([,v])=>v.type==="forex").map(([s])=>{
+                    const w=forexWatch[s];
+                    const scanSig=multiMonitor?assetSignals[s]:null;
+                    const sigLabel=(scanSig?.signal&&scanSig.signal!=="—")?scanSig.signal:(w?.signal&&w.signal!=="—")?w.signal:"";
+                    return(<option key={s} value={s}>{s}{sigLabel?" · "+sigLabel:""}</option>);
+                  })}
+                </select>
+                {ASSETS[symbol]?.type==="forex"&&(()=>{
+                  const w=forexWatch[symbol];
+                  const sc=assetSignals[symbol];
+                  const sig=sc?.signal||w?.signal;
+                  const col=sc?.color||w?.color;
+                  return sig&&sig!=="—"?(
+                    <span style={{fontSize:8,fontWeight:700,color:"#04060f",
+                      background:col||T.muted,padding:"1px 5px",borderRadius:3,lineHeight:1.4}}>
+                      {sig}
+                    </span>
+                  ):null;
+                })()}
+              </div>
+
               <button onClick={()=>setMultiMonitor(p=>!p)}
                 style={{
                   background:multiMonitor?`${T.yellow}18`:"transparent",
