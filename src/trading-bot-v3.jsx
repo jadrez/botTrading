@@ -74,9 +74,11 @@ function posPnL(pos, price){
   return dir * (price - pos.entry) / pos.entry * POSITION_USD;
 }
 
-function genCandles(base=1.0823, n=200){
+function genCandles(base=1.0823, n=200, interval="5m"){
   const arr=[]; let p=base;
-  const vol = base > 100 ? base*0.003 : 0.0022;
+  // Scale volatility by timeframe multiplier and price magnitude
+  const tfMult = {"1m":1,"5m":5,"15m":15,"1h":60,"4h":240}[interval]||5;
+  const vol = base > 100 ? base*0.0003*Math.sqrt(tfMult) : 0.0001*Math.sqrt(tfMult);
   const nowSec = Math.floor(Date.now()/1000);
   for(let i=0;i<n;i++){
     const d=(Math.random()-.496)*vol;
@@ -1029,13 +1031,21 @@ export default function TradingBot(){
     setNextAnalysis(null);
     setCorrSignals({}); corrSignalsRef.current={};
 
+    // Forex pairs with small absolute values (< 10) need 5m+ timeframe to have visible candles
+    if(newAsset.type==="forex" && chartIntervalRef.current==="1m"){
+      setChartInterval("5m");
+      chartIntervalRef.current="5m";
+    } else if(newAsset.type==="crypto" && chartIntervalRef.current!=="1m" && chartIntervalRef.current!=="5m"){
+      // Keep user's chosen interval for crypto
+    }
+
     // Use cached real rate if available — prevents TP/SL firing at wrong price
     let initPrice=newAsset.basePrice;
     if(newAsset.type==="forex"){
       const cacheKey=`${newAsset.forexFrom}_${newAsset.forexTo}`;
       if(_fxCache[cacheKey]?.rate) initPrice=_fxCache[cacheKey].rate;
     }
-    const initCandles=genCandles(initPrice,200);
+    const initCandles=genCandles(initPrice,200,chartIntervalRef.current);
     setCandles(initCandles);
     setPrice(initPrice);
     priceRef.current=initPrice;
@@ -1146,7 +1156,7 @@ export default function TradingBot(){
         } else {
           // Fallback: ECB price with simulated candles
           const rate=await fetchForexRateCached(forexFrom,forexTo,300000);
-          if(rate) applyCandles(genCandles(rate,200),rate);
+          if(rate) applyCandles(genCandles(rate,200,tfInterval),rate);
         }
       })();
 
