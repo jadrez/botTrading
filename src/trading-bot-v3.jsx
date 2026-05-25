@@ -902,6 +902,7 @@ export default function TradingBot(){
   const bgPricesRef   = useRef({});
   const corrSignalsRef= useRef({});
   const livePricesRef = useRef({});
+  const newsCacheRef  = useRef({}); // {symbol: {data, ts}} — 30 min frontend cache
   const consLossesRef  = useRef(0);
   const shortTrendRef  = useRef({pct:0,bullish:0,bearish:0,direction:"NEUTRAL"});
   const skipCyclesRef  = useRef(0);
@@ -1478,15 +1479,28 @@ export default function TradingBot(){
     }
   },[positions,analyzing,runAnalysis]);
 
-  /* ── Load news ───────────────────────────────────────────────────────── */
-  const loadNews=useCallback(async(sym)=>{
+  /* ── Load news — with 30-min frontend cache to protect API quota ─────── */
+  const NEWS_FRONTEND_TTL = 30 * 60 * 1000; // 30 minutes
+  const loadNews=useCallback(async(sym,force=false)=>{
     const target=sym||symbolRef.current;
+    // Serve from frontend cache if fresh and not forced
+    if(!force){
+      const cached=newsCacheRef.current[target];
+      if(cached&&Date.now()-cached.ts<NEWS_FRONTEND_TTL){
+        setNewsData(cached.data); setNews(cached.data.headlines||[]);
+        addLog(`📰 ${cached.data.headlines?.length||0} noticias (cache) — Sesgo: ${(cached.data.market_bias||"neutral").toUpperCase()}`,"info");
+        return;
+      }
+    }
     setLoadingNews(true);
     addLog(`📰 Obteniendo noticias ${target}...`,"info");
     try{
       const d=await fetchNewsAI(target);
+      // Cache even stale/fallback responses so we don't retry immediately
+      newsCacheRef.current[target]={data:d, ts:Date.now()};
       setNewsData(d); setNews(d.headlines||[]);
-      addLog(`📰 ${d.headlines?.length||0} noticias — Sesgo: ${(d.market_bias||"neutral").toUpperCase()}`,"info");
+      const label=d._stale?"(guardadas)":d._cached?"(cache servidor)":"";
+      addLog(`📰 ${d.headlines?.length||0} noticias ${label}— Sesgo: ${(d.market_bias||"neutral").toUpperCase()}`,"info");
     }catch{addLog("❌ Error al cargar noticias","sell");}
     setLoadingNews(false);
   },[addLog]);
