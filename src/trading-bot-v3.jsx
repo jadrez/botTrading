@@ -444,7 +444,7 @@ function calcShortTrend(candles, n=5){
 }
 
 /* ─── LIGHTWEIGHT CHART ─────────────────────────────────────────────────── */
-function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
+function LWChart({ candles, positions, trades, symbol, precision, srLevels, positionSize=POSITION_USD }){
   const mainRef  = useRef(null);
   const rsiRef   = useRef(null);
   const macdRef  = useRef(null);
@@ -684,11 +684,11 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
       const isBuy=pos.type==="BUY";
       const entryCol=isBuy?"#00e676":"#ff1744";
       const tp=isBuy
-        ? pos.entry*(1+TAKE_PROFIT_USD/positionSizeRef.current)
-        : pos.entry*(1-TAKE_PROFIT_USD/positionSizeRef.current);
+        ? pos.entry*(1+TAKE_PROFIT_USD/positionSize)
+        : pos.entry*(1-TAKE_PROFIT_USD/positionSize);
       const sl=isBuy
-        ? pos.entry*(1-STOP_LOSS_USD/positionSizeRef.current)
-        : pos.entry*(1+STOP_LOSS_USD/positionSizeRef.current);
+        ? pos.entry*(1-STOP_LOSS_USD/positionSize)
+        : pos.entry*(1+STOP_LOSS_USD/positionSize);
 
       posLines.current.push(
         cs.createPriceLine({price:pos.entry, color:entryCol,  lineWidth:2, lineStyle:LineStyle.Solid,  axisLabelVisible:true,  title:`${pos.type}`}),
@@ -2390,6 +2390,7 @@ export default function TradingBot(){
               symbol={symbol}
               precision={asset.precision}
               srLevels={srLevels}
+              positionSize={positionSize}
             />
           </div>
         </div>
