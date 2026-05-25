@@ -1086,8 +1086,8 @@ export default function TradingBot(){
             const last={...updated[updated.length-1]};
             const nowSec=Math.floor(Date.now()/1000);
             last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
-            // start new 1-min candle when needed
-            if(nowSec - last.time >= 60){
+            const cSecs={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}[chartIntervalRef.current]||60;
+            if(nowSec - last.time >= cSecs){
               updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
             } else {
               updated[updated.length-1]=last;
@@ -1161,6 +1161,7 @@ export default function TradingBot(){
       })();
 
       // Price update every 15s — appends to last real candle
+      const tfSecs={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}[tfInterval]||300;
       iv=setInterval(async()=>{
         const np=await fetchForexRateCached(forexFrom,forexTo,15000);
         if(!np||isNaN(np)) return;
@@ -1169,7 +1170,7 @@ export default function TradingBot(){
           const last={...updated[updated.length-1]};
           const nowSec=Math.floor(Date.now()/1000);
           last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
-          if(nowSec-last.time>=60){
+          if(nowSec-last.time>=tfSecs){
             updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
           } else {
             updated[updated.length-1]=last;
