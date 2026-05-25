@@ -1148,15 +1148,20 @@ export default function TradingBot(){
         setForexLive(true); setPriceVerified(true);
       };
 
-      // Initial load: real candles at current timeframe
+      // Initial load: real candles (1m fetched & aggregated server-side for better gap coverage)
       (async()=>{
         const data=await fetchForexCandles(forexFrom,forexTo,200,tfInterval);
         if(data?.candles?.length>5){
           applyCandles(data.candles,data.rate);
         } else {
-          // Fallback: ECB price with simulated candles
+          // Fallback: get real rate + use it as anchor for placeholder candles
           const rate=await fetchForexRateCached(forexFrom,forexTo,300000);
-          if(rate) applyCandles(genCandles(rate,200,tfInterval),rate);
+          if(rate){
+            // Try one more time with 1m directly in case 5m aggregation failed
+            const raw=await fetchForexCandles(forexFrom,forexTo,300,"1m");
+            if(raw?.candles?.length>5) applyCandles(raw.candles,raw.rate);
+            else applyCandles(genCandles(rate,80,tfInterval),rate);
+          }
         }
       })();
 
@@ -1350,7 +1355,11 @@ export default function TradingBot(){
           for(let i=1;i<closes.length;i++){e9=closes[i]*k9+e9*(1-k9);e21=closes[i]*k21+e21*(1-k21);}
           const rsi=closes.length>14?calcRSI(closes):50;
           const signal=e9>e21&&rsi<70?"BUY":e9<e21&&rsi>30?"SELL":"HOLD";
-          const confirms=(direction>0&&signal==="BUY")||(direction<0&&signal==="SELL");
+          // confirms is relative to active pair's own trend — same logic as runAnalysis
+          const activeIsBull=ema9Ref.current>ema21Ref.current;
+          const confirms=activeIsBull
+            ?(direction>0&&signal==="BUY")||(direction<0&&signal==="SELL")
+            :(direction>0&&signal==="SELL")||(direction<0&&signal==="BUY");
           const color=signal==="BUY"?T.green:signal==="SELL"?T.red:T.muted;
           results[sym]={price,signal,direction,rsi:Math.round(rsi),confirms,color,
             precision:cfg.precision,samples:closes.length};
@@ -1544,6 +1553,9 @@ export default function TradingBot(){
               if(corrSlots<=0) continue;
               // Direction: same signal for positive corr, opposite for negative corr
               const corrSignal=corrDir>0?result.signal:(isBuy?"SELL":"BUY");
+              // Skip if the correlated pair's own signal actively contradicts the expected direction
+              const corrInfo=corrSignalsRef.current[corrSym];
+              if(corrInfo?.signal&&corrInfo.signal!=="HOLD"&&corrInfo.signal!==corrSignal) continue;
               corrPositions.push({
                 type:corrSignal,entry:corrPrice,id:Date.now()+Math.random()+corrPositions.length*0.001,
                 symbol:corrSym,openTime:Date.now(),correlatedWith:activeSym,

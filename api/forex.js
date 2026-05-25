@@ -2,14 +2,15 @@
 const _candleCache = {};
 const CANDLE_TTL = 60 * 1000;
 
-// Yahoo Finance interval/range mapping
-const YF_INTERVAL = { "1m":"1m", "5m":"5m", "15m":"15m", "1h":"60m", "4h":"60m" };
-const YF_RANGE    = { "1m":"2d", "5m":"7d", "15m":"15d", "1h":"60d", "4h":"60d" };
-
-async function fetchFromYahoo(from, to, wantCandles, limit, interval="1m") {
+// Always fetch 1-min data from Yahoo and aggregate — 1m data has far fewer gaps than native 5m/15m
+async function fetchFromYahoo(from, to, wantCandles, limit, interval = "1m") {
   const sym = `${from}${to}=X`;
-  const yfInterval = YF_INTERVAL[interval] || "1m";
-  const yfRange    = YF_RANGE[interval]    || "2d";
+
+  // For 1H and 4H use native 60m data (need more history than 1m allows)
+  const useNative60m = interval === "1h" || interval === "4h";
+  const yfInterval = useNative60m ? "60m" : "1m";
+  const yfRange    = useNative60m ? "60d" : "5d"; // 5d of 1m covers ~7200 candles (enough for any TF)
+
   const r = await fetch(
     `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=${yfInterval}&range=${yfRange}`,
     { headers: { "User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)" } }
@@ -32,9 +33,10 @@ async function fetchFromYahoo(from, to, wantCandles, limit, interval="1m") {
     }))
     .filter(c => c.o != null && c.h != null && c.l != null && c.c != null);
 
-  // For 4H: aggregate 1H candles into 4H blocks
-  if (interval === "4h") {
-    candles = aggregateCandles(candles, 4);
+  // Aggregate 1m → 5m / 15m / 4h as needed
+  const aggMap = { "5m": 5, "15m": 15, "4h": 4 };
+  if (aggMap[interval]) {
+    candles = aggregateCandles(candles, aggMap[interval]);
   }
 
   candles = candles.slice(-limit);
@@ -45,7 +47,7 @@ function aggregateCandles(candles, n) {
   const out = [];
   for (let i = 0; i < candles.length; i += n) {
     const group = candles.slice(i, i + n);
-    if (!group.length) continue;
+    if (group.length < Math.ceil(n / 2)) continue; // skip incomplete blocks at boundaries
     out.push({
       time: group[0].time,
       o: group[0].o,
@@ -72,7 +74,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // Primary: Yahoo Finance — real OHLCV, no API key needed
+  // Primary: Yahoo Finance — fetch 1m and aggregate for better gap coverage
   try {
     const data = await fetchFromYahoo(from, to, wantCandles, limit, interval);
     if (wantCandles && data.candles?.length > 5) {
