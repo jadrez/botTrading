@@ -59,7 +59,7 @@ const ASSETS = {
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
 const TAKE_PROFIT_USD    = 3.00;
 const STOP_LOSS_USD      = 2.00;
-const MAX_POSITIONS      = 5;
+const MAX_POSITIONS      = 3; // per symbol — correlated pairs open in parallel
 const POSITION_USD       = 1000;
 const ANALYSIS_INTERVAL_MS = 28000;
 
@@ -1417,15 +1417,42 @@ export default function TradingBot(){
         result.signal==="BUY"?"buy":result.signal==="SELL"?"sell":"info");
 
       if(autoRef.current){
-        const symSlots=MAX_POSITIONS-posRef.current.filter(p=>!p.symbol||p.symbol===symbolRef.current).length;
+        const activeSym=symbolRef.current;
+        const symSlots=MAX_POSITIONS-posRef.current.filter(p=>p.symbol===activeSym).length;
         if(result.should_open&&result.signal!=="HOLD"&&symSlots>0&&result.confidence>=60){
           const isBuy=result.signal==="BUY";
           const cp=priceRef.current;
-          const prec=ASSETS[symbolRef.current].precision;
-          const newPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
-            symbol:symbolRef.current,openTime:Date.now()};
-          setPositions(p=>[...p,newPos]);
-          addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} ${symbolRef.current} @ ${fP(cp,prec)} | TP:+$${TAKE_PROFIT_USD} SL:-$${STOP_LOSS_USD}`,isBuy?"buy":"sell");
+          const prec=ASSETS[activeSym].precision;
+          const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
+            symbol:activeSym,openTime:Date.now()};
+
+          // ── Open correlated positions on all forex pairs with a confirmed correlation
+          const corrPositions=[];
+          const activeAsset=ASSETS[activeSym];
+          if(activeAsset?.type==="forex"){
+            const corrs=activeAsset.correlations||{};
+            for(const [corrSym,corrDir] of Object.entries(corrs)){
+              const corrAsset=ASSETS[corrSym];
+              if(!corrAsset||corrAsset.type!=="forex") continue;
+              // Get real price from cache — skip if only basePrice available
+              const cacheKey=`${corrAsset.forexFrom}_${corrAsset.forexTo}`;
+              const corrPrice=_fxCache[cacheKey]?.rate;
+              if(!corrPrice||corrPrice===corrAsset.basePrice) continue;
+              // Check slot availability for this corr pair
+              const corrSlots=MAX_POSITIONS-posRef.current.filter(p=>p.symbol===corrSym).length;
+              if(corrSlots<=0) continue;
+              // Direction: same signal for positive corr, opposite for negative corr
+              const corrSignal=corrDir>0?result.signal:(isBuy?"SELL":"BUY");
+              corrPositions.push({
+                type:corrSignal,entry:corrPrice,id:Date.now()+Math.random()+corrPositions.length*0.001,
+                symbol:corrSym,openTime:Date.now(),correlatedWith:activeSym,
+              });
+              addLog(`🔗 ${corrSignal==="BUY"?"🟢":"🔴"} CORR ${corrSignal} ${corrSym} @ ${fP(corrPrice,corrAsset.precision)} (${corrDir>0?"↑↑":"↓↑"} ${activeSym})`,corrSignal==="BUY"?"buy":"sell");
+            }
+          }
+
+          setPositions(p=>[...p,mainPos,...corrPositions]);
+          addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} ${activeSym} @ ${fP(cp,prec)} | TP:+$${TAKE_PROFIT_USD} SL:-$${STOP_LOSS_USD}${corrPositions.length?` + ${corrPositions.length} correlacionadas`:""}`,isBuy?"buy":"sell");
           setAutoPhase("monitoring");
         } else {
           const why=!result.should_open?"sin confluencia clara"
@@ -1462,7 +1489,8 @@ export default function TradingBot(){
     timerRef.current=setInterval(()=>{
       remaining=ANALYSIS_INTERVAL_MS;
       if(!autoRef.current)return;
-      if(posRef.current.length<MAX_POSITIONS) runAnalysis("Ciclo automático regular");
+      const symCount=posRef.current.filter(p=>p.symbol===symbolRef.current).length;
+      if(symCount<MAX_POSITIONS) runAnalysis("Ciclo automático regular");
       else setAutoPhase("monitoring");
     },ANALYSIS_INTERVAL_MS);
 
