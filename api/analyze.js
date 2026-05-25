@@ -179,6 +179,26 @@ Responde SOLO JSON sin backticks:
           key_factor: "Tendencia alcista bloqueó SELL",
         });
       }
+      // Hard override: correlations available but NONE confirm → block opening
+      if (corrCount >= 2 && confirmCount === 0 && parsed.signal !== "HOLD") {
+        return res.status(200).json({
+          ...parsed,
+          signal: "HOLD",
+          should_open: false,
+          confidence: Math.min(parsed.confidence, 38),
+          reasoning: `[Bloqueado por correlación] 0/${corrCount} pares correlacionados confirman la señal ${parsed.signal}. Sin confluencia inter-mercado. ${parsed.reasoning}`,
+          key_factor: "Correlación contradice señal",
+        });
+      }
+      // Boost confidence when ALL correlations confirm
+      if (corrCount >= 2 && confirmCount === corrCount && parsed.should_open) {
+        return res.status(200).json({
+          ...parsed,
+          confidence: Math.min(99, parsed.confidence + 8),
+          reasoning: `[Confirmado por correlación ${corrCount}/${corrCount}] ${parsed.reasoning}`,
+          key_factor: parsed.key_factor + " · corr✓✓",
+        });
+      }
 
       return res.status(200).json(parsed);
     } catch {

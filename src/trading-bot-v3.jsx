@@ -885,9 +885,12 @@ export default function TradingBot(){
   const [forexLive,setForexLive]          = useState(false);
   const [corrSignals,setCorrSignals]      = useState({});
   const [forexWatch,setForexWatch]        = useState({});
+  const [activeView,setActiveView]        = useState("dashboard");
+  const [livePrices,setLivePrices]        = useState({});
   const chartIntervalRef = useRef("1m");
   const bgPricesRef   = useRef({});
   const corrSignalsRef= useRef({});
+  const livePricesRef = useRef({});
   const consLossesRef  = useRef(0);
   const shortTrendRef  = useRef({pct:0,bullish:0,bearish:0,direction:"NEUTRAL"});
   const skipCyclesRef  = useRef(0);
@@ -933,6 +936,39 @@ export default function TradingBot(){
   useEffect(()=>{srRef.current=srLevels;},[srLevels]);
   useEffect(()=>{chartIntervalRef.current=chartInterval;},[chartInterval]);
   useEffect(()=>{corrSignalsRef.current=corrSignals;},[corrSignals]);
+  // Keep livePrices in sync with the active symbol's real-time price
+  useEffect(()=>{
+    setLivePrices(p=>({...p,[symbol]:price}));
+    livePricesRef.current[symbol]=price;
+  },[symbol,price]);
+  // Fetch prices for non-active symbols that have open positions
+  useEffect(()=>{
+    const others=[...new Set(positions.filter(p=>p.symbol&&p.symbol!==symbol).map(p=>p.symbol))];
+    if(!others.length) return;
+    const fetchOthers=async()=>{
+      for(const sym of others){
+        const cfg=ASSETS[sym];
+        if(!cfg) continue;
+        try{
+          let p;
+          if(cfg.type==="crypto"){
+            const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cfg.binance}`);
+            const d=await r.json();
+            p=parseFloat(d.price);
+          } else {
+            p=await fetchForexRateCached(cfg.forexFrom,cfg.forexTo);
+          }
+          if(p&&!isNaN(p)){
+            setLivePrices(prev=>({...prev,[sym]:p}));
+            livePricesRef.current[sym]=p;
+          }
+        }catch{}
+      }
+    };
+    fetchOthers();
+    const iv=setInterval(fetchOthers,5000);
+    return()=>clearInterval(iv);
+  },[positions,symbol]);
 
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
@@ -942,22 +978,29 @@ export default function TradingBot(){
   const handleSymbolChange=useCallback((newSym)=>{
     if(newSym===symbolRef.current)return;
     const newAsset=ASSETS[newSym];
+    // Clear stale background prices for the new symbol to avoid mixed data
+    delete bgPricesRef.current[newSym];
     setSymbol(newSym);
     setAutoMode(false);
     setAutoPhase("idle");
-    setPositions([]);
+    // NOTE: positions are global — do NOT clear them on symbol change
     setAiResult(null);
     setNextAnalysis(null);
-    const initCandles=genCandles(newAsset.basePrice,80);
+    setCorrSignals({}); corrSignalsRef.current={};
+    const initCandles=genCandles(newAsset.basePrice,200);
     setCandles(initCandles);
     setPrice(newAsset.basePrice);
     priceRef.current=newAsset.basePrice;
     const closes=initCandles.map(c=>c.c);
     const initBB=calcBB(closes);
-    setRsi(calcRSI(closes));
-    setMacd(calcMACD(closes));
-    setBB(initBB);
-    bbRef.current=initBB;
+    const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
+    const e200=calcEMA(closes,200);
+    setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
+    setBB(initBB); bbRef.current=initBB;
+    setEma9(e9); ema9Ref.current=e9;
+    setEma21(e21); ema21Ref.current=e21;
+    setEma200(e200); ema200Ref.current=e200;
+    setForexLive(false);
     addLog(`🔄 Cambiando a ${newSym}...`,"info");
   },[addLog]);
 
@@ -1115,7 +1158,6 @@ export default function TradingBot(){
   /* ── Multi-asset scanner ─────────────────────────────────────────────── */
   useEffect(()=>{
     if(!multiMonitor){setAssetSignals({});return;}
-    let fxCache=null, fxCacheTs=0;
 
     const scan=async()=>{
       const results={};
@@ -1127,12 +1169,8 @@ export default function TradingBot(){
             const d=await r.json();
             price=parseFloat(d.price);
           } else {
-            const nowMs=Date.now();
-            if(!fxCache||nowMs-fxCacheTs>60000){
-              fxCache=await fetchForexRate("EUR","USD");
-              fxCacheTs=nowMs;
-            }
-            price=fxCache||ASSETS[sym].basePrice;
+            // Each forex pair gets its own correct rate
+            price=await fetchForexRateCached(cfg.forexFrom,cfg.forexTo);
           }
           if(!price||isNaN(price))continue;
 
@@ -1277,14 +1315,16 @@ export default function TradingBot(){
     });
   },[addLog]);
 
-  /* ── TP / SL watcher ─────────────────────────────────────────────────── */
+  /* ── TP / SL watcher — only for active symbol ────────────────────────── */
   useEffect(()=>{
-    posRef.current.forEach(pos=>{
-      const pnl=posPnL(pos,price);
-      if(pnl>=TAKE_PROFIT_USD) closePosition(pos.id,price,"TP");
-      else if(pnl<=-STOP_LOSS_USD) closePosition(pos.id,price,"SL");
-    });
-  },[price,closePosition]);
+    posRef.current
+      .filter(p=>!p.symbol||p.symbol===symbol)
+      .forEach(pos=>{
+        const pnl=posPnL(pos,price);
+        if(pnl>=TAKE_PROFIT_USD) closePosition(pos.id,price,"TP");
+        else if(pnl<=-STOP_LOSS_USD) closePosition(pos.id,price,"SL");
+      });
+  },[price,symbol,closePosition]);
 
   /* ── Core analyze ────────────────────────────────────────────────────── */
   const runAnalysis=useCallback(async(reason="Ciclo automático")=>{
@@ -1330,19 +1370,20 @@ export default function TradingBot(){
         result.signal==="BUY"?"buy":result.signal==="SELL"?"sell":"info");
 
       if(autoRef.current){
-        const slots=MAX_POSITIONS-posRef.current.length;
-        if(result.should_open&&result.signal!=="HOLD"&&slots>0&&result.confidence>=60){
+        const symSlots=MAX_POSITIONS-posRef.current.filter(p=>!p.symbol||p.symbol===symbolRef.current).length;
+        if(result.should_open&&result.signal!=="HOLD"&&symSlots>0&&result.confidence>=60){
           const isBuy=result.signal==="BUY";
           const cp=priceRef.current;
           const prec=ASSETS[symbolRef.current].precision;
-          const newPos={type:result.signal,entry:cp,id:Date.now()+Math.random()};
+          const newPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
+            symbol:symbolRef.current,openTime:Date.now()};
           setPositions(p=>[...p,newPos]);
-          addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} @ ${fP(cp,prec)} | TP:+$${TAKE_PROFIT_USD} SL:-$${STOP_LOSS_USD}`,isBuy?"buy":"sell");
+          addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} ${symbolRef.current} @ ${fP(cp,prec)} | TP:+$${TAKE_PROFIT_USD} SL:-$${STOP_LOSS_USD}`,isBuy?"buy":"sell");
           setAutoPhase("monitoring");
         } else {
           const why=!result.should_open?"sin confluencia clara"
             :result.confidence<60?`confianza baja (${result.confidence}%)`
-            :slots===0?"slots llenos":"señal HOLD";
+            :symSlots===0?"slots llenos":"señal HOLD";
           addLog(`⏸ Sin abrir — ${why}. Esperando próximo ciclo.`,"info");
           setAutoPhase("waiting_conditions");
         }
@@ -1412,7 +1453,12 @@ export default function TradingBot(){
   },[closePosition]);
 
   /* ── Stats ───────────────────────────────────────────────────────────── */
-  const unrealized=positions.reduce((s,p)=>s+posPnL(p,price),0);
+  const symPositions=positions.filter(p=>!p.symbol||p.symbol===symbol);
+  const unrealized=symPositions.reduce((s,p)=>s+posPnL(p,price),0);
+  const totalUnrealized=positions.reduce((s,p)=>{
+    const cp=livePricesRef.current[p.symbol]||price;
+    return s+posPnL(p,cp);
+  },0);
   const winCount=trades.filter(t=>t.pnl>0).length;
   const winRate=trades.length?Math.round(winCount/trades.length*100):0;
   const sigCol=aiResult?.signal==="BUY"?T.green:aiResult?.signal==="SELL"?T.red:T.yellow;
@@ -1646,6 +1692,263 @@ export default function TradingBot(){
           </div>
         )}
 
+        {/* ── NAVIGATION ── */}
+        <div style={{display:"flex",gap:0,marginBottom:12,borderBottom:`1px solid ${T.border}`,paddingBottom:0}}>
+          {[
+            {id:"dashboard", label:"📊 Dashboard"},
+            {id:"operations", label:`💼 Operaciones${positions.length>0?` (${positions.length})`:""}`,
+              badge:positions.length},
+          ].map(tab=>(
+            <button key={tab.id} onClick={()=>setActiveView(tab.id)}
+              style={{
+                background:"transparent",
+                border:"none",
+                borderBottom:`2px solid ${activeView===tab.id?T.accent:"transparent"}`,
+                color:activeView===tab.id?T.accent:T.muted,
+                padding:"8px 20px",cursor:"pointer",
+                fontSize:12,fontWeight:activeView===tab.id?700:400,letterSpacing:.5,
+                transition:"all .15s",
+              }}>
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {/* ══════════ VISTA: OPERACIONES ══════════ */}
+        {activeView==="operations"&&(()=>{
+          const formatDuration=(ms)=>{
+            const s=Math.floor(ms/1000);
+            if(s<60)return `${s}s`;
+            const m=Math.floor(s/60);
+            if(m<60)return `${m}m ${s%60}s`;
+            return `${Math.floor(m/60)}h ${m%60}m`;
+          };
+          const allUnrealized=positions.reduce((s,p)=>{
+            const cp=livePrices[p.symbol]||p.entry;
+            return s+posPnL(p,cp);
+          },0);
+          const bestPos=positions.length?positions.reduce((b,p)=>{
+            const cp=livePrices[p.symbol]||p.entry;
+            return posPnL(p,cp)>posPnL(b,livePrices[b.symbol]||b.entry)?p:b;
+          },positions[0]):null;
+          const worstPos=positions.length?positions.reduce((w,p)=>{
+            const cp=livePrices[p.symbol]||p.entry;
+            return posPnL(p,cp)<posPnL(w,livePrices[w.symbol]||w.entry)?p:w;
+          },positions[0]):null;
+          // Group by symbol for summary
+          const bySymbol={};
+          positions.forEach(p=>{
+            const sym=p.symbol||symbol;
+            if(!bySymbol[sym])bySymbol[sym]={positions:[],pnl:0};
+            const cp=livePrices[sym]||p.entry;
+            bySymbol[sym].positions.push(p);
+            bySymbol[sym].pnl+=posPnL(p,cp);
+          });
+          return(
+            <div style={{animation:"fadeUp .3s ease"}}>
+              {/* Summary banner */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:7,marginBottom:12}}>
+                {[
+                  {l:"BALANCE TOTAL",   v:`$${balance.toFixed(2)}`,                 c:T.accent},
+                  {l:"NO REALIZ GLOBAL",v:fUSD(allUnrealized),                       c:allUnrealized>=0?T.green:T.red},
+                  {l:"P&L ACUMULADO",  v:fUSD(totalProfit),                         c:totalProfit>=0?T.green:T.red},
+                  {l:"POS. ABIERTAS",  v:`${positions.length}`,                     c:positions.length?T.yellow:T.muted},
+                  {l:"WIN RATE GLOBAL", v:`${winRate}%`,                            c:winRate>=50?T.green:T.red},
+                ].map(({l,v,c})=>(
+                  <div key={l} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:7,padding:"10px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:3}}>{l}</div>
+                    <div className="mono" style={{fontSize:15,fontWeight:700,color:c}}>{v}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Best / Worst */}
+              {positions.length>0&&(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:12}}>
+                  {[{label:"MEJOR POSICIÓN",pos:bestPos,col:T.green},{label:"PEOR POSICIÓN",pos:worstPos,col:T.red}].map(({label,pos,col})=>{
+                    if(!pos)return null;
+                    const cp=livePrices[pos.symbol]||pos.entry;
+                    const pnl=posPnL(pos,cp);
+                    const prec=ASSETS[pos.symbol]?.precision||5;
+                    return(
+                      <div key={label} style={{background:T.card,border:`1px solid ${col}30`,borderRadius:7,padding:"10px 14px",
+                        display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <div>
+                          <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:3}}>{label}</div>
+                          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                            <span style={{fontSize:10,fontWeight:700,color:T.accent,background:`${T.accent}15`,padding:"2px 8px",borderRadius:4}}>{pos.symbol}</span>
+                            <span style={{fontSize:10,color:pos.type==="BUY"?T.green:T.red,fontWeight:700}}>{pos.type}</span>
+                            <span className="mono" style={{fontSize:10,color:T.muted}}>@ {fP(pos.entry,prec)}</span>
+                          </div>
+                        </div>
+                        <div className="mono" style={{fontSize:20,fontWeight:700,color:col}}>{fUSD(pnl)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* By symbol summary */}
+              {Object.keys(bySymbol).length>0&&(
+                <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:12}}>
+                  <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:8}}>POSICIONES POR ACTIVO</div>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                    {Object.entries(bySymbol).map(([sym,data])=>{
+                      const col=data.pnl>=0?T.green:T.red;
+                      return(
+                        <div key={sym} onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
+                          style={{background:`${col}0a`,border:`1px solid ${col}30`,borderRadius:6,
+                            padding:"7px 12px",cursor:"pointer",minWidth:110,textAlign:"center"}}>
+                          <div style={{fontSize:9,fontWeight:700,color:T.accent,marginBottom:3}}>{sym}</div>
+                          <div style={{fontSize:8,color:T.muted,marginBottom:2}}>{data.positions.length} pos</div>
+                          <div className="mono" style={{fontSize:12,fontWeight:700,color:col}}>{fUSD(data.pnl)}</div>
+                          <div style={{fontSize:7,color:T.accent,marginTop:3}}>→ Ver gráfica</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* All open positions table */}
+              <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:12}}>
+                <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:10}}>
+                  TODAS LAS POSICIONES ABIERTAS {positions.length===0&&"— Ninguna activa"}
+                </div>
+                {positions.length===0?(
+                  <div style={{fontSize:11,color:T.muted,fontStyle:"italic",padding:"20px",textAlign:"center"}}>
+                    No hay posiciones abiertas. Activa el modo AUTO o analiza un par para comenzar.
+                  </div>
+                ):(
+                  <>
+                    {/* Table header */}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 60px 100px 100px 80px 120px 80px 40px",
+                      gap:6,padding:"4px 8px",marginBottom:4}}>
+                      {["ACTIVO","TIPO","ENTRADA","ACTUAL","PnL","PROGRESO TP","DURACIÓN",""].map(h=>(
+                        <div key={h} style={{fontSize:7,color:T.muted,letterSpacing:1}}>{h}</div>
+                      ))}
+                    </div>
+                    {positions.map(pos=>{
+                      const sym=pos.symbol||symbol;
+                      const cfg=ASSETS[sym];
+                      const prec=cfg?.precision||5;
+                      const cp=livePrices[sym]||pos.entry;
+                      const pnl=posPnL(pos,cp);
+                      const pct=Math.min(100,Math.max(0,(pnl/TAKE_PROFIT_USD)*100));
+                      const pctChange=(cp-pos.entry)/pos.entry*100;
+                      const col=pnl>=0?T.green:T.red;
+                      const isBuy=pos.type==="BUY";
+                      const dur=pos.openTime?formatDuration(Date.now()-pos.openTime):"—";
+                      const tp=isBuy?pos.entry*(1+TAKE_PROFIT_USD/POSITION_USD):pos.entry*(1-TAKE_PROFIT_USD/POSITION_USD);
+                      const sl=isBuy?pos.entry*(1-STOP_LOSS_USD/POSITION_USD):pos.entry*(1+STOP_LOSS_USD/POSITION_USD);
+                      return(
+                        <div key={pos.id} className="fade-up" style={{
+                          display:"grid",gridTemplateColumns:"1fr 60px 100px 100px 80px 120px 80px 40px",
+                          gap:6,padding:"8px",marginBottom:4,borderRadius:6,
+                          background:`${col}06`,border:`1px solid ${col}20`,alignItems:"center",
+                        }}>
+                          {/* Activo */}
+                          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                            <span style={{fontSize:10,fontWeight:700,color:T.accent,
+                              background:`${T.accent}15`,padding:"2px 7px",borderRadius:4}}>{sym}</span>
+                            {cfg?.type==="forex"&&<span style={{fontSize:7,color:T.muted}}>FOREX</span>}
+                          </div>
+                          {/* Tipo */}
+                          <span style={{fontSize:10,fontWeight:700,color:isBuy?T.green:T.red,
+                            background:`${isBuy?T.green:T.red}15`,padding:"2px 6px",borderRadius:3,textAlign:"center"}}>
+                            {isBuy?"▲ BUY":"▼ SELL"}
+                          </span>
+                          {/* Entrada */}
+                          <div>
+                            <div className="mono" style={{fontSize:10,color:T.muted}}>{fP(pos.entry,prec)}</div>
+                            <div style={{fontSize:7,color:T.muted}}>TP:{fP(tp,prec)}</div>
+                            <div style={{fontSize:7,color:T.muted}}>SL:{fP(sl,prec)}</div>
+                          </div>
+                          {/* Actual */}
+                          <div>
+                            <div className="mono" style={{fontSize:10,color:T.accent,fontWeight:700}}>{fP(cp,prec)}</div>
+                            <div style={{fontSize:7,color:pctChange>=0?T.green:T.red}}>{fPct(pctChange)}</div>
+                          </div>
+                          {/* PnL */}
+                          <span className="mono" style={{fontSize:13,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
+                          {/* Progress bar */}
+                          <div>
+                            <div style={{height:4,background:T.dim,borderRadius:2,overflow:"hidden",marginBottom:2}}>
+                              <div style={{height:"100%",width:`${pct}%`,background:col,borderRadius:2,transition:"width .4s"}}/>
+                            </div>
+                            <div style={{fontSize:7,display:"flex",justifyContent:"space-between"}}>
+                              <span style={{color:T.red}}>SL -{fUSD(STOP_LOSS_USD,false)}</span>
+                              <span style={{color:col}}>{pct.toFixed(0)}%</span>
+                              <span style={{color:T.green}}>TP +{fUSD(TAKE_PROFIT_USD,false)}</span>
+                            </div>
+                          </div>
+                          {/* Duración */}
+                          <span className="mono" style={{fontSize:9,color:T.muted,textAlign:"center"}}>{dur}</span>
+                          {/* Cerrar */}
+                          <button onClick={()=>{
+                            closePosition(pos.id,cp,"MANUAL");
+                          }} style={{background:"transparent",border:`1px solid ${T.muted}40`,
+                            color:T.muted,borderRadius:4,padding:"3px 7px",cursor:"pointer",fontSize:10}}>✕</button>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
+
+              {/* Historial de trades cerrados */}
+              <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:12}}>
+                <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:8}}>
+                  HISTORIAL COMPLETO · {trades.length} operaciones cerradas
+                </div>
+                {trades.length===0?(
+                  <div style={{fontSize:11,color:T.muted,fontStyle:"italic",padding:"10px"}}>Sin historial aún.</div>
+                ):(
+                  <>
+                    {/* Resumen rápido */}
+                    <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+                      {Object.keys(ASSETS).map(sym=>{
+                        const symTrades=trades.filter(t=>t.symbol===sym);
+                        if(!symTrades.length)return null;
+                        const symPnl=symTrades.reduce((s,t)=>s+t.pnl,0);
+                        const symWR=Math.round(symTrades.filter(t=>t.pnl>0).length/symTrades.length*100);
+                        return(
+                          <div key={sym} style={{background:T.dim,borderRadius:5,padding:"5px 10px",minWidth:90,textAlign:"center"}}>
+                            <div style={{fontSize:8,fontWeight:700,color:T.accent}}>{sym}</div>
+                            <div className="mono" style={{fontSize:10,color:symPnl>=0?T.green:T.red}}>{fUSD(symPnl)}</div>
+                            <div style={{fontSize:7,color:T.muted}}>WR {symWR}% ({symTrades.length})</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {/* Trade list */}
+                    {trades.slice(0,30).map((t,i)=>{
+                      const prec=ASSETS[t.symbol]?.precision||5;
+                      const reasonCol=t.reason==="TP"?T.green:t.reason==="SL"?T.red:T.muted;
+                      return(
+                        <div key={i} style={{display:"grid",gridTemplateColumns:"80px 50px 28px 80px 80px 50px 1fr",
+                          gap:6,padding:"5px 6px",borderBottom:`1px solid ${T.border}20`,alignItems:"center",fontSize:9}}>
+                          <span style={{color:T.accent,fontWeight:700}}>{t.symbol||"—"}</span>
+                          <span style={{color:t.type==="BUY"?T.green:T.red,fontWeight:700}}>{t.type}</span>
+                          <span style={{fontSize:7,color:reasonCol,background:`${reasonCol}15`,
+                            padding:"1px 4px",borderRadius:3,textAlign:"center"}}>{t.reason}</span>
+                          <span className="mono" style={{color:T.muted,fontSize:8}}>{fP(t.entry,prec)}</span>
+                          <span className="mono" style={{color:T.muted,fontSize:8}}>{fP(t.exit,prec)}</span>
+                          <span className="mono" style={{color:t.pnl>=0?T.green:T.red,fontWeight:700}}>{fUSD(t.pnl)}</span>
+                          <span style={{color:T.muted,fontSize:7}}>{t.time}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ══════════ VISTA: DASHBOARD ══════════ */}
+        {activeView==="dashboard"&&(<>
+
         {/* STATS ROW */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:10}}>
           {[
@@ -1654,7 +1957,7 @@ export default function TradingBot(){
             {l:"P&L ACUM",   v:fUSD(totalProfit),          c:totalProfit>=0?T.green:T.red},
             {l:"CERRADAS",   v:closedCount,                c:T.yellow},
             {l:"WIN RATE",   v:`${winRate}%`,              c:winRate>=50?T.green:T.red},
-            {l:"POSICIONES", v:`${positions.length}/${MAX_POSITIONS}`, c:T.text},
+            {l:"POSICIONES", v:`${symPositions.length}/${MAX_POSITIONS}`, c:T.text},
           ].map(({l,v,c})=>(
             <div key={l} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:6,padding:"7px 10px",textAlign:"center"}}>
               <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:2}}>{l}</div>
@@ -1796,13 +2099,14 @@ export default function TradingBot(){
               <span style={{color:"#00b8e640"}}>··· BB</span>
               <span style={{color:"#00e67670"}}>··· S</span>
               <span style={{color:"#ff174470"}}>··· R</span>
-              {positions.length>0&&<span style={{color:T.yellow,fontWeight:700,background:`${T.yellow}15`,padding:"1px 7px",borderRadius:3}}>{positions.length} pos activa(s)</span>}
+              {symPositions.length>0&&<span style={{color:T.yellow,fontWeight:700,background:`${T.yellow}15`,padding:"1px 7px",borderRadius:3}}>{symPositions.length} pos activa(s)</span>}
+              {positions.length>symPositions.length&&<span style={{color:T.orange,fontSize:8,background:`${T.orange}15`,padding:"1px 7px",borderRadius:3}}>{positions.length-symPositions.length} en otros pares</span>}
             </div>
           </div>
           <div style={{height:660}}>
             <LWChart
               candles={candles}
-              positions={positions}
+              positions={symPositions}
               trades={trades}
               symbol={symbol}
               precision={asset.precision}
@@ -1811,12 +2115,12 @@ export default function TradingBot(){
           </div>
         </div>
 
-        {/* POSITIONS */}
-        {positions.length>0&&(
+        {/* POSITIONS del símbolo activo */}
+        {symPositions.length>0&&(
           <div style={{marginBottom:10}}>
-            <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:6}}>POSICIONES ABIERTAS — TP +${TAKE_PROFIT_USD} | SL -${STOP_LOSS_USD}</div>
+            <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:6}}>POSICIONES ABIERTAS — {symbol} — TP +${TAKE_PROFIT_USD} | SL -${STOP_LOSS_USD}</div>
             <div style={{display:"flex",flexDirection:"column",gap:5}}>
-              {positions.map(pos=><PosRow key={pos.id} pos={pos} price={price} precision={asset.precision} onClose={()=>manualClose(pos.id)}/>)}
+              {symPositions.map(pos=><PosRow key={pos.id} pos={pos} price={price} precision={asset.precision} onClose={()=>manualClose(pos.id)}/>)}
             </div>
           </div>
         )}
@@ -1881,14 +2185,14 @@ export default function TradingBot(){
             <div style={{background:T.dim,borderRadius:5,padding:"9px 12px",fontSize:11,color:T.text,lineHeight:1.65,borderLeft:`3px solid ${sigCol}`}}>
               {aiResult.reasoning}
             </div>
-            {!autoMode&&aiResult.signal!=="HOLD"&&positions.length<MAX_POSITIONS&&(
+            {!autoMode&&aiResult.signal!=="HOLD"&&positions.filter(p=>!p.symbol||p.symbol===symbol).length<MAX_POSITIONS&&(
               <button onClick={()=>{
-                const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now()};
+                const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now(),symbol,openTime:Date.now()};
                 setPositions(p=>[...p,pos]);
                 addLog(`${aiResult.signal==="BUY"?"🟢":"🔴"} ${aiResult.signal} manual @ ${fP(priceRef.current,asset.precision)}`,aiResult.signal==="BUY"?"buy":"sell");
               }} style={{marginTop:10,width:"100%",background:`${sigCol}18`,border:`1px solid ${sigCol}`,
                 color:sigCol,borderRadius:7,padding:"9px",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1}}>
-                ▶ EJECUTAR {aiResult.signal} MANUALMENTE (pos {positions.length+1}/{MAX_POSITIONS})
+                ▶ EJECUTAR {aiResult.signal} MANUALMENTE (pos {positions.filter(p=>!p.symbol||p.symbol===symbol).length+1}/{MAX_POSITIONS})
               </button>
             )}
           </div>
@@ -2094,6 +2398,8 @@ export default function TradingBot(){
           ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Crypto en vivo vía Binance · EUR/USD en vivo vía Open Exchange Rates (ECB) · TP +$3.00 · SL -$2.00<br/>
           Las señales son educativas y no garantizan resultados en mercados reales. Opera siempre con responsabilidad.
         </div>
+
+        </>)}{/* end dashboard view */}
 
       </div>
     </>
