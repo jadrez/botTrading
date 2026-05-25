@@ -69,9 +69,9 @@ const fUSD = (n, sign=true) => (sign&&n>=0?"+":"")+`$${Math.abs(n).toFixed(2)}`;
 const fPct = n => (n>=0?"+":"")+n.toFixed(3)+"%";
 const now  = () => new Date().toLocaleTimeString("es");
 
-function posPnL(pos, price){
+function posPnL(pos, price, posSize=POSITION_USD){
   const dir = pos.type==="BUY" ? 1 : -1;
-  return dir * (price - pos.entry) / pos.entry * POSITION_USD;
+  return dir * (price - pos.entry) / pos.entry * posSize;
 }
 
 function genCandles(base=1.0823, n=200, interval="5m"){
@@ -684,11 +684,11 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
       const isBuy=pos.type==="BUY";
       const entryCol=isBuy?"#00e676":"#ff1744";
       const tp=isBuy
-        ? pos.entry*(1+TAKE_PROFIT_USD/POSITION_USD)
-        : pos.entry*(1-TAKE_PROFIT_USD/POSITION_USD);
+        ? pos.entry*(1+TAKE_PROFIT_USD/positionSizeRef.current)
+        : pos.entry*(1-TAKE_PROFIT_USD/positionSizeRef.current);
       const sl=isBuy
-        ? pos.entry*(1-STOP_LOSS_USD/POSITION_USD)
-        : pos.entry*(1+STOP_LOSS_USD/POSITION_USD);
+        ? pos.entry*(1-STOP_LOSS_USD/positionSizeRef.current)
+        : pos.entry*(1+STOP_LOSS_USD/positionSizeRef.current);
 
       posLines.current.push(
         cs.createPriceLine({price:pos.entry, color:entryCol,  lineWidth:2, lineStyle:LineStyle.Solid,  axisLabelVisible:true,  title:`${pos.type}`}),
@@ -771,8 +771,8 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
 }
 
 /* ─── POSITION ROW ───────────────────────────────────────────────────────── */
-function PosRow({pos, price, precision, onClose}){
-  const pnl=posPnL(pos,price);
+function PosRow({pos, price, precision, onClose, positionSize=POSITION_USD}){
+  const pnl=posPnL(pos,price,positionSize);
   const col=pnl>=0?T.green:T.red;
   const pct=Math.min(100,Math.max(0,(pnl/TAKE_PROFIT_USD)*100));
   const pctChange=(price-pos.entry)/pos.entry*100;
@@ -872,11 +872,11 @@ async function fetchForexCandles(from,to,limit=200,interval="1m"){
   return null;
 }
 
-async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason}){
+async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize}){
   const r=await fetch("/api/analyze",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason}),
+    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize}),
   });
   if(!r.ok)return{signal:"HOLD",confidence:40,reasoning:"Error al conectar con el servidor.",news_impact:"NEUTRAL",key_factor:"Error conexión",risk:"ALTO",should_open:false};
   return r.json();
@@ -901,6 +901,7 @@ export default function TradingBot(){
   const [patterns,setPatterns]   = useState([]);
   const [positions,setPositions] = useState([]);
   const [balance,setBalance]     = useState(()=>loadBalance());
+  const [positionSize,setPositionSize] = useState(()=>parseFloat(localStorage.getItem("bot_posSize")||"1.00"));
   const [trades,setTrades]       = useState([]);
   const [log,setLog]             = useState([]);
   const [news,setNews]           = useState([]);
@@ -952,7 +953,8 @@ export default function TradingBot(){
   const trend1hRef = useRef(0);
   const patternsRef= useRef([]);
   const newsRef   = useRef([]);
-  const balanceRef= useRef(10000);
+  const balanceRef     = useRef(10000);
+  const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_posSize")||"1.00"));
   const timerRef  = useRef(null);
   const countRef  = useRef(null);
   const pendingAnalysisRef = useRef(false);
@@ -971,6 +973,7 @@ export default function TradingBot(){
   useEffect(()=>{patternsRef.current=patterns;},[patterns]);
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
+  useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_posSize",String(positionSize));},[positionSize]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
   useEffect(()=>{consLossesRef.current=consecutiveLosses;},[consecutiveLosses]);
   useEffect(()=>{shortTrendRef.current=shortTrend;},[shortTrend]);
@@ -1379,7 +1382,7 @@ export default function TradingBot(){
     setPositions(prev=>{
       const pos=prev.find(p=>p.id===posId);
       if(!pos)return prev;
-      const pnl=posPnL(pos,currentPrice);
+      const pnl=posPnL(pos,currentPrice,positionSizeRef.current);
       const posSym=pos.symbol||symbolRef.current;
       const prec=ASSETS[posSym]?.precision||ASSETS[symbolRef.current].precision;
       const emoji=reason==="TP"?"✅":reason==="SL"?"🛑":"⬜";
@@ -1422,7 +1425,7 @@ export default function TradingBot(){
     posRef.current
       .filter(p=>p.symbol===symbol)
       .forEach(pos=>{
-        const pnl=posPnL(pos,price);
+        const pnl=posPnL(pos,price,positionSizeRef.current);
         if(pnl>=TAKE_PROFIT_USD) closePosition(pos.id,price,"TP");
         else if(pnl<=-STOP_LOSS_USD) closePosition(pos.id,price,"SL");
       });
@@ -1437,7 +1440,7 @@ export default function TradingBot(){
         const cfg=ASSETS[pos.symbol];
         // Skip if no real price loaded yet (guard against basePrice triggering SL)
         if(!cp||cp===cfg?.basePrice) return;
-        const pnl=posPnL(pos,cp);
+        const pnl=posPnL(pos,cp,positionSizeRef.current);
         if(pnl>=TAKE_PROFIT_USD) closePosition(pos.id,cp,"TP");
         else if(pnl<=-STOP_LOSS_USD) closePosition(pos.id,cp,"SL");
       });
@@ -1521,6 +1524,7 @@ export default function TradingBot(){
         correlations:corrArray,
         positions:posRef.current, balance:balanceRef.current,
         news:newsRef.current,    reason,
+        positionSize:positionSizeRef.current,
       });
       setAiResult(result);
       addLog(`📡 ${result.signal} (${result.confidence}%) — ${result.key_factor}`,
@@ -1655,10 +1659,10 @@ export default function TradingBot(){
 
   /* ── Stats ───────────────────────────────────────────────────────────── */
   const symPositions=positions.filter(p=>p.symbol===symbol);
-  const unrealized=symPositions.reduce((s,p)=>s+posPnL(p,price),0);
+  const unrealized=symPositions.reduce((s,p)=>s+posPnL(p,price,positionSizeRef.current),0);
   const totalUnrealized=positions.reduce((s,p)=>{
     const cp=livePricesRef.current[p.symbol]||price;
-    return s+posPnL(p,cp);
+    return s+posPnL(p,cp,positionSizeRef.current);
   },0);
   const winCount=trades.filter(t=>t.pnl>0).length;
   const winRate=trades.length?Math.round(winCount/trades.length*100):0;
@@ -2000,15 +2004,15 @@ export default function TradingBot(){
           };
           const allUnrealized=positions.reduce((s,p)=>{
             const cp=livePrices[p.symbol]||p.entry;
-            return s+posPnL(p,cp);
+            return s+posPnL(p,cp,positionSizeRef.current);
           },0);
           const bestPos=positions.length?positions.reduce((b,p)=>{
             const cp=livePrices[p.symbol]||p.entry;
-            return posPnL(p,cp)>posPnL(b,livePrices[b.symbol]||b.entry)?p:b;
+            return posPnL(p,cp,positionSizeRef.current)>posPnL(b,livePrices[b.symbol]||b.entry,positionSizeRef.current)?p:b;
           },positions[0]):null;
           const worstPos=positions.length?positions.reduce((w,p)=>{
             const cp=livePrices[p.symbol]||p.entry;
-            return posPnL(p,cp)<posPnL(w,livePrices[w.symbol]||w.entry)?p:w;
+            return posPnL(p,cp,positionSizeRef.current)<posPnL(w,livePrices[w.symbol]||w.entry,positionSizeRef.current)?p:w;
           },positions[0]):null;
           // Group by symbol for summary
           const bySymbol={};
@@ -2017,7 +2021,7 @@ export default function TradingBot(){
             if(!bySymbol[sym])bySymbol[sym]={positions:[],pnl:0};
             const cp=livePrices[sym]||p.entry;
             bySymbol[sym].positions.push(p);
-            bySymbol[sym].pnl+=posPnL(p,cp);
+            bySymbol[sym].pnl+=posPnL(p,cp,positionSizeRef.current);
           });
           return(
             <div style={{animation:"fadeUp .3s ease"}}>
@@ -2043,7 +2047,7 @@ export default function TradingBot(){
                   {[{label:"MEJOR POSICIÓN",pos:bestPos,col:T.green},{label:"PEOR POSICIÓN",pos:worstPos,col:T.red}].map(({label,pos,col})=>{
                     if(!pos)return null;
                     const cp=livePrices[pos.symbol]||pos.entry;
-                    const pnl=posPnL(pos,cp);
+                    const pnl=posPnL(pos,cp,positionSizeRef.current);
                     const prec=ASSETS[pos.symbol]?.precision||5;
                     return(
                       <div key={label} style={{background:T.card,border:`1px solid ${col}30`,borderRadius:7,padding:"10px 14px",
@@ -2108,14 +2112,14 @@ export default function TradingBot(){
                       const cfg=ASSETS[sym];
                       const prec=cfg?.precision||5;
                       const cp=livePrices[sym]||pos.entry;
-                      const pnl=posPnL(pos,cp);
+                      const pnl=posPnL(pos,cp,positionSizeRef.current);
                       const pct=Math.min(100,Math.max(0,(pnl/TAKE_PROFIT_USD)*100));
                       const pctChange=(cp-pos.entry)/pos.entry*100;
                       const col=pnl>=0?T.green:T.red;
                       const isBuy=pos.type==="BUY";
                       const dur=pos.openTime?formatDuration(Date.now()-pos.openTime):"—";
-                      const tp=isBuy?pos.entry*(1+TAKE_PROFIT_USD/POSITION_USD):pos.entry*(1-TAKE_PROFIT_USD/POSITION_USD);
-                      const sl=isBuy?pos.entry*(1-STOP_LOSS_USD/POSITION_USD):pos.entry*(1+STOP_LOSS_USD/POSITION_USD);
+                      const tp=isBuy?pos.entry*(1+TAKE_PROFIT_USD/positionSizeRef.current):pos.entry*(1-TAKE_PROFIT_USD/positionSizeRef.current);
+                      const sl=isBuy?pos.entry*(1-STOP_LOSS_USD/positionSizeRef.current):pos.entry*(1+STOP_LOSS_USD/positionSizeRef.current);
                       return(
                         <div key={pos.id} className="fade-up" style={{
                           display:"grid",gridTemplateColumns:"1fr 60px 100px 100px 80px 120px 80px 40px",
@@ -2395,7 +2399,7 @@ export default function TradingBot(){
           <div style={{marginBottom:10}}>
             <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:6}}>POSICIONES ABIERTAS — {symbol} — TP +${TAKE_PROFIT_USD} | SL -${STOP_LOSS_USD}</div>
             <div style={{display:"flex",flexDirection:"column",gap:5}}>
-              {symPositions.map(pos=><PosRow key={pos.id} pos={pos} price={price} precision={asset.precision} onClose={()=>manualClose(pos.id)}/>)}
+              {symPositions.map(pos=><PosRow key={pos.id} pos={pos} price={price} precision={asset.precision} positionSize={positionSizeRef.current} onClose={()=>manualClose(pos.id)}/>)}
             </div>
           </div>
         )}
@@ -2418,7 +2422,7 @@ export default function TradingBot(){
             <div style={{display:"flex",gap:5,marginTop:8}}>
               {Array.from({length:MAX_POSITIONS},(_,i)=>{
                 const pos=positions[i];
-                const pnl=pos?posPnL(pos,price):null;
+                const pnl=pos?posPnL(pos,price,positionSizeRef.current):null;
                 const col=pos?(pnl>=0?T.green:T.red):T.dim;
                 return(
                   <div key={i} style={{flex:1,height:28,border:`1px solid ${col}`,borderRadius:5,background:`${col}12`,
@@ -2490,6 +2494,33 @@ export default function TradingBot(){
               color:loadingNews?T.muted:T.yellow,borderRadius:8,padding:"11px 8px",cursor:loadingNews?"not-allowed":"pointer",fontSize:12,fontWeight:700}}>
             {loadingNews?"⏳ Cargando...":"📰 Actualizar Noticias"}
           </button>
+        </div>
+
+        {/* POSITION SIZE CONTROL */}
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>TAMAÑO DE POSICIÓN (USD notional)</span>
+            <span className="mono" style={{fontSize:11,color:T.accent,fontWeight:700}}>${positionSize.toFixed(2)}</span>
+          </div>
+          <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+            {[0.10,0.50,1.00,5.00,10.00,50.00,100.00].map(v=>(
+              <button key={v} onClick={()=>setPositionSize(v)}
+                style={{flex:"1 1 auto",minWidth:44,background:positionSize===v?`${T.accent}22`:"transparent",
+                  border:`1px solid ${positionSize===v?T.accent:T.border}`,color:positionSize===v?T.accent:T.muted,
+                  borderRadius:6,padding:"6px 4px",cursor:"pointer",fontSize:10,fontWeight:positionSize===v?700:400}}>
+                ${v.toFixed(2)}
+              </button>
+            ))}
+            <input type="number" min="0.01" step="0.01"
+              value={positionSize}
+              onChange={e=>{const v=parseFloat(e.target.value);if(!isNaN(v)&&v>0)setPositionSize(v);}}
+              style={{width:70,background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,
+                padding:"6px 8px",fontSize:10,fontFamily:"monospace",outline:"none"}}
+            />
+          </div>
+          <div style={{fontSize:8,color:T.muted,marginTop:5}}>
+            TP +${TAKE_PROFIT_USD.toFixed(2)} = {((TAKE_PROFIT_USD/positionSize)*100).toFixed(2)}% · SL -${STOP_LOSS_USD.toFixed(2)} = {((STOP_LOSS_USD/positionSize)*100).toFixed(2)}% del notional
+          </div>
         </div>
 
         {/* PATTERNS PANEL */}

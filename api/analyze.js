@@ -1,13 +1,13 @@
 const TAKE_PROFIT_USD = 3.00;
 const STOP_LOSS_USD   = 2.00;
 const MAX_POSITIONS   = 5;
-const POSITION_USD    = 1000;
+const DEFAULT_POSITION_USD = 1000;
 
 const fUSD = (n, sign=true) => (sign&&n>=0?"+":"")+`$${Math.abs(n).toFixed(2)}`;
 
-function posPnL(pos, price) {
+function posPnL(pos, price, posSize=DEFAULT_POSITION_USD) {
   const dir = pos.type === "BUY" ? 1 : -1;
-  return dir * (price - pos.entry) / pos.entry * POSITION_USD;
+  return dir * (price - pos.entry) / pos.entry * posSize;
 }
 
 export default async function handler(req, res) {
@@ -26,14 +26,16 @@ export default async function handler(req, res) {
     patterns = [],
     correlations = [],
     positions, balance, news, reason,
+    positionSize = DEFAULT_POSITION_USD,
   } = req.body;
+  const POSITION_USD = positionSize > 0 ? positionSize : DEFAULT_POSITION_USD;
 
   const nc = (news || []).slice(0, 4)
     .map(n => `[${n.sentiment.toUpperCase()}|${n.impact}] ${n.title}`)
     .join("\n") || "Sin noticias.";
 
   const pc = positions.length
-    ? positions.map((p, i) => `#${i+1} ${p.type} PnL:${fUSD(posPnL(p, price))}`).join(" | ")
+    ? positions.map((p, i) => `#${i+1} ${p.type} PnL:${fUSD(posPnL(p, price, POSITION_USD))}`).join(" | ")
     : "Ninguna";
 
   const emaCross    = ema9 > ema21 ? "EMA9>EMA21 (ALCISTA)" : "EMA9<EMA21 (BAJISTA)";
