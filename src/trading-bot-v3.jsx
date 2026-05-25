@@ -451,6 +451,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
   const posLines    = useRef([]);
   const srLines     = useRef([]);
   const firstLoad   = useRef(true);
+  const prevFitPrice= useRef(null);
   const [legend, setLegend] = useState(null);
 
   /* ── init charts ── */
@@ -558,6 +559,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
       series.current={};
       charts.current={};
       firstLoad.current=true;
+      prevFitPrice.current=null;
       main.remove(); rsiChart.remove(); macdChart.remove();
     };
   },[symbol]);
@@ -636,7 +638,15 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
     }
     macdHist.setData(mhD); macdLine.setData(mlD); macdSig.setData(msD);
 
-    if(firstLoad.current){ charts.current.main?.timeScale().fitContent(); firstLoad.current=false; }
+    const latestPrice=closes.at(-1);
+    const prev=prevFitPrice.current;
+    // Refit on first load, symbol change, or when real data arrives at a significantly different price (genCandles→Yahoo)
+    const bigJump=prev!==null&&Math.abs(latestPrice-prev)/prev>0.005;
+    if(firstLoad.current||bigJump){
+      charts.current.main?.timeScale().fitContent();
+      firstLoad.current=false;
+    }
+    prevFitPrice.current=latestPrice;
   },[candles]);
 
   /* ── S/R level lines ── */
@@ -1125,8 +1135,6 @@ export default function TradingBot(){
         setSrLevels(sr); srRef.current=sr;
         if(np) _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
         setForexLive(true); setPriceVerified(true);
-        // Refit chart after real candles load (genCandles may have been at a different price)
-        setTimeout(()=>charts.current.main?.timeScale().fitContent(),80);
       };
 
       // Initial load: real candles
