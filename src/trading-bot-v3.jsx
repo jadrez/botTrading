@@ -567,12 +567,19 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels }){
     const {cs,vs,e9s,e21s,e200s,bbu,bbm,bbl,rsiS,macdHist,macdLine,macdSig}=series.current;
     if(!cs||!candles.length) return;
 
-    const closes=candles.map(c=>c.c);
-    const times =candles.map(c=>c.time);
+    // Deduplicate+sort to prevent Lightweight Charts assertion errors with Yahoo Finance data
+    const clean=candles
+      .filter(c=>c.time&&c.o!=null&&c.h!=null&&c.l!=null&&c.c!=null)
+      .sort((a,b)=>a.time-b.time)
+      .filter((c,i,arr)=>i===0||c.time!==arr[i-1].time);
+    if(!clean.length) return;
+
+    const closes=clean.map(c=>c.c);
+    const times =clean.map(c=>c.time);
 
     // Candles & volume
-    cs.setData(candles.map(c=>({time:c.time,open:c.o,high:c.h,low:c.l,close:c.c})));
-    vs.setData(candles.map(c=>({time:c.time,value:c.v||0,color:c.c>=c.o?"#00e67640":"#ff174440"})));
+    cs.setData(clean.map(c=>({time:c.time,open:c.o,high:c.h,low:c.l,close:c.c})));
+    vs.setData(clean.map(c=>({time:c.time,value:c.v||0,color:c.c>=c.o?"#00e67640":"#ff174440"})));
 
     // EMA per candle
     const e9d=[],e21d=[];
@@ -1093,6 +1100,7 @@ export default function TradingBot(){
 
       const applyCandles=(newCandles,rate)=>{
         if(!newCandles?.length) return;
+        firstLoad.current=true; // force chart refit when real data replaces genCandles
         setCandles(newCandles);
         const closes=newCandles.map(c=>c.c);
         const volumes=newCandles.map(c=>c.v||0);
