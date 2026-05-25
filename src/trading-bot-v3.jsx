@@ -1100,7 +1100,6 @@ export default function TradingBot(){
 
       const applyCandles=(newCandles,rate)=>{
         if(!newCandles?.length) return;
-        firstLoad.current=true; // force chart refit when real data replaces genCandles
         setCandles(newCandles);
         const closes=newCandles.map(c=>c.c);
         const volumes=newCandles.map(c=>c.v||0);
@@ -1126,6 +1125,8 @@ export default function TradingBot(){
         setSrLevels(sr); srRef.current=sr;
         if(np) _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
         setForexLive(true); setPriceVerified(true);
+        // Refit chart after real candles load (genCandles may have been at a different price)
+        setTimeout(()=>charts.current.main?.timeScale().fitContent(),80);
       };
 
       // Initial load: real candles
