@@ -978,19 +978,24 @@ export default function TradingBot(){
   const handleSymbolChange=useCallback((newSym)=>{
     if(newSym===symbolRef.current)return;
     const newAsset=ASSETS[newSym];
-    // Clear stale background prices for the new symbol to avoid mixed data
     delete bgPricesRef.current[newSym];
     setSymbol(newSym);
     setAutoMode(false);
     setAutoPhase("idle");
-    // NOTE: positions are global — do NOT clear them on symbol change
     setAiResult(null);
     setNextAnalysis(null);
     setCorrSignals({}); corrSignalsRef.current={};
-    const initCandles=genCandles(newAsset.basePrice,200);
+
+    // Use cached real rate if available — prevents TP/SL firing at wrong price
+    let initPrice=newAsset.basePrice;
+    if(newAsset.type==="forex"){
+      const cacheKey=`${newAsset.forexFrom}_${newAsset.forexTo}`;
+      if(_fxCache[cacheKey]?.rate) initPrice=_fxCache[cacheKey].rate;
+    }
+    const initCandles=genCandles(initPrice,200);
     setCandles(initCandles);
-    setPrice(newAsset.basePrice);
-    priceRef.current=newAsset.basePrice;
+    setPrice(initPrice);
+    priceRef.current=initPrice;
     const closes=initCandles.map(c=>c.c);
     const initBB=calcBB(closes);
     const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
@@ -1000,7 +1005,7 @@ export default function TradingBot(){
     setEma9(e9); ema9Ref.current=e9;
     setEma21(e21); ema21Ref.current=e21;
     setEma200(e200); ema200Ref.current=e200;
-    setForexLive(false);
+    setForexLive(newAsset.type==="forex"&&!!_fxCache[`${newAsset.forexFrom}_${newAsset.forexTo}`]?.rate);
     addLog(`🔄 Cambiando a ${newSym}...`,"info");
   },[addLog]);
 
@@ -1282,12 +1287,13 @@ export default function TradingBot(){
       const pos=prev.find(p=>p.id===posId);
       if(!pos)return prev;
       const pnl=posPnL(pos,currentPrice);
-      const prec=ASSETS[symbolRef.current].precision;
+      const posSym=pos.symbol||symbolRef.current;
+      const prec=ASSETS[posSym]?.precision||ASSETS[symbolRef.current].precision;
       const emoji=reason==="TP"?"✅":reason==="SL"?"🛑":"⬜";
-      addLog(`${emoji} ${reason} ${pos.type} @ ${fP(currentPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
+      addLog(`${emoji} ${reason} ${pos.type} ${posSym} @ ${fP(currentPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
       setBalance(b=>{const nb=b+pnl;balanceRef.current=nb;return nb;});
       const closedTrade={...pos,exit:currentPrice,pnl,reason,time:now(),tradeTime:Math.floor(Date.now()/1000),
-        symbol:symbolRef.current, activePatterns:patternsRef.current.map(p=>p.name)};
+        symbol:posSym, activePatterns:patternsRef.current.map(p=>p.name)};
       setTrades(t=>[closedTrade,...t.slice(0,49)]);
       saveTradeLearning(closedTrade);
       setLearningStats(calcLearningStats(loadTrades()));
@@ -1315,8 +1321,11 @@ export default function TradingBot(){
     });
   },[addLog]);
 
-  /* ── TP / SL watcher — only for active symbol ────────────────────────── */
+  /* ── TP / SL watcher — active symbol ────────────────────────────────── */
   useEffect(()=>{
+    // Guard: skip if forex price not yet confirmed live (prevents firing at basePrice)
+    const cur=ASSETS[symbol];
+    if(cur.type==="forex"&&!forexLive) return;
     posRef.current
       .filter(p=>!p.symbol||p.symbol===symbol)
       .forEach(pos=>{
@@ -1324,7 +1333,22 @@ export default function TradingBot(){
         if(pnl>=TAKE_PROFIT_USD) closePosition(pos.id,price,"TP");
         else if(pnl<=-STOP_LOSS_USD) closePosition(pos.id,price,"SL");
       });
-  },[price,symbol,closePosition]);
+  },[price,symbol,forexLive,closePosition]);
+
+  /* ── TP / SL watcher — non-active symbols (uses livePrices) ──────────── */
+  useEffect(()=>{
+    posRef.current
+      .filter(p=>p.symbol&&p.symbol!==symbol)
+      .forEach(pos=>{
+        const cp=livePrices[pos.symbol];
+        const cfg=ASSETS[pos.symbol];
+        // Skip if no real price loaded yet (guard against basePrice triggering SL)
+        if(!cp||cp===cfg?.basePrice) return;
+        const pnl=posPnL(pos,cp);
+        if(pnl>=TAKE_PROFIT_USD) closePosition(pos.id,cp,"TP");
+        else if(pnl<=-STOP_LOSS_USD) closePosition(pos.id,cp,"SL");
+      });
+  },[livePrices,symbol,closePosition]);
 
   /* ── Core analyze ────────────────────────────────────────────────────── */
   const runAnalysis=useCallback(async(reason="Ciclo automático")=>{
