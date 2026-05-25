@@ -30,8 +30,8 @@ const STYLES = `
 `;
 
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
-const TAKE_PROFIT_USD = 1.20;
-const STOP_LOSS_USD   = 2.00;
+const TAKE_PROFIT_USD = 2.20;
+const STOP_LOSS_USD   = 5.00;
 const MAX_POSITIONS   = 5;
 const UNITS           = 1000;
 const ANALYSIS_INTERVAL_MS = 28000; // 28s entre ciclos auto

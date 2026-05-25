@@ -3,6 +3,9 @@ const TICKER_MAP = {
   "BTC/USDT": "CRYPTO:BTC",
   "SOL/USDT": "CRYPTO:SOL",
   "EUR/USD":  "FOREX:EUR,FOREX:USD",
+  "GBP/USD":  "FOREX:GBP,FOREX:USD",
+  "USD/JPY":  "FOREX:USD,FOREX:JPY",
+  "AUD/USD":  "FOREX:AUD,FOREX:USD",
 };
 
 export default async function handler(req, res) {

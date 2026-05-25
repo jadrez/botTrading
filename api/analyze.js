@@ -24,6 +24,7 @@ export default async function handler(req, res) {
     ema200 = 0,
     srLevels = { supports: [], resistances: [] },
     patterns = [],
+    correlations = [],
     positions, balance, news, reason,
   } = req.body;
 
@@ -60,6 +61,23 @@ export default async function handler(req, res) {
     : bullCount === 2 ? "ALCISTA"
     : "LATERAL";
 
+  // ── Correlation context
+  let corrStr = "Sin datos de correlación (par no-forex o sin historial).";
+  let confirmCount = 0;
+  const corrCount = correlations.length;
+  if (corrCount > 0) {
+    confirmCount = correlations.filter(c => c.confirms).length;
+    corrStr = correlations.map(c =>
+      `${c.symbol}: ${c.signal} (corr ${c.direction > 0 ? "+" : "-"}1) → ${c.confirms ? "✓ CONFIRMA" : "✗ CONTRADICE"}`
+    ).join("\n");
+  }
+  const corrSummary = corrCount > 0
+    ? `${confirmCount}/${corrCount} pares confirman. ${
+        confirmCount === corrCount ? "MÁXIMA CONFLUENCIA ▲▲" :
+        confirmCount === 0 ? "⚠️ NINGÚN PAR CONFIRMA → señal muy débil." :
+        "Confluencia parcial — actúa con precaución."}`
+    : "";
+
   // Consecutive loss warning
   const lossWarning = consecutiveLosses >= 2
     ? `⚠️ ALERTA: ${consecutiveLosses} pérdidas consecutivas. Exige confluencia perfecta (conf≥75%) o responde HOLD.`
@@ -89,6 +107,10 @@ PATRONES (velas + chartistas): ${patternsStr}
 ═══ NOTICIAS ═══
 ${nc}
 
+═══ CORRELACIÓN FOREX ═══
+${corrStr}
+${corrSummary}
+
 ═══ PORTAFOLIO ═══
 Balance: $${balance?.toFixed(0)} | Posiciones: ${pc} | Slots: ${MAX_POSITIONS-positions.length}
 TP: +$${TAKE_PROFIT_USD} | SL: -$${STOP_LOSS_USD}
@@ -104,6 +126,8 @@ ${lossWarning}
 7. Si tendencia BAJISTA FUERTE y posiciones BUY abiertas → signal=HOLD, should_open=false.
 8. ${consecutiveLosses>=2?"MODO CONSERVADOR: conf mínima 75%.":"Confianza mínima: 65%."}
 9. Sin confluencia clara → HOLD siempre.
+10. CORRELACIÓN: Si hay datos de correlación forex y 0 pares confirman → should_open=false, HOLD obligatorio.
+11. CORRELACIÓN: Si TODOS los pares correlacionados confirman → suma +8% a la confianza y prioriza la apertura.
 
 Responde SOLO JSON sin backticks:
 {"signal":"BUY","confidence":75,"reasoning":"máx 60 palabras en español","news_impact":"BULLISH","key_factor":"5 palabras","risk":"MEDIO","should_open":true}`;

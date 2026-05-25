@@ -32,10 +32,18 @@ const STYLES = `
 
 /* ─── ASSETS CONFIG ─────────────────────────────────────────────────────── */
 const ASSETS = {
-  "ETH/USDT": { label:"ETH/USDT", type:"crypto", binance:"ETHUSDT", tvSymbol:"BINANCE:ETHUSDT", avTickers:"ETH",              precision:2, basePrice:3000  },
-  "BTC/USDT": { label:"BTC/USDT", type:"crypto", binance:"BTCUSDT", tvSymbol:"BINANCE:BTCUSDT", avTickers:"BTC",              precision:2, basePrice:65000 },
-  "SOL/USDT": { label:"SOL/USDT", type:"crypto", binance:"SOLUSDT", tvSymbol:"BINANCE:SOLUSDT", avTickers:"SOL",              precision:3, basePrice:150   },
-  "EUR/USD":  { label:"EUR/USD",  type:"forex",  binance:null,      tvSymbol:"FX:EURUSD",       avTickers:"FOREX:EUR,FOREX:USD", precision:5, basePrice:1.0823 },
+  "ETH/USDT": { label:"ETH/USDT", type:"crypto", binance:"ETHUSDT", precision:2, basePrice:3000,   correlations:{} },
+  "BTC/USDT": { label:"BTC/USDT", type:"crypto", binance:"BTCUSDT", precision:2, basePrice:65000,  correlations:{} },
+  "SOL/USDT": { label:"SOL/USDT", type:"crypto", binance:"SOLUSDT", precision:3, basePrice:150,    correlations:{} },
+  // ── Forex pairs (correlations: +1 = moves same direction, -1 = moves opposite)
+  "EUR/USD":  { label:"EUR/USD",  type:"forex",  binance:null, forexFrom:"EUR", forexTo:"USD", precision:5, basePrice:1.0823,
+    correlations:{"GBP/USD":+1,"AUD/USD":+1,"USD/JPY":-1} },
+  "GBP/USD":  { label:"GBP/USD",  type:"forex",  binance:null, forexFrom:"GBP", forexTo:"USD", precision:5, basePrice:1.2700,
+    correlations:{"EUR/USD":+1,"AUD/USD":+1,"USD/JPY":-1} },
+  "USD/JPY":  { label:"USD/JPY",  type:"forex",  binance:null, forexFrom:"USD", forexTo:"JPY", precision:3, basePrice:155.0,
+    correlations:{"EUR/USD":-1,"GBP/USD":-1,"AUD/USD":-1} },
+  "AUD/USD":  { label:"AUD/USD",  type:"forex",  binance:null, forexFrom:"AUD", forexTo:"USD", precision:5, basePrice:0.6400,
+    correlations:{"EUR/USD":+1,"GBP/USD":+1,"USD/JPY":-1} },
 };
 
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
@@ -794,11 +802,40 @@ async function fetchNewsAI(symbol){
   return r.json();
 }
 
-async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,positions,balance,news,reason}){
+async function fetchForexRate(from="EUR",to="USD"){
+  // 1) Try serverless proxy (works on Vercel production)
+  try{
+    const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({from,to})});
+    if(r.ok){
+      const d=await r.json();
+      if(typeof d.rate==="number") return d.rate;
+    }
+  }catch{}
+  // 2) Direct fallback — open.er-api.com supports CORS, works in browser (local dev + prod)
+  try{
+    const r=await fetch(`https://open.er-api.com/v6/latest/${from}`);
+    const d=await r.json();
+    if(d.result==="success"&&typeof d.rates?.[to]==="number") return d.rates[to];
+  }catch{}
+  return null;
+}
+
+// Module-level cache — prevents hammering open.er-api.com (shared across all effects)
+const _fxCache={};
+async function fetchForexRateCached(from,to,ttlMs=120000){
+  const key=`${from}_${to}`;
+  const now=Date.now();
+  if(_fxCache[key]&&now-_fxCache[key].ts<ttlMs) return _fxCache[key].rate;
+  const rate=await fetchForexRate(from,to);
+  if(rate) _fxCache[key]={rate,ts:now};
+  return rate||_fxCache[key]?.rate||null;
+}
+
+async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason}){
   const r=await fetch("/api/analyze",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,positions,balance,news,reason}),
+    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason}),
   });
   if(!r.ok)return{signal:"HOLD",confidence:40,reasoning:"Error al conectar con el servidor.",news_impact:"NEUTRAL",key_factor:"Error conexión",risk:"ALTO",should_open:false};
   return r.json();
@@ -843,7 +880,14 @@ export default function TradingBot(){
   const [learningStats,setLearningStats]   = useState(()=>calcLearningStats(loadTrades()));
   const [showLearning,setShowLearning]     = useState(false);
   const [chartInterval,setChartInterval]  = useState("1m");
+  const [multiMonitor,setMultiMonitor]    = useState(false);
+  const [assetSignals,setAssetSignals]    = useState({});
+  const [forexLive,setForexLive]          = useState(false);
+  const [corrSignals,setCorrSignals]      = useState({});
+  const [forexWatch,setForexWatch]        = useState({});
   const chartIntervalRef = useRef("1m");
+  const bgPricesRef   = useRef({});
+  const corrSignalsRef= useRef({});
   const consLossesRef  = useRef(0);
   const shortTrendRef  = useRef({pct:0,bullish:0,bearish:0,direction:"NEUTRAL"});
   const skipCyclesRef  = useRef(0);
@@ -888,6 +932,7 @@ export default function TradingBot(){
   useEffect(()=>{ema200Ref.current=ema200;},[ema200]);
   useEffect(()=>{srRef.current=srLevels;},[srLevels]);
   useEffect(()=>{chartIntervalRef.current=chartInterval;},[chartInterval]);
+  useEffect(()=>{corrSignalsRef.current=corrSignals;},[corrSignals]);
 
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
@@ -969,24 +1014,34 @@ export default function TradingBot(){
         setCandles(prev=>{
           const last=prev.at(-1);
           const nowSec=Math.floor(Date.now()/1000);
-          const d=(Math.random()-.496)*.0009;
-          const np=Math.max(1.04,Math.min(1.17,last.c+d));
-          // Update last candle or open new one every 60s
+          // Proportional noise: ~0.06% per tick — works for all forex pairs
+          const tickSize=last.c*0.0006;
+          const d=(Math.random()-.496)*tickSize;
+          const np=Math.max(last.c*0.85,Math.min(last.c*1.15,last.c+d));
           let updated;
-          if(nowSec - (last.time||0) >= 60){
-            updated=[...prev.slice(-79),{time:nowSec,o:np,c:np,h:np,l:np,v:0}];
+          if(nowSec-(last.time||0)>=60){
+            updated=[...prev.slice(-199),{time:nowSec,o:np,c:np,h:np,l:np,v:0}];
           } else {
             const nc={...last,c:np,h:Math.max(last.h,np),l:Math.min(last.l,np)};
             updated=[...prev.slice(0,-1),nc];
           }
           const closes=updated.map(c=>c.c);
           const newBB=calcBB(closes);
-          setPrice(np);
-          priceRef.current=np;
-          setRsi(calcRSI(closes));
-          setMacd(calcMACD(closes));
-          setBB(newBB);
-          bbRef.current=newBB;
+          const e9=calcEMA(closes,9),e21=calcEMA(closes,21);
+          const pts=detectPatterns(updated);
+          const cpats=detectCandlePatterns(updated);
+          const st=calcShortTrend(updated,5);
+          const e200=calcEMA(closes,200);
+          const sr=calcSR(updated);
+          setPrice(np); priceRef.current=np;
+          setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
+          setBB(newBB); bbRef.current=newBB;
+          setEma9(e9); ema9Ref.current=e9;
+          setEma21(e21); ema21Ref.current=e21;
+          setPatterns([...pts,...cpats]); patternsRef.current=[...pts,...cpats];
+          setShortTrend(st); shortTrendRef.current=st;
+          setEma200(e200); ema200Ref.current=e200;
+          setSrLevels(sr); srRef.current=sr;
           return updated;
         });
       },1500);
@@ -1035,6 +1090,153 @@ export default function TradingBot(){
     const iv=setInterval(load,refreshMs);
     return()=>clearInterval(iv);
   },[symbol,chartInterval]);
+
+  /* ── Forex real price anchor (all forex pairs) ───────────────────────── */
+  useEffect(()=>{
+    if(asset.type!=="forex"){setForexLive(false);return;}
+    const {forexFrom,forexTo}=asset;
+    const load=async()=>{
+      const rate=await fetchForexRateCached(forexFrom,forexTo,300000);
+      if(rate&&!isNaN(rate)){
+        setCandles(prev=>{
+          const shift=rate-prev.at(-1).c;
+          if(Math.abs(shift)<0.000001)return prev;
+          return prev.map(c=>({...c,o:c.o+shift,c:c.c+shift,h:c.h+shift,l:c.l+shift}));
+        });
+        setPrice(rate); priceRef.current=rate;
+        setForexLive(true);
+      }
+    };
+    load();
+    const iv=setInterval(load,300000);
+    return()=>clearInterval(iv);
+  },[symbol]);
+
+  /* ── Multi-asset scanner ─────────────────────────────────────────────── */
+  useEffect(()=>{
+    if(!multiMonitor){setAssetSignals({});return;}
+    let fxCache=null, fxCacheTs=0;
+
+    const scan=async()=>{
+      const results={};
+      for(const [sym,cfg] of Object.entries(ASSETS)){
+        try{
+          let price;
+          if(cfg.type==="crypto"){
+            const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cfg.binance}`);
+            const d=await r.json();
+            price=parseFloat(d.price);
+          } else {
+            const nowMs=Date.now();
+            if(!fxCache||nowMs-fxCacheTs>60000){
+              fxCache=await fetchForexRate("EUR","USD");
+              fxCacheTs=nowMs;
+            }
+            price=fxCache||ASSETS[sym].basePrice;
+          }
+          if(!price||isNaN(price))continue;
+
+          if(!bgPricesRef.current[sym])bgPricesRef.current[sym]=[];
+          bgPricesRef.current[sym].push(price);
+          if(bgPricesRef.current[sym].length>60)bgPricesRef.current[sym].shift();
+
+          const closes=bgPricesRef.current[sym];
+          if(closes.length<5){results[sym]={price,signal:"—",color:T.muted};continue;}
+
+          const k9=2/10,k21=2/22;
+          let e9=closes[0],e21=closes[0];
+          for(let i=1;i<closes.length;i++){e9=closes[i]*k9+e9*(1-k9);e21=closes[i]*k21+e21*(1-k21);}
+          const rsi=closes.length>14?calcRSI(closes):50;
+          const pct=(closes.at(-1)-closes.at(-Math.min(closes.length,30)))/closes.at(-Math.min(closes.length,30))*100;
+          const signal=e9>e21&&rsi<70?"BUY":e9<e21&&rsi>30?"SELL":"HOLD";
+          const color=signal==="BUY"?T.green:signal==="SELL"?T.red:T.muted;
+          results[sym]={price,signal,color,rsi:rsi.toFixed(0),pct};
+        }catch{}
+      }
+      setAssetSignals(results);
+    };
+    scan();
+    const iv=setInterval(scan,10000);
+    return()=>clearInterval(iv);
+  },[multiMonitor]);
+
+  /* ── Forex watchlist — always running, all 4 forex pairs ────────────── */
+  useEffect(()=>{
+    const FOREX_SYMBOLS=["EUR/USD","GBP/USD","USD/JPY","AUD/USD"];
+    const scan=async()=>{
+      const results={};
+      for(const sym of FOREX_SYMBOLS){
+        const cfg=ASSETS[sym];
+        if(!cfg)continue;
+        try{
+          const p=await fetchForexRateCached(cfg.forexFrom,cfg.forexTo);
+          if(!p||isNaN(p))continue;
+          if(!bgPricesRef.current[sym])bgPricesRef.current[sym]=[];
+          bgPricesRef.current[sym].push(p);
+          if(bgPricesRef.current[sym].length>60)bgPricesRef.current[sym].shift();
+          const closes=bgPricesRef.current[sym];
+          const k9=2/10,k21=2/22;
+          let e9=closes[0],e21=closes[0];
+          for(let i=1;i<closes.length;i++){e9=closes[i]*k9+e9*(1-k9);e21=closes[i]*k21+e21*(1-k21);}
+          const rsi=closes.length>14?calcRSI(closes):50;
+          const signal=e9>e21&&rsi<70?"BUY":e9<e21&&rsi>30?"SELL":"HOLD";
+          const color=signal==="BUY"?T.green:signal==="SELL"?T.red:T.muted;
+          const pct=closes.length>1?(closes.at(-1)-closes[0])/closes[0]*100:0;
+          results[sym]={price:p,signal,color,rsi:Math.round(rsi),pct,samples:closes.length};
+        }catch{}
+      }
+      setForexWatch(results);
+    };
+    scan();
+    const iv=setInterval(scan,30000);
+    return()=>clearInterval(iv);
+  },[]);
+
+  /* ── Correlation monitor (always runs for forex pairs) ──────────────── */
+  useEffect(()=>{
+    const corrs=asset.correlations||{};
+    if(!Object.keys(corrs).length){setCorrSignals({});corrSignalsRef.current={};return;}
+
+    const fetchCorr=async()=>{
+      const results={};
+      for(const [sym,direction] of Object.entries(corrs)){
+        const cfg=ASSETS[sym];
+        if(!cfg)continue;
+        try{
+          let price;
+          if(cfg.type==="crypto"){
+            const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cfg.binance}`);
+            const d=await r.json();
+            price=parseFloat(d.price);
+          } else {
+            price=await fetchForexRateCached(cfg.forexFrom,cfg.forexTo);
+          }
+          if(!price||isNaN(price))continue;
+
+          if(!bgPricesRef.current[sym])bgPricesRef.current[sym]=[];
+          bgPricesRef.current[sym].push(price);
+          if(bgPricesRef.current[sym].length>60)bgPricesRef.current[sym].shift();
+
+          const closes=bgPricesRef.current[sym];
+          const k9=2/10,k21=2/22;
+          let e9=closes[0],e21=closes[0];
+          for(let i=1;i<closes.length;i++){e9=closes[i]*k9+e9*(1-k9);e21=closes[i]*k21+e21*(1-k21);}
+          const rsi=closes.length>14?calcRSI(closes):50;
+          const signal=e9>e21&&rsi<70?"BUY":e9<e21&&rsi>30?"SELL":"HOLD";
+          const confirms=(direction>0&&signal==="BUY")||(direction<0&&signal==="SELL");
+          const color=signal==="BUY"?T.green:signal==="SELL"?T.red:T.muted;
+          results[sym]={price,signal,direction,rsi:Math.round(rsi),confirms,color,
+            precision:cfg.precision,samples:closes.length};
+        }catch{}
+      }
+      setCorrSignals(results);
+      corrSignalsRef.current=results;
+    };
+
+    fetchCorr();
+    const iv=setInterval(fetchCorr,15000);
+    return()=>clearInterval(iv);
+  },[symbol]);
 
   /* ── Close position ──────────────────────────────────────────────────── */
   const closePosition=useCallback((posId,currentPrice,reason)=>{
@@ -1099,6 +1301,15 @@ export default function TradingBot(){
     setAutoPhase("analyzing");
     addLog(`🔍 Analizando ${symbolRef.current}: ${reason}`,"info");
     try{
+      // Build correlation array for AI
+      const corrArray=Object.entries(corrSignalsRef.current).map(([sym,info])=>({
+        symbol:sym,
+        signal:info.signal,
+        direction:info.direction,
+        confirms:info.confirms,
+        rsi:info.rsi,
+      }));
+
       const result=await analyzeMarketAI({
         symbol:symbolRef.current,
         price:priceRef.current,  rsi:rsiRef.current,
@@ -1110,6 +1321,7 @@ export default function TradingBot(){
         ema200:ema200Ref.current,
         srLevels:srRef.current,
         patterns:patternsRef.current,
+        correlations:corrArray,
         positions:posRef.current, balance:balanceRef.current,
         news:newsRef.current,    reason,
       });
@@ -1225,33 +1437,214 @@ export default function TradingBot(){
           <div>
             <div style={{fontSize:9,color:T.muted,letterSpacing:4,textTransform:"uppercase",marginBottom:6}}>Robot Autónomo de Trading</div>
             {/* PAIR SELECTOR */}
-            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-              {Object.keys(ASSETS).map(s=>(
-                <button key={s} onClick={()=>handleSymbolChange(s)}
-                  style={{
-                    background:symbol===s?`${T.accent}20`:"transparent",
-                    border:`1px solid ${symbol===s?T.accent:T.border}`,
-                    color:symbol===s?T.accent:T.muted,
-                    borderRadius:6, padding:"5px 14px", cursor:"pointer",
-                    fontSize:12, fontWeight:symbol===s?700:400, letterSpacing:.5,
-                  }}>
-                  {ASSETS[s].type==="crypto"?"◈":"€"} {s}
-                </button>
-              ))}
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+              {Object.keys(ASSETS).map(s=>{
+                const sig=assetSignals[s];
+                const isActive=symbol===s;
+                const badgeCol=sig?.color||T.muted;
+                return(
+                  <button key={s} onClick={()=>handleSymbolChange(s)}
+                    style={{
+                      background:isActive?`${T.accent}20`:"transparent",
+                      border:`1px solid ${isActive?T.accent:sig&&!isActive?`${badgeCol}60`:T.border}`,
+                      color:isActive?T.accent:T.muted,
+                      borderRadius:6, padding:"5px 14px", cursor:"pointer",
+                      fontSize:12, fontWeight:isActive?700:400, letterSpacing:.5,
+                      position:"relative",
+                    }}>
+                    {ASSETS[s].type==="crypto"?"◈":"€"} {s}
+                    {sig&&!isActive&&sig.signal!=="—"&&(
+                      <span style={{
+                        position:"absolute",top:-6,right:-6,
+                        fontSize:7,fontWeight:700,letterSpacing:.5,
+                        background:badgeCol,color:"#04060f",
+                        borderRadius:3,padding:"1px 4px",lineHeight:1.4,
+                      }}>{sig.signal}</span>
+                    )}
+                  </button>
+                );
+              })}
+              <button onClick={()=>setMultiMonitor(p=>!p)}
+                style={{
+                  background:multiMonitor?`${T.yellow}18`:"transparent",
+                  border:`1px solid ${multiMonitor?T.yellow:T.border}`,
+                  color:multiMonitor?T.yellow:T.muted,
+                  borderRadius:6, padding:"5px 12px", cursor:"pointer",
+                  fontSize:10, fontWeight:multiMonitor?700:400, letterSpacing:.5,
+                }}>
+                {multiMonitor?"📡 SCANNER ON":"📡 SCANNER"}
+              </button>
             </div>
           </div>
           <div style={{textAlign:"right"}}>
             <div style={{fontSize:11,display:"flex",alignItems:"center",gap:5,justifyContent:"flex-end",marginBottom:2}}>
               <span style={{width:7,height:7,borderRadius:"50%",background:T.green,display:"inline-block",animation:"pulse 1.4s ease-in-out infinite"}}/>
-              <span style={{color:T.green}}>{asset.type==="crypto"?"EN VIVO • BINANCE":"SIMULADO"}</span>
+              <span style={{color:T.green}}>
+                {asset.type==="crypto"?"EN VIVO • BINANCE":forexLive?"EN VIVO • Forex":"CARGANDO PRECIO REAL..."}
+              </span>
             </div>
             <div className="mono" style={{fontSize:26,fontWeight:700,color:T.accent}}>{fP(price,asset.precision)}</div>
             <div style={{fontSize:10,color:T.muted,marginTop:1}}>{symbol} · Paper Trading</div>
           </div>
         </div>
 
+        {/* FOREX WATCHLIST — always visible */}
+        {(()=>{
+          const FOREX_SYMS=["EUR/USD","GBP/USD","USD/JPY","AUD/USD"];
+          const activeCorrs=ASSETS[symbol]?.correlations||{};
+          return(
+            <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,
+              padding:"8px 14px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}>
+                <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>FOREX WATCHLIST · actualiza cada 30s · señales EMA+RSI</span>
+                <span style={{fontSize:8,color:T.muted}}>haz clic en cualquier par para abrirlo</span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+                {FOREX_SYMS.map(sym=>{
+                  const cfg=ASSETS[sym];
+                  const isActive=sym===symbol;
+                  // For the active forex pair use live state, otherwise use watchlist cache
+                  const info=isActive&&asset.type==="forex"
+                    ?{price,signal:aiResult?.signal||"—",
+                      color:aiResult?.signal==="BUY"?T.green:aiResult?.signal==="SELL"?T.red:T.muted,
+                      rsi:Math.round(rsi),pct:0,samples:99}
+                    :forexWatch[sym];
+                  // Correlation context vs active pair
+                  const corrDir=activeCorrs[sym];
+                  const corrInfo=corrSignals[sym];
+                  const hasCorr=corrDir!==undefined&&corrInfo;
+                  const confirms=hasCorr&&corrInfo.confirms;
+                  const borderCol=isActive?T.accent:hasCorr?(confirms?T.green:T.red):(info?.color||T.border);
+
+                  return(
+                    <div key={sym}
+                      onClick={()=>handleSymbolChange(sym)}
+                      style={{
+                        background:isActive?`${T.accent}12`:`${borderCol}08`,
+                        border:`1px solid ${borderCol}${isActive?"":"40"}`,
+                        borderRadius:7,padding:"9px 11px",cursor:"pointer",
+                        transition:"border-color .2s,background .2s",
+                      }}>
+                      {/* Header row */}
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                        <span style={{fontSize:10,fontWeight:700,color:isActive?T.accent:T.text}}>{sym}</span>
+                        {isActive
+                          ?<span style={{fontSize:7,color:T.accent,background:`${T.accent}20`,padding:"1px 5px",borderRadius:3}}>● ACTIVO</span>
+                          :hasCorr
+                          ?<span style={{fontSize:7,fontWeight:700,color:confirms?T.green:T.red,
+                              background:`${confirms?T.green:T.red}18`,padding:"1px 5px",borderRadius:3}}>
+                              {confirms?"✓":"✗"} {corrDir>0?"CORR+":"CORR−"}
+                            </span>
+                          :<span style={{fontSize:7,color:T.muted,background:`${T.muted}18`,padding:"1px 5px",borderRadius:3}}>FOREX</span>
+                        }
+                      </div>
+                      {/* Price */}
+                      {info?(
+                        <>
+                          <div className="mono" style={{fontSize:14,fontWeight:700,
+                            color:isActive?T.accent:(info.color||T.text),marginBottom:3}}>
+                            {fP(info.price,cfg.precision)}
+                          </div>
+                          {/* Signal + RSI */}
+                          <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:3}}>
+                            <span style={{fontSize:8,fontWeight:700,
+                              color:info.signal==="—"||info.signal==="HOLD"?T.muted:"#04060f",
+                              background:info.signal==="BUY"?T.green:info.signal==="SELL"?T.red:`${T.muted}40`,
+                              borderRadius:3,padding:"1px 5px"}}>
+                              {info.signal}
+                            </span>
+                            <span style={{fontSize:8,color:T.muted}}>RSI {info.rsi}</span>
+                          </div>
+                          {/* Change % bar */}
+                          {!isActive&&typeof info.pct==="number"&&(
+                            <div style={{display:"flex",alignItems:"center",gap:4}}>
+                              <div style={{flex:1,height:2,background:T.dim,borderRadius:1}}>
+                                <div style={{height:"100%",
+                                  width:`${Math.min(100,Math.abs(info.pct)*200)}%`,
+                                  background:info.pct>=0?T.green:T.red,
+                                  borderRadius:1,transition:"width .4s"}}/>
+                              </div>
+                              <span style={{fontSize:8,color:info.pct>=0?T.green:T.red,minWidth:38,textAlign:"right"}}>
+                                {info.pct>=0?"+":""}{info.pct.toFixed(3)}%
+                              </span>
+                            </div>
+                          )}
+                          {!isActive&&info.samples<10&&(
+                            <div style={{fontSize:7,color:T.orange,marginTop:2}}>⏳ {info.samples}/10 muestras</div>
+                          )}
+                        </>
+                      ):(
+                        <div style={{fontSize:9,color:T.muted,marginTop:4}}>Conectando...</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+
         {/* NEWS TICKER */}
         {news.length>0&&<div style={{marginBottom:10}}><Ticker headlines={news}/></div>}
+
+        {/* MULTI-ASSET SCANNER PANEL */}
+        {multiMonitor&&Object.keys(assetSignals).length>0&&(
+          <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,
+            padding:"8px 14px",marginBottom:10}}>
+            <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:7}}>
+              SCANNER MULTI-ACTIVO · actualiza cada 10s · señales locales EMA+RSI
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+              {Object.entries(ASSETS).map(([sym,cfg])=>{
+                const isActive=sym===symbol;
+                const sig=isActive?{
+                  price,
+                  signal:aiResult?.signal||"—",
+                  color:aiResult?.signal==="BUY"?T.green:aiResult?.signal==="SELL"?T.red:T.muted,
+                  rsi:rsi.toFixed(0),
+                  pct:((price-ASSETS[sym].basePrice)/ASSETS[sym].basePrice*100),
+                }:assetSignals[sym];
+                if(!sig)return(
+                  <div key={sym} style={{background:T.dim,borderRadius:6,padding:"8px 10px",
+                    textAlign:"center",opacity:.4}}>
+                    <div style={{fontSize:8,color:T.muted}}>{sym}</div>
+                    <div style={{fontSize:9,color:T.muted}}>cargando…</div>
+                  </div>
+                );
+                const col=sig.color||T.muted;
+                return(
+                  <div key={sym}
+                    onClick={()=>!isActive&&handleSymbolChange(sym)}
+                    style={{
+                      background:isActive?`${T.accent}12`:`${col}08`,
+                      border:`1px solid ${isActive?T.accent:col}40`,
+                      borderRadius:6,padding:"8px 10px",cursor:isActive?"default":"pointer",
+                      transition:"all .2s",
+                    }}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                      <span style={{fontSize:9,color:isActive?T.accent:T.text,fontWeight:700}}>{sym}</span>
+                      {isActive&&<span style={{fontSize:7,color:T.accent,background:`${T.accent}20`,
+                        padding:"1px 5px",borderRadius:3}}>ACTIVO</span>}
+                    </div>
+                    <div className="mono" style={{fontSize:12,fontWeight:700,color:col,marginBottom:2}}>
+                      {fP(sig.price,cfg.precision)}
+                    </div>
+                    <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                      <span style={{fontSize:8,fontWeight:700,color:"#04060f",
+                        background:col,borderRadius:3,padding:"1px 5px"}}>{sig.signal}</span>
+                      <span style={{fontSize:8,color:T.muted}}>RSI {sig.rsi}</span>
+                      {sig.pct!=null&&(
+                        <span style={{fontSize:8,color:sig.pct>=0?T.green:T.red,marginLeft:"auto"}}>
+                          {sig.pct>=0?"+":""}{sig.pct?.toFixed(2)}%
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* STATS ROW */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:10}}>
@@ -1296,6 +1689,83 @@ export default function TradingBot(){
                   <div style={{fontSize:8,color:c,marginTop:2,opacity:.75}}>{s}</div>
                 </div>
               ))}
+            </div>
+          );
+        })()}
+
+        {/* CORRELATION PANEL — only for forex pairs with correlation data */}
+        {asset.type==="forex"&&Object.keys(asset.correlations||{}).length>0&&(()=>{
+          const corrEntries=Object.entries(asset.correlations);
+          const loaded=corrEntries.filter(([s])=>corrSignals[s]);
+          const confirmed=loaded.filter(([s,d])=>corrSignals[s]?.confirms);
+          const total=corrEntries.length;
+          const confCount=confirmed.length;
+          const allConfirm=confCount===total&&total>0;
+          const noneConfirm=confCount===0&&loaded.length>0;
+          const summaryCol=allConfirm?T.green:noneConfirm?T.red:T.yellow;
+          return(
+            <div style={{background:T.card,border:`1px solid ${summaryCol}40`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>CONFIRMACIÓN DE CORRELACIÓN · {symbol}</span>
+                <span style={{fontSize:9,fontWeight:700,color:summaryCol,
+                  background:`${summaryCol}18`,padding:"2px 10px",borderRadius:4}}>
+                  {loaded.length===0?"⏳ CARGANDO...":
+                   allConfirm?"✓✓ MÁXIMA CONFLUENCIA":
+                   noneConfirm?"✗ SIN CONFIRMACIÓN — PRECAUCIÓN":
+                   `${confCount}/${total} CONFIRMAN`}
+                </span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:`repeat(${total},1fr)`,gap:6}}>
+                {corrEntries.map(([sym,direction])=>{
+                  const info=corrSignals[sym];
+                  const col=info?.color||T.muted;
+                  const confirms=info?.confirms;
+                  const dirLabel=direction>0?"Corr +":"Corr −";
+                  const dirDesc=direction>0?"Se mueve igual":"Se mueve opuesto";
+                  return(
+                    <div key={sym} onClick={()=>handleSymbolChange(sym)}
+                      style={{background:`${col}0a`,border:`1px solid ${col}35`,borderRadius:7,
+                        padding:"8px 10px",cursor:"pointer",transition:"all .2s"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                        <span style={{fontSize:10,fontWeight:700,color:T.text}}>{sym}</span>
+                        <span style={{fontSize:7,color:direction>0?T.green:T.red,
+                          background:`${direction>0?T.green:T.red}18`,
+                          padding:"1px 5px",borderRadius:3}}>{dirLabel}</span>
+                      </div>
+                      {info?(
+                        <>
+                          <div className="mono" style={{fontSize:12,fontWeight:700,color:col,marginBottom:3}}>
+                            {fP(info.price,info.precision||5)}
+                          </div>
+                          <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+                            <span style={{fontSize:8,fontWeight:700,color:"#04060f",
+                              background:col,borderRadius:3,padding:"1px 5px"}}>{info.signal}</span>
+                            <span style={{fontSize:8,color:T.muted}}>RSI {info.rsi}</span>
+                            <span style={{fontSize:9,color:confirms?T.green:T.red,marginLeft:"auto",fontWeight:700}}>
+                              {confirms?"✓ CONFIRMA":"✗ DIVERGE"}
+                            </span>
+                          </div>
+                          <div style={{fontSize:8,color:T.muted,marginTop:3,opacity:.7}}>{dirDesc}</div>
+                          {info.samples<10&&<div style={{fontSize:7,color:T.orange,marginTop:2}}>⏳ acumulando datos ({info.samples}/10)</div>}
+                        </>
+                      ):(
+                        <div style={{fontSize:9,color:T.muted}}>Cargando...</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {loaded.length>0&&(
+                <div style={{marginTop:8,padding:"5px 10px",borderRadius:5,
+                  background:allConfirm?`${T.green}10`:noneConfirm?`${T.red}10`:`${T.yellow}08`,
+                  borderLeft:`3px solid ${summaryCol}`,fontSize:10,color:summaryCol}}>
+                  {allConfirm
+                    ?"Todos los pares confirman la misma dirección del mercado. Alta probabilidad de movimiento sostenido."
+                    :noneConfirm
+                    ?"Los pares correlacionados contradicen esta señal. Evitar abrir posición hasta que haya confluencia."
+                    :"Confluencia parcial. Señal moderada — opera con tamaño reducido o espera mejor confirmación."}
+                </div>
+              )}
             </div>
           );
         })()}
@@ -1621,7 +2091,7 @@ export default function TradingBot(){
 
         {/* DISCLAIMER */}
         <div style={{fontSize:8,color:T.muted,textAlign:"center",lineHeight:1.9,paddingTop:8,borderTop:`1px solid ${T.border}`}}>
-          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Precios crypto en vivo vía Binance · Gráficas via TradingView · TP +$3.00 · SL -$2.00<br/>
+          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Crypto en vivo vía Binance · EUR/USD en vivo vía Open Exchange Rates (ECB) · TP +$3.00 · SL -$2.00<br/>
           Las señales son educativas y no garantizan resultados en mercados reales. Opera siempre con responsabilidad.
         </div>
 
