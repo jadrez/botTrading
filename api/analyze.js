@@ -140,11 +140,11 @@ Responde SOLO JSON sin backticks:
         "Authorization": `Bearer ${groqKey}`,
       },
       body: JSON.stringify({
-        model: "llama-3.1-8b-instant",
-        max_tokens: 280,
-        temperature: 0.2,   // lower = más determinista, menos creativo
+        model: "llama-3.3-70b-versatile",
+        max_tokens: 320,
+        temperature: 0.15,
         messages: [
-          { role: "system", content: "Eres un trader algorítmico disciplinado. Sigues la tendencia. Nunca operas contra ella. Respondes SOLO JSON válido." },
+          { role: "system", content: "Eres un trader algorítmico experto en forex y crypto. Analizas contexto técnico complejo, correlaciones entre pares y sentimiento de noticias. Sigues la tendencia dominante. Nunca operas contra ella. Respondes SOLO JSON válido sin texto adicional." },
           { role: "user", content: prompt },
         ],
       }),

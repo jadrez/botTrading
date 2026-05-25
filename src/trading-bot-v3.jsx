@@ -830,15 +830,27 @@ async function fetchForexRate(from="EUR",to="USD"){
   return null;
 }
 
-// Module-level cache — prevents hammering open.er-api.com (shared across all effects)
+// Module-level cache (shared across React re-renders)
 const _fxCache={};
-async function fetchForexRateCached(from,to,ttlMs=120000){
+async function fetchForexRateCached(from,to,ttlMs=15000){
   const key=`${from}_${to}`;
   const now=Date.now();
   if(_fxCache[key]&&now-_fxCache[key].ts<ttlMs) return _fxCache[key].rate;
   const rate=await fetchForexRate(from,to);
   if(rate) _fxCache[key]={rate,ts:now};
   return rate||_fxCache[key]?.rate||null;
+}
+
+// Fetch real 1-min candles for forex from Yahoo Finance (via serverless proxy)
+async function fetchForexCandles(from,to,limit=200){
+  try{
+    const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({from,to,candles:true,limit})});
+    if(!r.ok) return null;
+    const d=await r.json();
+    if(d.candles?.length>5) return d;
+  }catch{}
+  return null;
 }
 
 async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason}){
@@ -968,7 +980,7 @@ export default function TradingBot(){
             const d=await r.json();
             p=parseFloat(d.price);
           } else {
-            p=await fetchForexRateCached(cfg.forexFrom,cfg.forexTo);
+            p=await fetchForexRateCached(cfg.forexFrom,cfg.forexTo,5000);
           }
           if(p&&!isNaN(p)){
             setLivePrices(prev=>({...prev,[sym]:p}));
@@ -1076,20 +1088,63 @@ export default function TradingBot(){
       fetchPrice();
       iv=setInterval(fetchPrice,3000);
     } else {
-      iv=setInterval(()=>{
+      // ── FOREX: load real 1-min candles from Yahoo Finance, then update every 15s
+      const {forexFrom,forexTo}=cur;
+
+      const applyCandles=(newCandles,rate)=>{
+        if(!newCandles?.length) return;
+        setCandles(newCandles);
+        const closes=newCandles.map(c=>c.c);
+        const volumes=newCandles.map(c=>c.v||0);
+        const newBB=calcBB(closes);
+        const e9=calcEMA(closes,9),e21=calcEMA(closes,21);
+        const e200=calcEMA(closes,200);
+        const t1h=calcTrend1h(closes);
+        const sr=calcSR(newCandles);
+        const pts=detectPatterns(newCandles);
+        const cpats=detectCandlePatterns(newCandles);
+        const st=calcShortTrend(newCandles,5);
+        const allPats=[...pts,...cpats];
+        const np=rate||closes.at(-1);
+        setPrice(np); priceRef.current=np;
+        setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
+        setBB(newBB); bbRef.current=newBB;
+        setEma9(e9); ema9Ref.current=e9;
+        setEma21(e21); ema21Ref.current=e21;
+        setEma200(e200); ema200Ref.current=e200;
+        setTrend1h(t1h); trend1hRef.current=t1h;
+        setPatterns(allPats); patternsRef.current=allPats;
+        setShortTrend(st); shortTrendRef.current=st;
+        setSrLevels(sr); srRef.current=sr;
+        if(np) _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+        setForexLive(true); setPriceVerified(true);
+      };
+
+      // Initial load: real candles
+      (async()=>{
+        const data=await fetchForexCandles(forexFrom,forexTo,200);
+        if(data?.candles?.length>5){
+          applyCandles(data.candles,data.rate);
+        } else {
+          // Fallback: ECB price with simulated candles
+          const rate=await fetchForexRateCached(forexFrom,forexTo,300000);
+          if(rate) applyCandles(genCandles(rate,200),rate);
+        }
+      })();
+
+      // Price update every 15s — appends to last real candle
+      iv=setInterval(async()=>{
+        const np=await fetchForexRateCached(forexFrom,forexTo,15000);
+        if(!np||isNaN(np)) return;
         setCandles(prev=>{
-          const last=prev.at(-1);
+          const updated=[...prev];
+          const last={...updated[updated.length-1]};
           const nowSec=Math.floor(Date.now()/1000);
-          // Proportional noise: ~0.06% per tick — works for all forex pairs
-          const tickSize=last.c*0.0006;
-          const d=(Math.random()-.496)*tickSize;
-          const np=Math.max(last.c*0.85,Math.min(last.c*1.15,last.c+d));
-          let updated;
-          if(nowSec-(last.time||0)>=60){
-            updated=[...prev.slice(-199),{time:nowSec,o:np,c:np,h:np,l:np,v:0}];
+          last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
+          if(nowSec-last.time>=60){
+            updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
           } else {
-            const nc={...last,c:np,h:Math.max(last.h,np),l:Math.min(last.l,np)};
-            updated=[...prev.slice(0,-1),nc];
+            updated[updated.length-1]=last;
           }
           const closes=updated.map(c=>c.c);
           const newBB=calcBB(closes);
@@ -1100,6 +1155,7 @@ export default function TradingBot(){
           const e200=calcEMA(closes,200);
           const sr=calcSR(updated);
           setPrice(np); priceRef.current=np;
+          _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
           setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
           setBB(newBB); bbRef.current=newBB;
           setEma9(e9); ema9Ref.current=e9;
@@ -1110,7 +1166,7 @@ export default function TradingBot(){
           setSrLevels(sr); srRef.current=sr;
           return updated;
         });
-      },1500);
+      },15000);
     }
 
     return()=>clearInterval(iv);
@@ -1157,27 +1213,7 @@ export default function TradingBot(){
     return()=>clearInterval(iv);
   },[symbol,chartInterval]);
 
-  /* ── Forex real price anchor (all forex pairs) ───────────────────────── */
-  useEffect(()=>{
-    if(asset.type!=="forex"){setForexLive(false);return;}
-    const {forexFrom,forexTo}=asset;
-    const load=async()=>{
-      const rate=await fetchForexRateCached(forexFrom,forexTo,300000);
-      if(rate&&!isNaN(rate)){
-        setCandles(prev=>{
-          const shift=rate-prev.at(-1).c;
-          if(Math.abs(shift)<0.000001)return prev;
-          return prev.map(c=>({...c,o:c.o+shift,c:c.c+shift,h:c.h+shift,l:c.l+shift}));
-        });
-        setPrice(rate); priceRef.current=rate;
-        setForexLive(true);
-        setPriceVerified(true);
-      }
-    };
-    load();
-    const iv=setInterval(load,300000);
-    return()=>clearInterval(iv);
-  },[symbol]);
+  // Forex anchor removed — price + candles now handled in the price tick effect above
 
   /* ── Multi-asset scanner ─────────────────────────────────────────────── */
   useEffect(()=>{
@@ -1380,9 +1416,45 @@ export default function TradingBot(){
       setAutoPhase("waiting_conditions");
       return;
     }
+    // ── Trading session filter for forex (don't trade during Asian dead hours)
+    const curAsset=ASSETS[symbolRef.current];
+    if(curAsset?.type==="forex"){
+      const utcHour=new Date().getUTCHours();
+      // London session: 07:00-17:00 UTC | NY session: 12:00-21:00 UTC
+      // Overlap (best): 12:00-17:00 UTC | Avoid: 21:00-06:00 UTC (low liquidity)
+      const inAsianOnly=utcHour>=21||utcHour<6; // dead hours: 21:00–06:00 UTC
+      if(inAsianOnly&&reason.includes("Ciclo")){
+        addLog(`🌙 Sesión asiática (${utcHour}:00 UTC) — baja liquidez. Esperando apertura Londres (07:00 UTC).`,"info");
+        setAutoPhase("waiting_conditions");
+        setAnalyzing(false);
+        return;
+      }
+    }
+
     setAnalyzing(true);
     setAutoPhase("analyzing");
-    addLog(`🔍 Analizando ${symbolRef.current}: ${reason}`,"info");
+
+    // ── Learning feedback: derive dynamic confidence threshold from trade history
+    const trades=loadTrades();
+    let dynamicMinConf=60; // base threshold
+    if(trades.length>=10){
+      const recent=trades.slice(0,20);
+      const recentWR=recent.filter(t=>t.pnl>0).length/recent.length;
+      // Tighten confidence requirement when win rate is poor
+      if(recentWR<0.35)      dynamicMinConf=78; // losing badly → very strict
+      else if(recentWR<0.45) dynamicMinConf=72; // below avg → strict
+      else if(recentWR<0.55) dynamicMinConf=65; // around avg → slightly cautious
+      else if(recentWR>=0.65)dynamicMinConf=58; // winning well → slight relaxation
+      // Per-direction adjustment based on recent directional performance
+      const recentBuys=recent.filter(t=>t.type==="BUY");
+      const recentSells=recent.filter(t=>t.type==="SELL");
+      const buyWR=recentBuys.length>=3?recentBuys.filter(t=>t.pnl>0).length/recentBuys.length:null;
+      const sellWR=recentSells.length>=3?recentSells.filter(t=>t.pnl>0).length/recentSells.length:null;
+      if(buyWR!==null&&buyWR<0.3) dynamicMinConf=Math.max(dynamicMinConf,75); // BUYs losing a lot
+      if(sellWR!==null&&sellWR<0.3) dynamicMinConf=Math.max(dynamicMinConf,75); // SELLs losing a lot
+    }
+
+    addLog(`🔍 Analizando ${symbolRef.current}: ${reason} | umbral dinámico: ${dynamicMinConf}%`,"info");
     try{
       // Build correlation array for AI
       // Compute confirms based on dominant EMA direction (not fixed BUY bias)
@@ -1419,7 +1491,7 @@ export default function TradingBot(){
       if(autoRef.current){
         const activeSym=symbolRef.current;
         const symSlots=MAX_POSITIONS-posRef.current.filter(p=>p.symbol===activeSym).length;
-        if(result.should_open&&result.signal!=="HOLD"&&symSlots>0&&result.confidence>=60){
+        if(result.should_open&&result.signal!=="HOLD"&&symSlots>0&&result.confidence>=dynamicMinConf){
           const isBuy=result.signal==="BUY";
           const cp=priceRef.current;
           const prec=ASSETS[activeSym].precision;
@@ -1456,7 +1528,7 @@ export default function TradingBot(){
           setAutoPhase("monitoring");
         } else {
           const why=!result.should_open?"sin confluencia clara"
-            :result.confidence<60?`confianza baja (${result.confidence}%)`
+            :result.confidence<dynamicMinConf?`confianza ${result.confidence}% < umbral ${dynamicMinConf}%`
             :symSlots===0?"slots llenos":"señal HOLD";
           addLog(`⏸ Sin abrir — ${why}. Esperando próximo ciclo.`,"info");
           setAutoPhase("waiting_conditions");
