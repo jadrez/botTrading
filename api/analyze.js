@@ -1,9 +1,13 @@
-const TAKE_PROFIT_USD = 3.00;
-const STOP_LOSS_USD   = 2.00;
+const TAKE_PROFIT_PCT = 0.003; // 0.3% of notional
+const STOP_LOSS_PCT   = 0.002; // 0.2% of notional
 const MAX_POSITIONS   = 5;
 const DEFAULT_POSITION_USD = 1000;
 
-const fUSD = (n, sign=true) => (sign&&n>=0?"+":"")+`$${Math.abs(n).toFixed(2)}`;
+const fUSD = (n, sign=true) => {
+  const abs=Math.abs(n);
+  const dec=abs<0.01?4:abs<0.10?3:2;
+  return (sign&&n>=0?"+":"")+`$${abs.toFixed(dec)}`;
+};
 
 function posPnL(pos, price, posSize=DEFAULT_POSITION_USD) {
   const dir = pos.type === "BUY" ? 1 : -1;
@@ -29,6 +33,8 @@ export default async function handler(req, res) {
     positionSize = DEFAULT_POSITION_USD,
   } = req.body;
   const POSITION_USD = positionSize > 0 ? positionSize : DEFAULT_POSITION_USD;
+  const TAKE_PROFIT_USD = POSITION_USD * TAKE_PROFIT_PCT;
+  const STOP_LOSS_USD   = POSITION_USD * STOP_LOSS_PCT;
 
   const nc = (news || []).slice(0, 4)
     .map(n => `[${n.sentiment.toUpperCase()}|${n.impact}] ${n.title}`)
