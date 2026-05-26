@@ -817,10 +817,7 @@ function PosRow({pos, price, precision, onClose, tpTarget=3, slTarget=2}){
       </div>
       <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
         <span style={{fontSize:8,color:T.red}}>SL -{fUSD(slTarget,false)}</span>
-        <div style={{display:"flex",gap:4}}>
-          {pos.binanceOrderId&&<span style={{fontSize:7,color:"#00b8e6"}}>🔷#{String(pos.binanceOrderId).slice(-6)}</span>}
-          {pos.oandaTradeId&&<span style={{fontSize:7,color:"#ff6d00"}}>🟠#{String(pos.oandaTradeId).slice(-6)}</span>}
-        </div>
+        {pos.oandaTradeId&&<span style={{fontSize:7,color:"#ff6d00",background:"#ff6d0015",padding:"1px 5px",borderRadius:3}}>🟠 OANDA #{String(pos.oandaTradeId)}</span>}
         <span style={{fontSize:8,color:pnl>=0?T.green:T.muted}}>{pct.toFixed(0)}% → TP +{fUSD(tpTarget,false)}</span>
       </div>
     </div>
@@ -894,35 +891,6 @@ async function fetchForexCandles(from,to,limit=200,interval="1m"){
     if(d.candles?.length>5) return d;
   }catch{}
   return null;
-}
-
-async function openBinanceOrder(symbol,side,positionSize,price){
-  try{
-    const r=await fetch("/api/binance-order",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({action:"open",symbol,side,positionSize,price,clientOrderId:`bot_${Date.now()}`})});
-    const d=await r.json();
-    if(!r.ok||d.error) return{ok:false,error:d.error||"Error Binance"};
-    return{ok:true,...d};
-  }catch(e){return{ok:false,error:e.message};}
-}
-
-async function closeBinanceOrder(symbol,side,quantity){
-  try{
-    const r=await fetch("/api/binance-order",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({action:"close",symbol,side,quantity})});
-    const d=await r.json();
-    if(!r.ok||d.error) return{ok:false,error:d.error||"Error Binance"};
-    return{ok:true,...d};
-  }catch(e){return{ok:false,error:e.message};}
-}
-
-async function getBinanceBalance(){
-  try{
-    const r=await fetch("/api/binance-order",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({action:"balance"})});
-    const d=await r.json();
-    return r.ok&&!d.error?d:null;
-  }catch{return null;}
 }
 
 /* ─── OANDA HELPERS ─────────────────────────────────────────────────────── */
@@ -1022,12 +990,6 @@ export default function TradingBot(){
   const [oandaConnectErr,setOandaConnectErr]= useState(null);
   const [oandaTesting,setOandaTesting]    = useState(false);
   const oandaEnabledRef = useRef(localStorage.getItem("oandaEnabled")==="true");
-  const [binanceEnabled,setBinanceEnabled]= useState(()=>localStorage.getItem("binanceEnabled")==="true");
-  const [binanceBalance,setBinanceBalance]= useState(null);
-  const [binanceTestnet,setBinanceTestnet]= useState(true);
-  const [binanceConnectErr,setBinanceConnectErr]= useState(null);
-  const [binanceTesting,setBinanceTesting]= useState(false);
-  const binanceEnabledRef = useRef(localStorage.getItem("binanceEnabled")==="true");
   const [livePrices,setLivePrices]        = useState({});
   const chartIntervalRef = useRef("1m");
   const bgPricesRef   = useRef({});
@@ -1076,7 +1038,6 @@ export default function TradingBot(){
   useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp",String(tpTarget));},[tpTarget]);
   useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl",String(slTarget));},[slTarget]);
   useEffect(()=>{oandaEnabledRef.current=oandaEnabled;localStorage.setItem("oandaEnabled",String(oandaEnabled));},[oandaEnabled]);
-  useEffect(()=>{binanceEnabledRef.current=binanceEnabled;localStorage.setItem("binanceEnabled",String(binanceEnabled));},[binanceEnabled]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
   useEffect(()=>{consLossesRef.current=consecutiveLosses;},[consecutiveLosses]);
   useEffect(()=>{shortTrendRef.current=shortTrend;},[shortTrend]);
@@ -1122,21 +1083,6 @@ export default function TradingBot(){
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
   },[]);
-
-  /* ── Binance balance polling ────────────────────────────────────────── */
-  useEffect(()=>{
-    if(!binanceEnabled) return;
-    const load=async()=>{
-      const b=await getBinanceBalance();
-      if(b){
-        setBinanceBalance(b);
-        if(typeof b.testnet==="boolean") setBinanceTestnet(b.testnet);
-      }
-    };
-    load();
-    const iv=setInterval(load,30000);
-    return()=>clearInterval(iv);
-  },[binanceEnabled]);
 
   /* ── OANDA balance polling ──────────────────────────────────────────── */
   useEffect(()=>{
@@ -1515,10 +1461,6 @@ export default function TradingBot(){
     setPositions(prev=>{
       const pos=prev.find(p=>p.id===posId);
       if(!pos)return prev;
-      if(binanceEnabledRef.current && pos.binanceQty && ASSETS[pos.symbol||""]?.type==="crypto"){
-        closeBinanceOrder(pos.symbol,pos.type,pos.binanceQty)
-          .then(r=>{ if(!r.ok) console.warn("Binance close error:",r.error); });
-      }
       if(oandaEnabledRef.current && pos.oandaTradeId && ASSETS[pos.symbol||""]?.type==="forex"){
         closeOandaOrder(pos.oandaTradeId)
           .then(r=>{ if(!r.ok) console.warn("OANDA close error:",r.error); });
@@ -1679,19 +1621,6 @@ export default function TradingBot(){
           const activeAssetCheck=ASSETS[activeSym];
           const ps=positionSizeRef.current;
 
-          // ── Binance order for crypto pairs
-          let binanceOrderId=null, binanceQty=null;
-          if(binanceEnabledRef.current && activeAssetCheck?.type==="crypto"){
-            const bResult=await openBinanceOrder(activeSym,result.signal,ps,cp);
-            if(bResult.ok){
-              binanceOrderId=bResult.orderId;
-              binanceQty=bResult.qty;
-              addLog(`🔷 Binance orden ${result.signal} abierta | ID:${binanceOrderId} | qty:${binanceQty}`,"info");
-            } else {
-              addLog(`⚠️ Binance: ${bResult.error} — posición registrada en simulación`,"sell");
-            }
-          }
-
           // ── OANDA order for forex pairs
           let oandaTradeId=null;
           if(oandaEnabledRef.current && activeAssetCheck?.type==="forex"){
@@ -1706,7 +1635,6 @@ export default function TradingBot(){
 
           const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
             symbol:activeSym,openTime:Date.now(),allocatedSize:ps,
-            ...(binanceOrderId&&{binanceOrderId,binanceQty}),
             ...(oandaTradeId&&{oandaTradeId})};
 
           // ── Open correlated positions on all forex pairs with a confirmed correlation
@@ -2785,94 +2713,8 @@ export default function TradingBot(){
                 </div>
               )}
               <div style={{fontSize:8,color:T.muted}}>
-                Solo forex (EUR/USD, GBP/USD, etc.). Crypto sigue en Binance/simulación.
-                Órdenes MARKET en OANDA {oandaPractice?"Practice":"Live"}.
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* BINANCE INTEGRATION PANEL */}
-        <div style={{background:T.card,border:`1px solid ${binanceEnabled&&binanceBalance?T.accent:binanceEnabled?T.yellow:T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>BINANCE FUTURES</span>
-              {binanceEnabled&&(
-                <span style={{fontSize:7,color:binanceTestnet?T.yellow:T.green,background:`${binanceTestnet?T.yellow:T.green}18`,
-                  padding:"1px 6px",borderRadius:3,letterSpacing:1,fontWeight:700}}>
-                  {binanceTestnet?"TESTNET":"PRODUCCIÓN"}
-                </span>
-              )}
-            </div>
-            <div style={{display:"flex",gap:6,alignItems:"center"}}>
-              {binanceEnabled&&(
-                <button onClick={async()=>{
-                  setBinanceTesting(true); setBinanceConnectErr(null);
-                  const b=await getBinanceBalance();
-                  if(b){setBinanceBalance(b);if(typeof b.testnet==="boolean")setBinanceTestnet(b.testnet);setBinanceConnectErr(null);}
-                  else setBinanceConnectErr("No se pudo conectar. Verifica las API Keys en Vercel (BINANCE_API_KEY, BINANCE_API_SECRET).");
-                  setBinanceTesting(false);
-                }} style={{background:`${T.accent}15`,border:`1px solid ${T.accent}40`,color:T.accent,
-                  borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:9,fontWeight:700}}>
-                  {binanceTesting?"⏳ probando...":"🔌 PROBAR"}
-                </button>
-              )}
-              <button onClick={()=>{setBinanceEnabled(p=>!p);setBinanceBalance(null);setBinanceConnectErr(null);}}
-                style={{background:binanceEnabled?`${T.accent}20`:"transparent",border:`1px solid ${binanceEnabled?T.accent:T.border}`,
-                  color:binanceEnabled?T.accent:T.muted,borderRadius:6,padding:"4px 12px",cursor:"pointer",
-                  fontSize:10,fontWeight:700,letterSpacing:1}}>
-                {binanceEnabled?"🔷 ACTIVADO":"⚪ DESACTIVADO"}
-              </button>
-            </div>
-          </div>
-
-          {!binanceEnabled&&(
-            <div style={{fontSize:9,color:T.muted,lineHeight:1.6}}>
-              Activa para que el bot abra/cierre órdenes reales en Binance Futures.<br/>
-              Requiere variables en Vercel: <span style={{color:T.accent,fontFamily:"monospace"}}>BINANCE_API_KEY</span>, <span style={{color:T.accent,fontFamily:"monospace"}}>BINANCE_API_SECRET</span>, <span style={{color:T.accent,fontFamily:"monospace"}}>BINANCE_TESTNET=false</span>
-            </div>
-          )}
-
-          {binanceEnabled&&(
-            <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              {binanceConnectErr&&(
-                <div style={{background:`${T.red}12`,border:`1px solid ${T.red}40`,borderRadius:6,padding:"8px 10px",fontSize:9,color:T.red,lineHeight:1.5}}>
-                  ❌ {binanceConnectErr}
-                </div>
-              )}
-              {!binanceBalance&&!binanceConnectErr&&(
-                <div style={{fontSize:9,color:T.yellow}}>
-                  ⏳ Cargando balance... Si tarda más de 5s, haz clic en "PROBAR".
-                </div>
-              )}
-              {binanceBalance&&(
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
-                  {[
-                    {l:"BALANCE USDT",v:`$${binanceBalance.walletBalance?.toFixed(2)}`,c:T.text},
-                    {l:"DISPONIBLE",v:`$${binanceBalance.availableBalance?.toFixed(2)}`,c:T.green},
-                    {l:"PnL NO REALIZADO",v:fUSD(binanceBalance.unrealizedPnl||0),c:(binanceBalance.unrealizedPnl||0)>=0?T.green:T.red},
-                  ].map(({l,v,c})=>(
-                    <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px"}}>
-                      <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
-                      <div className="mono" style={{fontSize:11,color:c,fontWeight:700}}>{v}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {(()=>{
-                const minUSD={"ETH/USDT":3,"BTC/USDT":100,"SOL/USDT":18};
-                const minNeeded=minUSD[symbol];
-                if(ASSETS[symbol]?.type==="crypto"&&minNeeded&&positionSize<minNeeded)
-                  return(
-                    <div style={{background:`${T.yellow}12`,border:`1px solid ${T.yellow}40`,borderRadius:6,padding:"7px 10px",fontSize:9,color:T.yellow,lineHeight:1.5}}>
-                      ⚠️ Para <b>{symbol}</b> el mínimo Binance es ~<b>${minNeeded}</b>. Tu posición actual de <b>${positionSize.toFixed(2)}</b> generará error al abrir órdenes. Sube el tamaño arriba.
-                    </div>
-                  );
-                return null;
-              })()}
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:8,color:T.muted}}>
-                <span>Solo crypto (ETH/BTC/SOL). Forex = simulación virtual.</span>
-                <span>Órdenes MARKET en Futures {binanceTestnet?"Testnet":"Producción"}.</span>
+                Forex (EUR/USD, GBP/USD, etc.) ejecutado en OANDA {oandaPractice?"Practice":"Live"}.
+                Crypto: datos en vivo, operaciones simuladas (paper trading).
               </div>
             </div>
           )}
@@ -3056,7 +2898,7 @@ export default function TradingBot(){
 
         {/* DISCLAIMER */}
         <div style={{fontSize:8,color:T.muted,textAlign:"center",lineHeight:1.9,paddingTop:8,borderTop:`1px solid ${T.border}`}}>
-          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Crypto en vivo vía Binance · EUR/USD en vivo vía Open Exchange Rates (ECB) · TP +$3.00 · SL -$2.00<br/>
+          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Forex en vivo vía OANDA (precio real) · Crypto en vivo vía feed público · TP +$3.00 · SL -$2.00<br/>
           Las señales son educativas y no garantizan resultados en mercados reales. Opera siempre con responsabilidad.
         </div>
 
