@@ -817,9 +817,10 @@ function PosRow({pos, price, precision, onClose, tpTarget=3, slTarget=2}){
       </div>
       <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
         <span style={{fontSize:8,color:T.red}}>SL -{fUSD(slTarget,false)}</span>
-        {pos.binanceOrderId&&(
-          <span style={{fontSize:7,color:T.accent}}>🔷 #{String(pos.binanceOrderId).slice(-8)}</span>
-        )}
+        <div style={{display:"flex",gap:4}}>
+          {pos.binanceOrderId&&<span style={{fontSize:7,color:"#00b8e6"}}>🔷#{String(pos.binanceOrderId).slice(-6)}</span>}
+          {pos.oandaTradeId&&<span style={{fontSize:7,color:"#ff6d00"}}>🟠#{String(pos.oandaTradeId).slice(-6)}</span>}
+        </div>
         <span style={{fontSize:8,color:pnl>=0?T.green:T.muted}}>{pct.toFixed(0)}% → TP +{fUSD(tpTarget,false)}</span>
       </div>
     </div>
@@ -924,6 +925,36 @@ async function getBinanceBalance(){
   }catch{return null;}
 }
 
+/* ─── OANDA HELPERS ─────────────────────────────────────────────────────── */
+async function openOandaOrder(symbol,side,positionSize,price){
+  try{
+    const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"open",symbol,side,positionSize,price})});
+    const d=await r.json();
+    if(!r.ok||d.error) return{ok:false,error:d.error||"Error OANDA"};
+    return{ok:true,...d};
+  }catch(e){return{ok:false,error:e.message};}
+}
+
+async function closeOandaOrder(tradeId){
+  try{
+    const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"close",tradeId})});
+    const d=await r.json();
+    if(!r.ok||d.error) return{ok:false,error:d.error||"Error OANDA"};
+    return{ok:true,...d};
+  }catch(e){return{ok:false,error:e.message};}
+}
+
+async function getOandaBalance(){
+  try{
+    const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"balance"})});
+    const d=await r.json();
+    return r.ok&&!d.error?d:null;
+  }catch{return null;}
+}
+
 async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize,tpTarget,slTarget}){
   const r=await fetch("/api/analyze",{
     method:"POST",
@@ -985,6 +1016,12 @@ export default function TradingBot(){
   const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl")||"2.00"));
   const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp")||"3.00"));
   const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl")||"2.00"));
+  const [oandaEnabled,setOandaEnabled]    = useState(()=>localStorage.getItem("oandaEnabled")==="true");
+  const [oandaBalance,setOandaBalance]    = useState(null);
+  const [oandaPractice,setOandaPractice]  = useState(true);
+  const [oandaConnectErr,setOandaConnectErr]= useState(null);
+  const [oandaTesting,setOandaTesting]    = useState(false);
+  const oandaEnabledRef = useRef(localStorage.getItem("oandaEnabled")==="true");
   const [binanceEnabled,setBinanceEnabled]= useState(()=>localStorage.getItem("binanceEnabled")==="true");
   const [binanceBalance,setBinanceBalance]= useState(null);
   const [binanceTestnet,setBinanceTestnet]= useState(true);
@@ -1038,6 +1075,7 @@ export default function TradingBot(){
   useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_posSize",String(positionSize));},[positionSize]);
   useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp",String(tpTarget));},[tpTarget]);
   useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl",String(slTarget));},[slTarget]);
+  useEffect(()=>{oandaEnabledRef.current=oandaEnabled;localStorage.setItem("oandaEnabled",String(oandaEnabled));},[oandaEnabled]);
   useEffect(()=>{binanceEnabledRef.current=binanceEnabled;localStorage.setItem("binanceEnabled",String(binanceEnabled));},[binanceEnabled]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
   useEffect(()=>{consLossesRef.current=consecutiveLosses;},[consecutiveLosses]);
@@ -1099,6 +1137,21 @@ export default function TradingBot(){
     const iv=setInterval(load,30000);
     return()=>clearInterval(iv);
   },[binanceEnabled]);
+
+  /* ── OANDA balance polling ──────────────────────────────────────────── */
+  useEffect(()=>{
+    if(!oandaEnabled) return;
+    const load=async()=>{
+      const b=await getOandaBalance();
+      if(b){
+        setOandaBalance(b);
+        if(typeof b.practice==="boolean") setOandaPractice(b.practice);
+      }
+    };
+    load();
+    const iv=setInterval(load,30000);
+    return()=>clearInterval(iv);
+  },[oandaEnabled]);
 
   /* ── Symbol change ───────────────────────────────────────────────────── */
   const handleSymbolChange=useCallback((newSym)=>{
@@ -1466,6 +1519,10 @@ export default function TradingBot(){
         closeBinanceOrder(pos.symbol,pos.type,pos.binanceQty)
           .then(r=>{ if(!r.ok) console.warn("Binance close error:",r.error); });
       }
+      if(oandaEnabledRef.current && pos.oandaTradeId && ASSETS[pos.symbol||""]?.type==="forex"){
+        closeOandaOrder(pos.oandaTradeId)
+          .then(r=>{ if(!r.ok) console.warn("OANDA close error:",r.error); });
+      }
       const pnl=posPnL(pos,currentPrice,pos.allocatedSize||positionSizeRef.current);
       const posSym=pos.symbol||symbolRef.current;
       const prec=ASSETS[posSym]?.precision||ASSETS[symbolRef.current].precision;
@@ -1635,9 +1692,22 @@ export default function TradingBot(){
             }
           }
 
+          // ── OANDA order for forex pairs
+          let oandaTradeId=null;
+          if(oandaEnabledRef.current && activeAssetCheck?.type==="forex"){
+            const oResult=await openOandaOrder(activeSym,result.signal,ps,cp);
+            if(oResult.ok){
+              oandaTradeId=oResult.tradeId;
+              addLog(`🟠 OANDA orden ${result.signal} abierta | TradeID:${oandaTradeId} | ${oResult.units} units @ ${oResult.avgPrice}`,"info");
+            } else {
+              addLog(`⚠️ OANDA: ${oResult.error} — posición registrada en simulación`,"sell");
+            }
+          }
+
           const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
             symbol:activeSym,openTime:Date.now(),allocatedSize:ps,
-            ...(binanceOrderId&&{binanceOrderId,binanceQty})};
+            ...(binanceOrderId&&{binanceOrderId,binanceQty}),
+            ...(oandaTradeId&&{oandaTradeId})};
 
           // ── Open correlated positions on all forex pairs with a confirmed correlation
           const corrPositions=[];
@@ -1658,9 +1728,16 @@ export default function TradingBot(){
               // Skip if the correlated pair's own signal actively contradicts the expected direction
               const corrInfo=corrSignalsRef.current[corrSym];
               if(corrInfo?.signal&&corrInfo.signal!=="HOLD"&&corrInfo.signal!==corrSignal) continue;
+              // OANDA correlated order
+              let corrOandaId=null;
+              if(oandaEnabledRef.current){
+                const oCorr=await openOandaOrder(corrSym,corrSignal,ps,corrPrice);
+                if(oCorr.ok) corrOandaId=oCorr.tradeId;
+              }
               corrPositions.push({
                 type:corrSignal,entry:corrPrice,id:Date.now()+Math.random()+corrPositions.length*0.001,
                 symbol:corrSym,openTime:Date.now(),correlatedWith:activeSym,allocatedSize:ps,
+                ...(corrOandaId&&{oandaTradeId:corrOandaId}),
               });
               addLog(`🔗 ${corrSignal==="BUY"?"🟢":"🔴"} CORR ${corrSignal} ${corrSym} @ ${fP(corrPrice,corrAsset.precision)} (${corrDir>0?"↑↑":"↓↑"} ${activeSym})`,corrSignal==="BUY"?"buy":"sell");
             }
@@ -2639,6 +2716,80 @@ export default function TradingBot(){
           <div style={{fontSize:8,color:T.muted,marginTop:5}}>
             Necesitas ${(tpTarget/(positionSize||1)*100).toFixed(1)}% de movimiento para TP · ${(slTarget/(positionSize||1)*100).toFixed(1)}% para SL
           </div>
+        </div>
+
+        {/* OANDA INTEGRATION PANEL */}
+        <div style={{background:T.card,border:`1px solid ${oandaEnabled&&oandaBalance?T.orange:oandaEnabled?T.yellow:T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>OANDA FOREX</span>
+              {oandaEnabled&&(
+                <span style={{fontSize:7,color:oandaPractice?T.yellow:T.green,background:`${oandaPractice?T.yellow:T.green}18`,
+                  padding:"1px 6px",borderRadius:3,letterSpacing:1,fontWeight:700}}>
+                  {oandaPractice?"PRACTICE":"LIVE"}
+                </span>
+              )}
+            </div>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              {oandaEnabled&&(
+                <button onClick={async()=>{
+                  setOandaTesting(true); setOandaConnectErr(null);
+                  const b=await getOandaBalance();
+                  if(b){setOandaBalance(b);if(typeof b.practice==="boolean")setOandaPractice(b.practice);setOandaConnectErr(null);}
+                  else setOandaConnectErr("No se pudo conectar. Verifica OANDA_API_TOKEN y OANDA_ACCOUNT_ID en Vercel.");
+                  setOandaTesting(false);
+                }} style={{background:`${T.orange}15`,border:`1px solid ${T.orange}40`,color:T.orange,
+                  borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:9,fontWeight:700}}>
+                  {oandaTesting?"⏳ probando...":"🔌 PROBAR"}
+                </button>
+              )}
+              <button onClick={()=>{setOandaEnabled(p=>!p);setOandaBalance(null);setOandaConnectErr(null);}}
+                style={{background:oandaEnabled?`${T.orange}20`:"transparent",border:`1px solid ${oandaEnabled?T.orange:T.border}`,
+                  color:oandaEnabled?T.orange:T.muted,borderRadius:6,padding:"4px 12px",cursor:"pointer",
+                  fontSize:10,fontWeight:700,letterSpacing:1}}>
+                {oandaEnabled?"🟠 ACTIVADO":"⚪ DESACTIVADO"}
+              </button>
+            </div>
+          </div>
+
+          {!oandaEnabled&&(
+            <div style={{fontSize:9,color:T.muted,lineHeight:1.6}}>
+              Conecta para órdenes reales en pares <span style={{color:T.orange}}>Forex</span> (EUR/USD, GBP/USD, USD/JPY...).<br/>
+              Requiere en Vercel: <span style={{color:T.orange,fontFamily:"monospace"}}>OANDA_API_TOKEN</span>, <span style={{color:T.orange,fontFamily:"monospace"}}>OANDA_ACCOUNT_ID</span>, <span style={{color:T.orange,fontFamily:"monospace"}}>OANDA_PRACTICE=true</span>
+            </div>
+          )}
+
+          {oandaEnabled&&(
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {oandaConnectErr&&(
+                <div style={{background:`${T.red}12`,border:`1px solid ${T.red}40`,borderRadius:6,padding:"8px 10px",fontSize:9,color:T.red,lineHeight:1.5}}>
+                  ❌ {oandaConnectErr}
+                </div>
+              )}
+              {!oandaBalance&&!oandaConnectErr&&(
+                <div style={{fontSize:9,color:T.yellow}}>⏳ Cargando balance... Haz clic en "PROBAR" si tarda más de 5s.</div>
+              )}
+              {oandaBalance&&(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6}}>
+                  {[
+                    {l:"BALANCE",    v:`$${oandaBalance.balance?.toFixed(2)}`,              c:T.text},
+                    {l:"DISPONIBLE", v:`$${oandaBalance.availableBalance?.toFixed(2)}`,     c:T.green},
+                    {l:"PnL ABIERTO",v:fUSD(oandaBalance.unrealizedPnl||0),                c:(oandaBalance.unrealizedPnl||0)>=0?T.green:T.red},
+                    {l:"TRADES",     v:`${oandaBalance.openTrades} ${oandaBalance.currency||"USD"}`,c:T.muted},
+                  ].map(({l,v,c})=>(
+                    <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px"}}>
+                      <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
+                      <div className="mono" style={{fontSize:11,color:c,fontWeight:700}}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{fontSize:8,color:T.muted}}>
+                Solo forex (EUR/USD, GBP/USD, etc.). Crypto sigue en Binance/simulación.
+                Órdenes MARKET en OANDA {oandaPractice?"Practice":"Live"}.
+              </div>
+            </div>
+          )}
         </div>
 
         {/* BINANCE INTEGRATION PANEL */}
