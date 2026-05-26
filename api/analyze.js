@@ -1,7 +1,7 @@
-const MAX_POSITIONS        = 5;
-const DEFAULT_POSITION_USD = 1.00;
-const DEFAULT_TP_USD       = 3.00;
-const DEFAULT_SL_USD       = 2.00;
+const MAX_POSITIONS  = 5;
+const DEFAULT_LOTS   = 0.10;
+const DEFAULT_TP_USD = 3.00;
+const DEFAULT_SL_USD = 2.00;
 
 const fUSD = (n, sign=true) => {
   const abs=Math.abs(n);
@@ -9,9 +9,15 @@ const fUSD = (n, sign=true) => {
   return (sign&&n>=0?"+":"")+`$${abs.toFixed(dec)}`;
 };
 
-function posPnL(pos, price, posSize=DEFAULT_POSITION_USD) {
+// lots-based PnL: for USD-quoted pairs (EUR/USD etc.) pnl = dir × Δprice × units
+// for USD-base pairs (USD/JPY etc.) pnl = dir × Δprice / price × units
+function posPnL(pos, price, lots=DEFAULT_LOTS) {
   const dir = pos.type === "BUY" ? 1 : -1;
-  return dir * (price - pos.entry) / pos.entry * posSize;
+  const units = lots * 100000;
+  const sym = pos.symbol || "";
+  if (sym.startsWith("USD/")) return dir * (price - pos.entry) / price * units;
+  if (sym.includes("/")) return dir * (price - pos.entry) * units;  // forex USD-quoted
+  return dir * (price - pos.entry) / pos.entry * (lots * 1000);     // crypto
 }
 
 export default async function handler(req, res) {
@@ -30,11 +36,11 @@ export default async function handler(req, res) {
     patterns = [],
     correlations = [],
     positions, balance, news, reason,
-    positionSize = DEFAULT_POSITION_USD,
+    positionSize = DEFAULT_LOTS,
     tpTarget = DEFAULT_TP_USD,
     slTarget = DEFAULT_SL_USD,
   } = req.body;
-  const POSITION_USD    = positionSize > 0 ? positionSize : DEFAULT_POSITION_USD;
+  const POSITION_USD    = positionSize > 0 ? positionSize : DEFAULT_LOTS;
   const TAKE_PROFIT_USD = tpTarget > 0 ? tpTarget : DEFAULT_TP_USD;
   const STOP_LOSS_USD   = slTarget > 0 ? slTarget : DEFAULT_SL_USD;
 

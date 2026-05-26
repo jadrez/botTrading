@@ -12,20 +12,10 @@ function getBase() {
   return process.env.OANDA_PRACTICE === "false" ? LIVE_BASE : PRACTICE_BASE;
 }
 
-// Calculate OANDA units from USD notional
-// For pairs where USD is the quote (EUR/USD, GBP/USD...): units = positionUSD / price (base-currency units)
-// For pairs where USD is the base (USD/JPY, USD/CHF...): units = positionUSD directly
-// EUR/GBP is a cross pair — approximate via positionUSD / 1.15 (rough EUR/USD rate)
-function calcUnits(symbol, positionSizeUSD, price, side) {
-  let raw;
-  if (symbol.startsWith("USD/")) {
-    raw = positionSizeUSD;                       // 1 unit = 1 USD
-  } else if (symbol === "EUR/GBP") {
-    raw = positionSizeUSD / 1.15;                // approx: 1 EUR ≈ $1.15
-  } else {
-    raw = positionSizeUSD / price;               // base currency units
-  }
-  const units = Math.max(1, Math.round(raw));
+// Convert lots to OANDA units: 1 standard lot = 100,000 units of base currency
+// e.g. 0.10 lots EUR/USD = 10,000 EUR; 0.10 lots USD/JPY = 10,000 USD
+function calcUnits(lots, side) {
+  const units = Math.max(1, Math.round(lots * 100000));
   return side === "SELL" ? -units : units;
 }
 
@@ -40,7 +30,7 @@ export default async function handler(req, res) {
 
   const base    = getBase();
   const headers = { "Authorization": `Bearer ${token}`, "Content-Type": "application/json", "Accept-Datetime-Format": "UNIX" };
-  const { action, symbol, side, positionSize, price, tradeId } = req.body || {};
+  const { action, symbol, side, lots, tradeId } = req.body || {};
 
   try {
     // ── OPEN position (market order)
@@ -48,7 +38,7 @@ export default async function handler(req, res) {
       const instrument = INSTRUMENT_MAP[symbol];
       if (!instrument) return res.status(400).json({ error: `Símbolo no soportado: ${symbol}` });
 
-      const units = calcUnits(symbol, positionSize, price, side);
+      const units = calcUnits(lots || 0.10, side);
       const r = await fetch(`${base}/v3/accounts/${accountId}/orders`, {
         method: "POST", headers,
         body: JSON.stringify({
@@ -66,7 +56,8 @@ export default async function handler(req, res) {
       return res.status(200).json({
         tradeId:  fill.tradeOpened?.tradeID || null,
         units:    Math.abs(parseInt(fill.units || units)),
-        avgPrice: parseFloat(fill.price || price),
+        lots:     Math.abs(units) / 100000,
+        avgPrice: parseFloat(fill.price || 0),
         status:   "FILLED",
         practice: process.env.OANDA_PRACTICE !== "false",
       });

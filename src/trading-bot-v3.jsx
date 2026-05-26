@@ -58,7 +58,7 @@ const ASSETS = {
 
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
 const MAX_POSITIONS         = 3;    // per symbol — correlated pairs open in parallel
-const POSITION_USD          = 1.00; // fallback default (overridden by user state)
+const DEFAULT_LOTS          = 0.10; // fallback default lots (overridden by user state)
 const ANALYSIS_INTERVAL_MS  = 90000; // 90s — balanced for 5M charts and Groq free tier
 
 /* ─── UTILS ─────────────────────────────────────────────────────────────── */
@@ -71,9 +71,18 @@ const fUSD = (n, sign=true) => {
 const fPct = n => (n>=0?"+":"")+n.toFixed(3)+"%";
 const now  = () => new Date().toLocaleTimeString("es");
 
-function posPnL(pos, price, posSize=POSITION_USD){
+function posPnL(pos, price, lots=DEFAULT_LOTS){
   const dir = pos.type==="BUY" ? 1 : -1;
-  return dir * (price - pos.entry) / pos.entry * posSize;
+  const sym = pos.symbol || "";
+  const cfg = ASSETS[sym];
+  const units = lots * 100000;
+  if(cfg?.type==="forex"){
+    if(sym.startsWith("USD/"))
+      return dir * (price - pos.entry) / price * units; // quote is JPY/CHF/CAD → convert to USD
+    return dir * (price - pos.entry) * units;            // quote is USD (EUR/USD etc.)
+  }
+  // Crypto paper trading: 1 lot ≈ $1000 notional
+  return dir * (price - pos.entry) / pos.entry * (lots * 1000);
 }
 
 function genCandles(base=1.0823, n=200, interval="5m"){
@@ -703,10 +712,20 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
     positions.forEach(pos=>{
       const isBuy=pos.type==="BUY";
       const entryCol=isBuy?"#00e676":"#ff1744";
-      const ps=pos.allocatedSize||positionSize;
-      const tpPct=tpTarget/ps; const slPct=slTarget/ps;
-      const tp=isBuy ? pos.entry*(1+tpPct) : pos.entry*(1-tpPct);
-      const sl=isBuy ? pos.entry*(1-slPct) : pos.entry*(1+slPct);
+      const ps=pos.allocatedSize||positionSize; // lots
+      const units=ps*100000;
+      const sym2=pos.symbol||symbol;
+      const cfg2=ASSETS[sym2];
+      let tpD,slD;
+      if(cfg2?.type==="forex"&&sym2.startsWith("USD/")){
+        tpD=tpTarget*pos.entry/units; slD=slTarget*pos.entry/units;
+      } else if(cfg2?.type==="forex"){
+        tpD=tpTarget/units; slD=slTarget/units;
+      } else {
+        tpD=(tpTarget/(ps*1000))*pos.entry; slD=(slTarget/(ps*1000))*pos.entry;
+      }
+      const tp=isBuy ? pos.entry+tpD : pos.entry-tpD;
+      const sl=isBuy ? pos.entry-slD : pos.entry+slD;
 
       posLines.current.push(
         cs.createPriceLine({price:pos.entry, color:entryCol,  lineWidth:2, lineStyle:LineStyle.Solid,  axisLabelVisible:true,  title:`${pos.type}`}),
@@ -894,10 +913,10 @@ async function fetchForexCandles(from,to,limit=200,interval="1m"){
 }
 
 /* ─── OANDA HELPERS ─────────────────────────────────────────────────────── */
-async function openOandaOrder(symbol,side,positionSize,price){
+async function openOandaOrder(symbol,side,lots){
   try{
     const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({action:"open",symbol,side,positionSize,price})});
+      body:JSON.stringify({action:"open",symbol,side,lots})});
     const d=await r.json();
     if(!r.ok||d.error) return{ok:false,error:d.error||"Error OANDA"};
     return{ok:true,...d};
@@ -952,7 +971,7 @@ export default function TradingBot(){
   const [patterns,setPatterns]   = useState([]);
   const [positions,setPositions] = useState([]);
   const [balance,setBalance]     = useState(()=>loadBalance());
-  const [positionSize,setPositionSize] = useState(()=>parseFloat(localStorage.getItem("bot_posSize")||"1.00"));
+  const [positionSize,setPositionSize] = useState(()=>parseFloat(localStorage.getItem("bot_lots")||"0.10"));
   const [trades,setTrades]       = useState([]);
   const [log,setLog]             = useState([]);
   const [news,setNews]           = useState([]);
@@ -1015,7 +1034,7 @@ export default function TradingBot(){
   const patternsRef= useRef([]);
   const newsRef   = useRef([]);
   const balanceRef     = useRef(10000);
-  const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_posSize")||"1.00"));
+  const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_lots")||"0.10"));
   const timerRef  = useRef(null);
   const countRef  = useRef(null);
   const pendingAnalysisRef = useRef(false);
@@ -1034,7 +1053,7 @@ export default function TradingBot(){
   useEffect(()=>{patternsRef.current=patterns;},[patterns]);
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
-  useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_posSize",String(positionSize));},[positionSize]);
+  useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_lots",String(positionSize));},[positionSize]);
   useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp",String(tpTarget));},[tpTarget]);
   useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl",String(slTarget));},[slTarget]);
   useEffect(()=>{oandaEnabledRef.current=oandaEnabled;localStorage.setItem("oandaEnabled",String(oandaEnabled));},[oandaEnabled]);
@@ -1624,7 +1643,7 @@ export default function TradingBot(){
           // ── OANDA order for forex pairs
           let oandaTradeId=null;
           if(oandaEnabledRef.current && activeAssetCheck?.type==="forex"){
-            const oResult=await openOandaOrder(activeSym,result.signal,ps,cp);
+            const oResult=await openOandaOrder(activeSym,result.signal,ps);
             if(oResult.ok){
               oandaTradeId=oResult.tradeId;
               addLog(`🟠 OANDA orden ${result.signal} abierta | TradeID:${oandaTradeId} | ${oResult.units} units @ ${oResult.avgPrice}`,"info");
@@ -1659,7 +1678,7 @@ export default function TradingBot(){
               // OANDA correlated order
               let corrOandaId=null;
               if(oandaEnabledRef.current){
-                const oCorr=await openOandaOrder(corrSym,corrSignal,ps,corrPrice);
+                const oCorr=await openOandaOrder(corrSym,corrSignal,ps);
                 if(oCorr.ok) corrOandaId=oCorr.tradeId;
               }
               corrPositions.push({
@@ -1672,7 +1691,7 @@ export default function TradingBot(){
           }
 
           setPositions(p=>[...p,mainPos,...corrPositions]);
-          addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} ${activeSym} @ ${fP(cp,prec)} | ×$${ps.toFixed(2)} | TP:+${fUSD(tpTargetRef.current)} SL:-${fUSD(slTargetRef.current)}${corrPositions.length?` + ${corrPositions.length} correlacionadas`:""}`,isBuy?"buy":"sell");
+          addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} ${activeSym} @ ${fP(cp,prec)} | ${ps.toFixed(2)}L | TP:+${fUSD(tpTargetRef.current)} SL:-${fUSD(slTargetRef.current)}${corrPositions.length?` + ${corrPositions.length} correlacionadas`:""}`,isBuy?"buy":"sell");
           setAutoPhase("monitoring");
         } else {
           const why=!result.should_open?"sin confluencia clara"
@@ -1762,10 +1781,10 @@ export default function TradingBot(){
 
   /* ── Stats ───────────────────────────────────────────────────────────── */
   const symPositions=positions.filter(p=>p.symbol===symbol);
-  const unrealized=symPositions.reduce((s,p)=>s+posPnL(p,price,positionSize),0);
+  const unrealized=symPositions.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize||positionSize),0);
   const totalUnrealized=positions.reduce((s,p)=>{
     const cp=livePricesRef.current[p.symbol]||price;
-    return s+posPnL(p,cp,positionSize);
+    return s+posPnL(p,cp,p.allocatedSize||positionSize);
   },0);
   const winCount=trades.filter(t=>t.pnl>0).length;
   const winRate=trades.length?Math.round(winCount/trades.length*100):0;
@@ -2107,15 +2126,15 @@ export default function TradingBot(){
           };
           const allUnrealized=positions.reduce((s,p)=>{
             const cp=livePrices[p.symbol]||p.entry;
-            return s+posPnL(p,cp,positionSize);
+            return s+posPnL(p,cp,p.allocatedSize||positionSize);
           },0);
           const bestPos=positions.length?positions.reduce((b,p)=>{
             const cp=livePrices[p.symbol]||p.entry;
-            return posPnL(p,cp,positionSize)>posPnL(b,livePrices[b.symbol]||b.entry,positionSize)?p:b;
+            return posPnL(p,cp,p.allocatedSize||positionSize)>posPnL(b,livePrices[b.symbol]||b.entry,b.allocatedSize||positionSize)?p:b;
           },positions[0]):null;
           const worstPos=positions.length?positions.reduce((w,p)=>{
             const cp=livePrices[p.symbol]||p.entry;
-            return posPnL(p,cp,positionSize)<posPnL(w,livePrices[w.symbol]||w.entry,positionSize)?p:w;
+            return posPnL(p,cp,p.allocatedSize||positionSize)<posPnL(w,livePrices[w.symbol]||w.entry,w.allocatedSize||positionSize)?p:w;
           },positions[0]):null;
           // Group by symbol for summary
           const bySymbol={};
@@ -2124,7 +2143,7 @@ export default function TradingBot(){
             if(!bySymbol[sym])bySymbol[sym]={positions:[],pnl:0};
             const cp=livePrices[sym]||p.entry;
             bySymbol[sym].positions.push(p);
-            bySymbol[sym].pnl+=posPnL(p,cp,positionSize);
+            bySymbol[sym].pnl+=posPnL(p,cp,p.allocatedSize||positionSize);
           });
           return(
             <div style={{animation:"fadeUp .3s ease"}}>
@@ -2222,9 +2241,17 @@ export default function TradingBot(){
                       const col=pnl>=0?T.green:T.red;
                       const isBuy=pos.type==="BUY";
                       const dur=pos.openTime?formatDuration(Date.now()-pos.openTime):"—";
-                      const tpPct=tpTarget/ps; const slPct=slTarget/ps;
-                      const tp=isBuy?pos.entry*(1+tpPct):pos.entry*(1-tpPct);
-                      const sl=isBuy?pos.entry*(1-slPct):pos.entry*(1+slPct);
+                      const units2=ps*100000;
+                      let tpD2,slD2;
+                      if(cfg?.type==="forex"&&sym.startsWith("USD/")){
+                        tpD2=tpTarget*pos.entry/units2; slD2=slTarget*pos.entry/units2;
+                      } else if(cfg?.type==="forex"){
+                        tpD2=tpTarget/units2; slD2=slTarget/units2;
+                      } else {
+                        tpD2=(tpTarget/(ps*1000))*pos.entry; slD2=(slTarget/(ps*1000))*pos.entry;
+                      }
+                      const tp=isBuy?pos.entry+tpD2:pos.entry-tpD2;
+                      const sl=isBuy?pos.entry-slD2:pos.entry+slD2;
                       return(
                         <div key={pos.id} className="fade-up" style={{
                           display:"grid",gridTemplateColumns:"1fr 60px 100px 100px 80px 120px 80px 40px",
@@ -2530,7 +2557,7 @@ export default function TradingBot(){
             <div style={{display:"flex",gap:5,marginTop:8}}>
               {Array.from({length:MAX_POSITIONS},(_,i)=>{
                 const pos=positions[i];
-                const pnl=pos?posPnL(pos,price,positionSize):null;
+                const pnl=pos?posPnL(pos,price,pos.allocatedSize||positionSize):null;
                 const col=pos?(pnl>=0?T.green:T.red):T.dim;
                 return(
                   <div key={i} style={{flex:1,height:28,border:`1px solid ${col}`,borderRadius:5,background:`${col}12`,
@@ -2607,16 +2634,16 @@ export default function TradingBot(){
         {/* POSITION SIZE CONTROL */}
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>TAMAÑO DE POSICIÓN (USD notional)</span>
-            <span className="mono" style={{fontSize:11,color:T.accent,fontWeight:700}}>${positionSize.toFixed(2)}</span>
+            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>VOLUMEN (lotes) — 0.10L = 10,000 unidades</span>
+            <span className="mono" style={{fontSize:11,color:T.accent,fontWeight:700}}>{positionSize.toFixed(2)} L</span>
           </div>
           <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-            {[0.10,0.50,1.00,5.00,10.00,50.00,100.00].map(v=>(
+            {[0.01,0.05,0.10,0.50,1.00].map(v=>(
               <button key={v} onClick={()=>setPositionSize(v)}
                 style={{flex:"1 1 auto",minWidth:44,background:positionSize===v?`${T.accent}22`:"transparent",
                   border:`1px solid ${positionSize===v?T.accent:T.border}`,color:positionSize===v?T.accent:T.muted,
                   borderRadius:6,padding:"6px 4px",cursor:"pointer",fontSize:10,fontWeight:positionSize===v?700:400}}>
-                ${v.toFixed(2)}
+                {v.toFixed(2)}L
               </button>
             ))}
             <input type="number" min="0.01" step="0.01"
@@ -2642,7 +2669,10 @@ export default function TradingBot(){
             ))}
           </div>
           <div style={{fontSize:8,color:T.muted,marginTop:5}}>
-            Necesitas ${(tpTarget/(positionSize||1)*100).toFixed(1)}% de movimiento para TP · ${(slTarget/(positionSize||1)*100).toFixed(1)}% para SL
+            {asset?.type==="forex"
+              ? `${(positionSize*100000).toFixed(0)} unidades · $${(positionSize*10).toFixed(2)}/pip · TP ~${(tpTarget/(positionSize*10)).toFixed(0)} pips · SL ~${(slTarget/(positionSize*10)).toFixed(0)} pips`
+              : `~$${(positionSize*1000).toFixed(0)} nocional crypto (paper trading)`
+            }
           </div>
         </div>
 
