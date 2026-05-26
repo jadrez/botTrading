@@ -467,7 +467,7 @@ function calcShortTrend(candles, n=5){
 }
 
 /* ─── LIGHTWEIGHT CHART ─────────────────────────────────────────────────── */
-function LWChart({ candles, positions, trades, symbol, precision, srLevels, positionSize=POSITION_USD, tpTarget=3, slTarget=2 }){
+function LWChart({ candles, positions, trades, symbol, precision, srLevels, positionSize=DEFAULT_LOTS, tpTarget=3, slTarget=2 }){
   const mainRef  = useRef(null);
   const rsiRef   = useRef(null);
   const macdRef  = useRef(null);
@@ -809,7 +809,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
 
 /* ─── POSITION ROW ───────────────────────────────────────────────────────── */
 function PosRow({pos, price, precision, onClose, tpTarget=3, slTarget=2}){
-  const ps=pos.allocatedSize||POSITION_USD;
+  const ps=pos.allocatedSize||DEFAULT_LOTS;
   const pnl=posPnL(pos,price,ps);
   const col=pnl>=0?T.green:T.red;
   const pct=Math.min(100,Math.max(0,(pnl/tpTarget)*100));
