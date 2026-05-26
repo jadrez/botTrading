@@ -63,7 +63,7 @@ const TAKE_PROFIT_PCT    = 0.003;  // 0.3%
 const STOP_LOSS_PCT      = 0.002;  // 0.2%
 const MAX_POSITIONS      = 3; // per symbol — correlated pairs open in parallel
 const POSITION_USD       = 1000;
-const ANALYSIS_INTERVAL_MS = 28000;
+const ANALYSIS_INTERVAL_MS = 90000; // 90s — balanced for 5M charts and Groq free tier (~133 analyses/day)
 // Helpers to get dollar amounts from positionSize
 const tpUSD = (ps=POSITION_USD) => ps * TAKE_PROFIT_PCT;
 const slUSD = (ps=POSITION_USD) => ps * STOP_LOSS_PCT;
