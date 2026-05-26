@@ -1,5 +1,5 @@
-const TAKE_PROFIT_PCT = 0.003; // 0.3% of notional
-const STOP_LOSS_PCT   = 0.002; // 0.2% of notional
+const TAKE_PROFIT_PCT = 0.03; // 3% of notional
+const STOP_LOSS_PCT   = 0.02; // 2% of notional
 const MAX_POSITIONS   = 5;
 const DEFAULT_POSITION_USD = 1000;
 

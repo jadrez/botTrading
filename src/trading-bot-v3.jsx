@@ -57,10 +57,10 @@ const ASSETS = {
 };
 
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
-// TP/SL expressed as % of notional so they scale with positionSize
-// 0.3% TP and 0.2% SL → at $1000 notional = $3/$2, at $1 notional = $0.003/$0.002
-const TAKE_PROFIT_PCT    = 0.003;  // 0.3%
-const STOP_LOSS_PCT      = 0.002;  // 0.2%
+// TP/SL as % of notional — scales with positionSize
+// 3% TP and 2% SL → at $1 notional = $0.03/$0.02, at $10 = $0.30/$0.20, at $100 = $3/$2
+const TAKE_PROFIT_PCT    = 0.03;   // 3%
+const STOP_LOSS_PCT      = 0.02;   // 2%
 const MAX_POSITIONS      = 3; // per symbol — correlated pairs open in parallel
 const POSITION_USD       = 1000;
 const ANALYSIS_INTERVAL_MS = 90000; // 90s — balanced for 5M charts and Groq free tier (~133 analyses/day)
@@ -650,7 +650,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
     // MACD per candle — running EMA across all history so lines diverge properly
     const mhD=[],mlD=[],msD=[];
     let e12v=closes[0],e26v=closes[0];
-    const k12=2/13,k26=2/27,k9=2/10;
+    const k12=2/13,k26=2/27,kSig=2/10;
     let sigV=0,sigVInit=false;
     for(let i=1;i<closes.length;i++){
       e12v=closes[i]*k12+e12v*(1-k12);
@@ -658,7 +658,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
       if(i>=25){
         const mv=e12v-e26v;
         if(!sigVInit){sigV=mv;sigVInit=true;}
-        else sigV=mv*k9+sigV*(1-k9);
+        else sigV=mv*kSig+sigV*(1-kSig);
         const hv=mv-sigV;
         mlD.push({time:times[i],value:mv});
         msD.push({time:times[i],value:sigV});
