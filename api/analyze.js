@@ -1,7 +1,7 @@
-const TAKE_PROFIT_PCT = 0.03; // 3% of notional
-const STOP_LOSS_PCT   = 0.02; // 2% of notional
-const MAX_POSITIONS   = 5;
-const DEFAULT_POSITION_USD = 1000;
+const MAX_POSITIONS        = 5;
+const DEFAULT_POSITION_USD = 1.00;
+const DEFAULT_TP_USD       = 3.00;
+const DEFAULT_SL_USD       = 2.00;
 
 const fUSD = (n, sign=true) => {
   const abs=Math.abs(n);
@@ -31,10 +31,12 @@ export default async function handler(req, res) {
     correlations = [],
     positions, balance, news, reason,
     positionSize = DEFAULT_POSITION_USD,
+    tpTarget = DEFAULT_TP_USD,
+    slTarget = DEFAULT_SL_USD,
   } = req.body;
-  const POSITION_USD = positionSize > 0 ? positionSize : DEFAULT_POSITION_USD;
-  const TAKE_PROFIT_USD = POSITION_USD * TAKE_PROFIT_PCT;
-  const STOP_LOSS_USD   = POSITION_USD * STOP_LOSS_PCT;
+  const POSITION_USD    = positionSize > 0 ? positionSize : DEFAULT_POSITION_USD;
+  const TAKE_PROFIT_USD = tpTarget > 0 ? tpTarget : DEFAULT_TP_USD;
+  const STOP_LOSS_USD   = slTarget > 0 ? slTarget : DEFAULT_SL_USD;
 
   const nc = (news || []).slice(0, 4)
     .map(n => `[${n.sentiment.toUpperCase()}|${n.impact}] ${n.title}`)
