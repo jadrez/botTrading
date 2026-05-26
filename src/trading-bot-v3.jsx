@@ -806,6 +806,9 @@ function PosRow({pos, price, precision, onClose, positionSize=POSITION_USD}){
       </div>
       <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
         <span style={{fontSize:8,color:T.red}}>SL {fUSD(-slUSD(positionSize),false)}</span>
+        {pos.binanceOrderId&&(
+          <span style={{fontSize:7,color:T.accent}}>🔷 #{String(pos.binanceOrderId).slice(-8)}</span>
+        )}
         <span style={{fontSize:8,color:pnl>=0?T.green:T.muted}}>{pct.toFixed(0)}% → TP {fUSD(tpUSD(positionSize),false)}</span>
       </div>
     </div>
@@ -881,6 +884,35 @@ async function fetchForexCandles(from,to,limit=200,interval="1m"){
   return null;
 }
 
+async function openBinanceOrder(symbol,side,positionSize,price){
+  try{
+    const r=await fetch("/api/binance-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"open",symbol,side,positionSize,price,clientOrderId:`bot_${Date.now()}`})});
+    const d=await r.json();
+    if(!r.ok||d.error) return{ok:false,error:d.error||"Error Binance"};
+    return{ok:true,...d};
+  }catch(e){return{ok:false,error:e.message};}
+}
+
+async function closeBinanceOrder(symbol,side,quantity){
+  try{
+    const r=await fetch("/api/binance-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"close",symbol,side,quantity})});
+    const d=await r.json();
+    if(!r.ok||d.error) return{ok:false,error:d.error||"Error Binance"};
+    return{ok:true,...d};
+  }catch(e){return{ok:false,error:e.message};}
+}
+
+async function getBinanceBalance(){
+  try{
+    const r=await fetch("/api/binance-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"balance"})});
+    const d=await r.json();
+    return r.ok&&!d.error?d:null;
+  }catch{return null;}
+}
+
 async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize}){
   const r=await fetch("/api/analyze",{
     method:"POST",
@@ -938,6 +970,10 @@ export default function TradingBot(){
   const [corrSignals,setCorrSignals]      = useState({});
   const [forexWatch,setForexWatch]        = useState({});
   const [activeView,setActiveView]        = useState("dashboard");
+  const [binanceEnabled,setBinanceEnabled]= useState(()=>localStorage.getItem("binanceEnabled")==="true");
+  const [binanceBalance,setBinanceBalance]= useState(null);
+  const [binanceTestnet,setBinanceTestnet]= useState(true);
+  const binanceEnabledRef = useRef(localStorage.getItem("binanceEnabled")==="true");
   const [livePrices,setLivePrices]        = useState({});
   const chartIntervalRef = useRef("1m");
   const bgPricesRef   = useRef({});
@@ -983,6 +1019,7 @@ export default function TradingBot(){
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
   useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_posSize",String(positionSize));},[positionSize]);
+  useEffect(()=>{binanceEnabledRef.current=binanceEnabled;localStorage.setItem("binanceEnabled",String(binanceEnabled));},[binanceEnabled]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
   useEffect(()=>{consLossesRef.current=consecutiveLosses;},[consecutiveLosses]);
   useEffect(()=>{shortTrendRef.current=shortTrend;},[shortTrend]);
@@ -1028,6 +1065,18 @@ export default function TradingBot(){
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
   },[]);
+
+  /* ── Binance balance polling ────────────────────────────────────────── */
+  useEffect(()=>{
+    if(!binanceEnabled) return;
+    const load=async()=>{
+      const b=await getBinanceBalance();
+      if(b) setBinanceBalance(b);
+    };
+    load();
+    const iv=setInterval(load,30000);
+    return()=>clearInterval(iv);
+  },[binanceEnabled]);
 
   /* ── Symbol change ───────────────────────────────────────────────────── */
   const handleSymbolChange=useCallback((newSym)=>{
@@ -1388,9 +1437,14 @@ export default function TradingBot(){
 
   /* ── Close position ──────────────────────────────────────────────────── */
   const closePosition=useCallback((posId,currentPrice,reason,posSize)=>{
+    // Fire Binance close order async if this is a live crypto position
     setPositions(prev=>{
       const pos=prev.find(p=>p.id===posId);
       if(!pos)return prev;
+      if(binanceEnabledRef.current && pos.binanceQty && ASSETS[pos.symbol||""]?.type==="crypto"){
+        closeBinanceOrder(pos.symbol,pos.type,pos.binanceQty)
+          .then(r=>{ if(!r.ok) console.warn("Binance close error:",r.error); });
+      }
       const pnl=posPnL(pos,currentPrice,posSize);
       const posSym=pos.symbol||symbolRef.current;
       const prec=ASSETS[posSym]?.precision||ASSETS[symbolRef.current].precision;
@@ -1550,14 +1604,30 @@ export default function TradingBot(){
           const isBuy=result.signal==="BUY";
           const cp=priceRef.current;
           const prec=ASSETS[activeSym].precision;
+          const activeAssetCheck=ASSETS[activeSym];
+          const ps=positionSizeRef.current;
+
+          // ── Binance order for crypto pairs
+          let binanceOrderId=null, binanceQty=null;
+          if(binanceEnabledRef.current && activeAssetCheck?.type==="crypto"){
+            const bResult=await openBinanceOrder(activeSym,result.signal,ps,cp);
+            if(bResult.ok){
+              binanceOrderId=bResult.orderId;
+              binanceQty=bResult.qty;
+              addLog(`🔷 Binance orden ${result.signal} abierta | ID:${binanceOrderId} | qty:${binanceQty}`,"info");
+            } else {
+              addLog(`⚠️ Binance: ${bResult.error} — posición registrada en simulación`,"sell");
+            }
+          }
+
           const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
-            symbol:activeSym,openTime:Date.now()};
+            symbol:activeSym,openTime:Date.now(),
+            ...(binanceOrderId&&{binanceOrderId,binanceQty})};
 
           // ── Open correlated positions on all forex pairs with a confirmed correlation
           const corrPositions=[];
-          const activeAsset=ASSETS[activeSym];
-          if(activeAsset?.type==="forex"){
-            const corrs=activeAsset.correlations||{};
+          if(activeAssetCheck?.type==="forex"){
+            const corrs=activeAssetCheck.correlations||{};
             for(const [corrSym,corrDir] of Object.entries(corrs)){
               const corrAsset=ASSETS[corrSym];
               if(!corrAsset||corrAsset.type!=="forex") continue;
@@ -2535,6 +2605,61 @@ export default function TradingBot(){
           <div style={{fontSize:8,color:T.muted,marginTop:5}}>
             TP +{fUSD(tpUSD(positionSize),false)} ({(TAKE_PROFIT_PCT*100).toFixed(2)}%) · SL -{fUSD(slUSD(positionSize),false)} ({(STOP_LOSS_PCT*100).toFixed(2)}%)
           </div>
+        </div>
+
+        {/* BINANCE INTEGRATION PANEL */}
+        <div style={{background:T.card,border:`1px solid ${binanceEnabled?T.accent:T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>BINANCE FUTURES</span>
+              <span style={{fontSize:7,color:binanceTestnet?T.yellow:T.green,background:`${binanceTestnet?T.yellow:T.green}18`,
+                padding:"1px 6px",borderRadius:3,letterSpacing:1,fontWeight:700}}>
+                {binanceTestnet?"TESTNET":"PRODUCCIÓN"}
+              </span>
+            </div>
+            <button onClick={()=>setBinanceEnabled(p=>!p)}
+              style={{background:binanceEnabled?`${T.accent}20`:"transparent",border:`1px solid ${binanceEnabled?T.accent:T.border}`,
+                color:binanceEnabled?T.accent:T.muted,borderRadius:6,padding:"4px 12px",cursor:"pointer",
+                fontSize:10,fontWeight:700,letterSpacing:1}}>
+              {binanceEnabled?"🔷 CONECTADO":"⚪ DESCONECTADO"}
+            </button>
+          </div>
+          {binanceEnabled&&(
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              <div style={{fontSize:9,color:T.muted}}>
+                Solo para pares <span style={{color:T.accent}}>crypto</span> (ETH/USDT, BTC/USDT, SOL/USDT).
+                Forex continúa en simulación virtual.
+              </div>
+              {binanceBalance?(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+                  {[
+                    {l:"BALANCE USDT",v:`$${binanceBalance.walletBalance.toFixed(2)}`,c:T.text},
+                    {l:"DISPONIBLE",v:`$${binanceBalance.availableBalance.toFixed(2)}`,c:T.green},
+                    {l:"PnL NO REALIZADO",v:fUSD(binanceBalance.unrealizedPnl),c:binanceBalance.unrealizedPnl>=0?T.green:T.red},
+                  ].map(({l,v,c})=>(
+                    <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px"}}>
+                      <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
+                      <div className="mono" style={{fontSize:11,color:c,fontWeight:700}}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+              ):(
+                <div style={{fontSize:9,color:T.yellow}}>
+                  ⚠️ Sin datos de balance. Verifica que las API Keys estén configuradas en Vercel.
+                </div>
+              )}
+              <div style={{fontSize:8,color:T.muted}}>
+                Las órdenes se ejecutan en Binance Futures {binanceTestnet?"Testnet":"Producción"} como órdenes MARKET.
+                Posiciones forex se mantienen simuladas.
+              </div>
+            </div>
+          )}
+          {!binanceEnabled&&(
+            <div style={{fontSize:9,color:T.muted}}>
+              Activa para que el bot abra/cierre órdenes reales en Binance Futures Testnet.
+              Requiere <code style={{color:T.accent}}>BINANCE_API_KEY</code> y <code style={{color:T.accent}}>BINANCE_API_SECRET</code> en variables de entorno.
+            </div>
+          )}
         </div>
 
         {/* PATTERNS PANEL */}
