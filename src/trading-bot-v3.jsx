@@ -113,9 +113,21 @@ function calcRSI(closes,p=14){
 function calcEMA(arr,p){const k=2/(p+1);let e=arr[0];for(let i=1;i<arr.length;i++)e=arr[i]*k+e*(1-k);return e;}
 function calcMACD(closes){
   if(closes.length<26)return{macd:0,signal:0,hist:0};
-  const e12=calcEMA(closes.slice(-26),12),e26=calcEMA(closes.slice(-26),26);
-  const macd=e12-e26,signal=macd*.82;
-  return{macd,signal,hist:macd-signal};
+  // Run EMA12 and EMA26 over the full history so they diverge properly
+  let e12=closes[0],e26=closes[0];
+  const k12=2/13,k26=2/27,k9=2/10;
+  let sig=0,sigInit=false;
+  for(let i=1;i<closes.length;i++){
+    e12=closes[i]*k12+e12*(1-k12);
+    e26=closes[i]*k26+e26*(1-k26);
+    if(i>=25){
+      const mv=e12-e26;
+      if(!sigInit){sig=mv;sigInit=true;}
+      else sig=mv*k9+sig*(1-k9);
+    }
+  }
+  const macd=e12-e26;
+  return{macd,signal:sig,hist:macd-sig};
 }
 function calcBB(closes,p=20){
   const sl=closes.slice(-p);
@@ -635,17 +647,23 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
     }
     rsiS.setData(rsiD);
 
-    // MACD per candle
+    // MACD per candle — running EMA across all history so lines diverge properly
     const mhD=[],mlD=[],msD=[];
-    for(let i=26;i<closes.length;i++){
-      const sl=closes.slice(i-25,i+1);
-      let e12=sl[0],e26=sl[0];
-      const k12=2/13,k26=2/27;
-      for(let j=1;j<sl.length;j++){e12=sl[j]*k12+e12*(1-k12);e26=sl[j]*k26+e26*(1-k26);}
-      const mv=e12-e26, sv=mv*0.82, hv=mv-sv;
-      mlD.push({time:times[i],value:mv});
-      msD.push({time:times[i],value:sv});
-      mhD.push({time:times[i],value:hv,color:hv>=0?"#00e67680":"#ff174480"});
+    let e12v=closes[0],e26v=closes[0];
+    const k12=2/13,k26=2/27,k9=2/10;
+    let sigV=0,sigVInit=false;
+    for(let i=1;i<closes.length;i++){
+      e12v=closes[i]*k12+e12v*(1-k12);
+      e26v=closes[i]*k26+e26v*(1-k26);
+      if(i>=25){
+        const mv=e12v-e26v;
+        if(!sigVInit){sigV=mv;sigVInit=true;}
+        else sigV=mv*k9+sigV*(1-k9);
+        const hv=mv-sigV;
+        mlD.push({time:times[i],value:mv});
+        msD.push({time:times[i],value:sigV});
+        mhD.push({time:times[i],value:hv,color:hv>=0?"#00e67680":"#ff174480"});
+      }
     }
     macdHist.setData(mhD); macdLine.setData(mlD); macdSig.setData(msD);
 
