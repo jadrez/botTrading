@@ -991,6 +991,8 @@ export default function TradingBot(){
   const [binanceEnabled,setBinanceEnabled]= useState(()=>localStorage.getItem("binanceEnabled")==="true");
   const [binanceBalance,setBinanceBalance]= useState(null);
   const [binanceTestnet,setBinanceTestnet]= useState(true);
+  const [binanceConnectErr,setBinanceConnectErr]= useState(null);
+  const [binanceTesting,setBinanceTesting]= useState(false);
   const binanceEnabledRef = useRef(localStorage.getItem("binanceEnabled")==="true");
   const [livePrices,setLivePrices]        = useState({});
   const chartIntervalRef = useRef("1m");
@@ -1089,7 +1091,10 @@ export default function TradingBot(){
     if(!binanceEnabled) return;
     const load=async()=>{
       const b=await getBinanceBalance();
-      if(b) setBinanceBalance(b);
+      if(b){
+        setBinanceBalance(b);
+        if(typeof b.testnet==="boolean") setBinanceTestnet(b.testnet);
+      }
     };
     load();
     const iv=setInterval(load,30000);
@@ -2626,34 +2631,64 @@ export default function TradingBot(){
         </div>
 
         {/* BINANCE INTEGRATION PANEL */}
-        <div style={{background:T.card,border:`1px solid ${binanceEnabled?T.accent:T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+        <div style={{background:T.card,border:`1px solid ${binanceEnabled&&binanceBalance?T.accent:binanceEnabled?T.yellow:T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
               <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>BINANCE FUTURES</span>
-              <span style={{fontSize:7,color:binanceTestnet?T.yellow:T.green,background:`${binanceTestnet?T.yellow:T.green}18`,
-                padding:"1px 6px",borderRadius:3,letterSpacing:1,fontWeight:700}}>
-                {binanceTestnet?"TESTNET":"PRODUCCIÓN"}
-              </span>
+              {binanceEnabled&&(
+                <span style={{fontSize:7,color:binanceTestnet?T.yellow:T.green,background:`${binanceTestnet?T.yellow:T.green}18`,
+                  padding:"1px 6px",borderRadius:3,letterSpacing:1,fontWeight:700}}>
+                  {binanceTestnet?"TESTNET":"PRODUCCIÓN"}
+                </span>
+              )}
             </div>
-            <button onClick={()=>setBinanceEnabled(p=>!p)}
-              style={{background:binanceEnabled?`${T.accent}20`:"transparent",border:`1px solid ${binanceEnabled?T.accent:T.border}`,
-                color:binanceEnabled?T.accent:T.muted,borderRadius:6,padding:"4px 12px",cursor:"pointer",
-                fontSize:10,fontWeight:700,letterSpacing:1}}>
-              {binanceEnabled?"🔷 CONECTADO":"⚪ DESCONECTADO"}
-            </button>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              {binanceEnabled&&(
+                <button onClick={async()=>{
+                  setBinanceTesting(true); setBinanceConnectErr(null);
+                  const b=await getBinanceBalance();
+                  if(b){setBinanceBalance(b);if(typeof b.testnet==="boolean")setBinanceTestnet(b.testnet);setBinanceConnectErr(null);}
+                  else setBinanceConnectErr("No se pudo conectar. Verifica las API Keys en Vercel (BINANCE_API_KEY, BINANCE_API_SECRET).");
+                  setBinanceTesting(false);
+                }} style={{background:`${T.accent}15`,border:`1px solid ${T.accent}40`,color:T.accent,
+                  borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:9,fontWeight:700}}>
+                  {binanceTesting?"⏳ probando...":"🔌 PROBAR"}
+                </button>
+              )}
+              <button onClick={()=>{setBinanceEnabled(p=>!p);setBinanceBalance(null);setBinanceConnectErr(null);}}
+                style={{background:binanceEnabled?`${T.accent}20`:"transparent",border:`1px solid ${binanceEnabled?T.accent:T.border}`,
+                  color:binanceEnabled?T.accent:T.muted,borderRadius:6,padding:"4px 12px",cursor:"pointer",
+                  fontSize:10,fontWeight:700,letterSpacing:1}}>
+                {binanceEnabled?"🔷 ACTIVADO":"⚪ DESACTIVADO"}
+              </button>
+            </div>
           </div>
+
+          {!binanceEnabled&&(
+            <div style={{fontSize:9,color:T.muted,lineHeight:1.6}}>
+              Activa para que el bot abra/cierre órdenes reales en Binance Futures.<br/>
+              Requiere variables en Vercel: <span style={{color:T.accent,fontFamily:"monospace"}}>BINANCE_API_KEY</span>, <span style={{color:T.accent,fontFamily:"monospace"}}>BINANCE_API_SECRET</span>, <span style={{color:T.accent,fontFamily:"monospace"}}>BINANCE_TESTNET=false</span>
+            </div>
+          )}
+
           {binanceEnabled&&(
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              <div style={{fontSize:9,color:T.muted}}>
-                Solo para pares <span style={{color:T.accent}}>crypto</span> (ETH/USDT, BTC/USDT, SOL/USDT).
-                Forex continúa en simulación virtual.
-              </div>
-              {binanceBalance?(
+              {binanceConnectErr&&(
+                <div style={{background:`${T.red}12`,border:`1px solid ${T.red}40`,borderRadius:6,padding:"8px 10px",fontSize:9,color:T.red,lineHeight:1.5}}>
+                  ❌ {binanceConnectErr}
+                </div>
+              )}
+              {!binanceBalance&&!binanceConnectErr&&(
+                <div style={{fontSize:9,color:T.yellow}}>
+                  ⏳ Cargando balance... Si tarda más de 5s, haz clic en "PROBAR".
+                </div>
+              )}
+              {binanceBalance&&(
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
                   {[
-                    {l:"BALANCE USDT",v:`$${binanceBalance.walletBalance.toFixed(2)}`,c:T.text},
-                    {l:"DISPONIBLE",v:`$${binanceBalance.availableBalance.toFixed(2)}`,c:T.green},
-                    {l:"PnL NO REALIZADO",v:fUSD(binanceBalance.unrealizedPnl),c:binanceBalance.unrealizedPnl>=0?T.green:T.red},
+                    {l:"BALANCE USDT",v:`$${binanceBalance.walletBalance?.toFixed(2)}`,c:T.text},
+                    {l:"DISPONIBLE",v:`$${binanceBalance.availableBalance?.toFixed(2)}`,c:T.green},
+                    {l:"PnL NO REALIZADO",v:fUSD(binanceBalance.unrealizedPnl||0),c:(binanceBalance.unrealizedPnl||0)>=0?T.green:T.red},
                   ].map(({l,v,c})=>(
                     <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px"}}>
                       <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
@@ -2661,21 +2696,22 @@ export default function TradingBot(){
                     </div>
                   ))}
                 </div>
-              ):(
-                <div style={{fontSize:9,color:T.yellow}}>
-                  ⚠️ Sin datos de balance. Verifica que las API Keys estén configuradas en Vercel.
-                </div>
               )}
-              <div style={{fontSize:8,color:T.muted}}>
-                Las órdenes se ejecutan en Binance Futures {binanceTestnet?"Testnet":"Producción"} como órdenes MARKET.
-                Posiciones forex se mantienen simuladas.
+              {(()=>{
+                const minUSD={"ETH/USDT":3,"BTC/USDT":100,"SOL/USDT":18};
+                const minNeeded=minUSD[symbol];
+                if(ASSETS[symbol]?.type==="crypto"&&minNeeded&&positionSize<minNeeded)
+                  return(
+                    <div style={{background:`${T.yellow}12`,border:`1px solid ${T.yellow}40`,borderRadius:6,padding:"7px 10px",fontSize:9,color:T.yellow,lineHeight:1.5}}>
+                      ⚠️ Para <b>{symbol}</b> el mínimo Binance es ~<b>${minNeeded}</b>. Tu posición actual de <b>${positionSize.toFixed(2)}</b> generará error al abrir órdenes. Sube el tamaño arriba.
+                    </div>
+                  );
+                return null;
+              })()}
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:8,color:T.muted}}>
+                <span>Solo crypto (ETH/BTC/SOL). Forex = simulación virtual.</span>
+                <span>Órdenes MARKET en Futures {binanceTestnet?"Testnet":"Producción"}.</span>
               </div>
-            </div>
-          )}
-          {!binanceEnabled&&(
-            <div style={{fontSize:9,color:T.muted}}>
-              Activa para que el bot abra/cierre órdenes reales en Binance Futures Testnet.
-              Requiere <code style={{color:T.accent}}>BINANCE_API_KEY</code> y <code style={{color:T.accent}}>BINANCE_API_SECRET</code> en variables de entorno.
             </div>
           )}
         </div>
