@@ -550,9 +550,10 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
       timeScale:{ borderColor:"#152035", timeVisible:true, secondsVisible:false },
       rightPriceScale:{ borderColor:"#152035" },
     });
-    const macdHist=macdChart.addHistogramSeries({ priceLineVisible:false, lastValueVisible:false, title:"Hist" });
-    const macdLine=macdChart.addLineSeries({ color:"#00b8e6", lineWidth:1.5, title:"MACD", priceLineVisible:false, lastValueVisible:true });
-    const macdSig =macdChart.addLineSeries({ color:"#ff6d00", lineWidth:1.5, title:"Signal", priceLineVisible:false, lastValueVisible:true });
+    const macdFmt={type:"price",precision:5,minMove:0.00001};
+    const macdHist=macdChart.addHistogramSeries({ priceLineVisible:false, lastValueVisible:false, title:"Hist", priceFormat:macdFmt });
+    const macdLine=macdChart.addLineSeries({ color:"#00b8e6", lineWidth:1.5, title:"MACD", priceLineVisible:false, lastValueVisible:true, priceFormat:macdFmt });
+    const macdSig =macdChart.addLineSeries({ color:"#ff6d00", lineWidth:1.5, title:"Signal", priceLineVisible:false, lastValueVisible:true, priceFormat:macdFmt });
     macdChart.addLineSeries({ color:"#344d7030", lineWidth:1, lineStyle:LineStyle.Dotted, priceLineVisible:false, lastValueVisible:false }).setData([]);
 
     // ── Sync timescales
@@ -981,6 +982,8 @@ export default function TradingBot(){
   const [analyzing,setAnalyzing] = useState(false);
   const [loadingNews,setLoadingNews] = useState(false);
   const [autoPhase,setAutoPhase] = useState("idle");
+  const [blockReason,setBlockReason] = useState("");
+  const [dynamicMinConf,setDynamicMinConf] = useState(62);
   const [nextAnalysis,setNextAnalysis] = useState(null);
   const [closedCount,setClosedCount]       = useState(0);
   const [totalProfit,setTotalProfit]       = useState(0);
@@ -1576,25 +1579,18 @@ export default function TradingBot(){
 
     // ── Learning feedback: derive dynamic confidence threshold from trade history
     const trades=loadTrades();
-    let dynamicMinConf=60; // base threshold
-    if(trades.length>=10){
+    let minConf=62; // base threshold — enough to filter noise but not too strict
+    if(trades.length>=20){   // need 20+ trades for reliable statistics
       const recent=trades.slice(0,20);
       const recentWR=recent.filter(t=>t.pnl>0).length/recent.length;
-      // Tighten confidence requirement when win rate is poor
-      if(recentWR<0.35)      dynamicMinConf=78; // losing badly → very strict
-      else if(recentWR<0.45) dynamicMinConf=72; // below avg → strict
-      else if(recentWR<0.55) dynamicMinConf=65; // around avg → slightly cautious
-      else if(recentWR>=0.65)dynamicMinConf=58; // winning well → slight relaxation
-      // Per-direction adjustment based on recent directional performance
-      const recentBuys=recent.filter(t=>t.type==="BUY");
-      const recentSells=recent.filter(t=>t.type==="SELL");
-      const buyWR=recentBuys.length>=3?recentBuys.filter(t=>t.pnl>0).length/recentBuys.length:null;
-      const sellWR=recentSells.length>=3?recentSells.filter(t=>t.pnl>0).length/recentSells.length:null;
-      if(buyWR!==null&&buyWR<0.3) dynamicMinConf=Math.max(dynamicMinConf,75); // BUYs losing a lot
-      if(sellWR!==null&&sellWR<0.3) dynamicMinConf=Math.max(dynamicMinConf,75); // SELLs losing a lot
+      // Adjust confidence requirement based on recent win rate
+      if(recentWR<0.35)      minConf=73; // losing badly → more strict
+      else if(recentWR<0.45) minConf=68; // below avg → cautious
+      else if(recentWR<0.55) minConf=64; // around avg → slightly cautious
+      else if(recentWR>=0.65)minConf=60; // winning well → relaxed
     }
-
-    addLog(`🔍 Analizando ${symbolRef.current}: ${reason} | umbral dinámico: ${dynamicMinConf}%`,"info");
+    setDynamicMinConf(minConf);
+    addLog(`🔍 Analizando ${symbolRef.current}: ${reason} | umbral dinámico: ${minConf}%`,"info");
     try{
       // Build correlation array for AI
       // Compute confirms based on dominant EMA direction (not fixed BUY bias)
@@ -1633,7 +1629,7 @@ export default function TradingBot(){
       if(autoRef.current){
         const activeSym=symbolRef.current;
         const symSlots=MAX_POSITIONS-posRef.current.filter(p=>p.symbol===activeSym).length;
-        if(result.should_open&&result.signal!=="HOLD"&&symSlots>0&&result.confidence>=dynamicMinConf){
+        if(result.should_open&&result.signal!=="HOLD"&&symSlots>0&&result.confidence>=minConf){
           const isBuy=result.signal==="BUY";
           const cp=priceRef.current;
           const prec=ASSETS[activeSym].precision;
@@ -1694,10 +1690,11 @@ export default function TradingBot(){
           addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} ${activeSym} @ ${fP(cp,prec)} | ${ps.toFixed(2)}L | TP:+${fUSD(tpTargetRef.current)} SL:-${fUSD(slTargetRef.current)}${corrPositions.length?` + ${corrPositions.length} correlacionadas`:""}`,isBuy?"buy":"sell");
           setAutoPhase("monitoring");
         } else {
-          const why=!result.should_open?"sin confluencia clara"
-            :result.confidence<dynamicMinConf?`confianza ${result.confidence}% < umbral ${dynamicMinConf}%`
-            :symSlots===0?"slots llenos":"señal HOLD";
+          const why=!result.should_open?`IA dice no abrir (${result.signal} ${result.confidence}%)`
+            :result.confidence<minConf?`confianza ${result.confidence}% < umbral mín ${minConf}%`
+            :symSlots===0?"slots llenos (3/3)":"señal HOLD";
           addLog(`⏸ Sin abrir — ${why}. Esperando próximo ciclo.`,"info");
+          setBlockReason(why);
           setAutoPhase("waiting_conditions");
         }
       }
@@ -1795,7 +1792,7 @@ export default function TradingBot(){
     idle:              {label:"INACTIVO",             color:T.muted,  desc:"Activa el modo AUTO para comenzar."},
     analyzing:         {label:"⏳ ANALIZANDO",         color:T.yellow, desc:"Consultando IA con indicadores y noticias en tiempo real..."},
     monitoring:        {label:"📡 MONITOREANDO",       color:T.accent, desc:`Vigilando ${positions.length} posición(es). TP:+${fUSD(tpTarget)} | SL:-${fUSD(slTarget)}`},
-    waiting_conditions:{label:"⏸ ESPERANDO",          color:T.orange, desc:`Sin condiciones favorables. Próximo análisis en ${nextSec??"-"}s`},
+    waiting_conditions:{label:"⏸ ESPERANDO",          color:T.orange, desc:`${blockReason||"Sin condiciones favorables"} · Próximo análisis en ${nextSec??"-"}s`},
     tp_hit_analyzing:  {label:"✅ TP! RE-ANALIZANDO",  color:T.green,  desc:"Posición cerrada con ganancia. Evaluando si abrir nueva..."},
   }[autoPhase]||{label:"—",color:T.muted,desc:""};
 
@@ -2588,7 +2585,14 @@ export default function TradingBot(){
                   Confianza <span style={{color:sigCol,fontWeight:700}}>{aiResult.confidence}%</span>
                   {" "}· Riesgo <span style={{color:aiResult.risk==="BAJO"?T.green:aiResult.risk==="ALTO"?T.red:T.yellow}}>{aiResult.risk}</span>
                   {" "}· Noticias <span style={{color:aiResult.news_impact==="BULLISH"?T.green:aiResult.news_impact==="BEARISH"?T.red:T.muted}}>{aiResult.news_impact}</span>
-                  {" "}· <span style={{color:aiResult.should_open?T.green:T.orange}}>{aiResult.should_open?"ABRIR":"NO ABRIR"}</span>
+                  {" "}· <span style={{color:aiResult.should_open&&aiResult.confidence>=dynamicMinConf?T.green:T.orange}}>
+                    {aiResult.should_open&&aiResult.confidence>=dynamicMinConf
+                      ?`ABRIR ✓ (≥${dynamicMinConf}%)`
+                      :aiResult.should_open
+                        ?`🔒 UMBRAL ${dynamicMinConf}% (${aiResult.confidence}%)`
+                        :"NO ABRIR"
+                    }
+                  </span>
                 </div>
               </div>
               <div style={{background:`${sigCol}12`,border:`1px solid ${sigCol}30`,borderRadius:6,padding:"6px 12px",textAlign:"center",maxWidth:140}}>
