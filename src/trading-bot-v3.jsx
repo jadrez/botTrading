@@ -467,8 +467,45 @@ function calcShortTrend(candles, n=5){
   return{pct, bullish, bearish, direction};
 }
 
+/* ─── PROJECTION CALCULATOR ─────────────────────────────────────────────── */
+function calcProjection(candles, aiResult, srLevels, tfInterval){
+  if(!aiResult||aiResult.signal==="HOLD"||!candles?.length) return null;
+  const last=candles.at(-1);
+  const price=last.c;
+  const isBuy=aiResult.signal==="BUY";
+  const conf=Math.max(0.4,Math.min(0.99,(aiResult.confidence||60)/100));
+  const tfSecs={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}[tfInterval]||300;
+
+  // ATR-like volatility from last 14 candles
+  const recent=candles.slice(-14);
+  const atr=recent.reduce((s,c)=>s+(c.h-c.l),0)/recent.length;
+
+  // Target: nearest S/R in signal direction, fallback to ATR-based
+  const nearTarget=isBuy
+    ? srLevels?.resistances?.find(r=>r.price>price*1.0002)?.price
+    : srLevels?.supports?.find(s=>s.price<price*0.9998)?.price;
+  const targetPrice=nearTarget||(isBuy?price+atr*2.5*conf:price-atr*2.5*conf);
+  const stopPrice  =isBuy?price-atr*1.5:price+atr*1.5;
+
+  const priceDiff=targetPrice-price;
+  const nCandles=Math.max(6,Math.min(25,Math.round(Math.abs(priceDiff/atr)*3)));
+
+  const center=[],upper=[],lower=[];
+  for(let i=0;i<=nCandles;i++){
+    const t=last.time+i*tfSecs;
+    const pct=i/nCandles;
+    const eased=pct*pct*(3-2*pct); // smooth S-curve
+    const proj=price+priceDiff*eased;
+    const uncertainty=atr*(0.4+0.6*Math.sqrt(pct))*(1-conf*0.6);
+    center.push({time:t,value:proj});
+    upper.push({time:t,value:proj+(isBuy?uncertainty:uncertainty*0.5)});
+    lower.push({time:t,value:proj-(isBuy?uncertainty*0.5:uncertainty)});
+  }
+  return{center,upper,lower,targetPrice,stopPrice,nCandles,atr,isBuy};
+}
+
 /* ─── LIGHTWEIGHT CHART ─────────────────────────────────────────────────── */
-function LWChart({ candles, positions, trades, symbol, precision, srLevels, positionSize=DEFAULT_STAKE, tpTarget=3, slTarget=2 }){
+function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiResult, tfInterval="5m", tpTarget=3, slTarget=2 }){
   const mainRef  = useRef(null);
   const rsiRef   = useRef(null);
   const macdRef  = useRef(null);
@@ -476,6 +513,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
   const series      = useRef({});
   const posLines    = useRef([]);
   const srLines     = useRef([]);
+  const projSeries  = useRef([]);
   const firstLoad   = useRef(true);
   const prevFitPrice= useRef(null);
   const [legend, setLegend] = useState(null);
@@ -583,6 +621,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
       ro.disconnect();
       posLines.current=[];
       srLines.current=[];
+      projSeries.current=[];
       series.current={};
       charts.current={};
       firstLoad.current=true;
@@ -704,6 +743,53 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
     });
   },[srLevels]);
 
+  /* ── AI projection lines ── */
+  useEffect(()=>{
+    const {main}=charts.current;
+    if(!main) return;
+    // Remove old projection series
+    projSeries.current.forEach(s=>{try{main.removeSeries(s);}catch{}});
+    projSeries.current=[];
+
+    const proj=calcProjection(candles,aiResult,srLevels,tfInterval);
+    if(!proj) return;
+
+    const {center,upper,lower,targetPrice,stopPrice,isBuy}=proj;
+    const col=isBuy?"#00e676":"#ff1744";
+    const colFaint=isBuy?"#00e67628":"#ff174428";
+
+    // Center projection line
+    const centerS=main.addLineSeries({color:col,lineWidth:2,lineStyle:LineStyle.Dashed,
+      priceLineVisible:false,lastValueVisible:true,title:isBuy?"▲ Target":"▼ Target"});
+    centerS.setData(center);
+    projSeries.current.push(centerS);
+
+    // Upper bound
+    const upperS=main.addLineSeries({color:colFaint,lineWidth:1,lineStyle:LineStyle.Dotted,
+      priceLineVisible:false,lastValueVisible:false});
+    upperS.setData(upper);
+    projSeries.current.push(upperS);
+
+    // Lower bound
+    const lowerS=main.addLineSeries({color:colFaint,lineWidth:1,lineStyle:LineStyle.Dotted,
+      priceLineVisible:false,lastValueVisible:false});
+    lowerS.setData(lower);
+    projSeries.current.push(lowerS);
+
+    // Target price line
+    const {cs}=series.current;
+    if(cs){
+      projSeries.current.push(
+        cs.createPriceLine({price:targetPrice,color:col,lineWidth:1,
+          lineStyle:LineStyle.Dashed,axisLabelVisible:true,
+          title:`${isBuy?"🎯 Objetivo":"🎯 Objetivo"} ${targetPrice.toFixed(precision)}`}),
+        cs.createPriceLine({price:stopPrice,color:isBuy?"#ff1744":"#00e676",lineWidth:1,
+          lineStyle:LineStyle.Dotted,axisLabelVisible:true,
+          title:`🛑 Stop ${stopPrice.toFixed(precision)}`}),
+      );
+    }
+  },[aiResult,candles,srLevels,tfInterval]);
+
   /* ── position lines (entry, TP, SL) ── */
   useEffect(()=>{
     const {cs}=series.current;
@@ -714,19 +800,8 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
     positions.forEach(pos=>{
       const isBuy=pos.type==="BUY";
       const entryCol=isBuy?"#00e676":"#ff1744";
-      const ps  = pos.allocatedSize||positionSize; // stake USD
-      const mult= pos.multiplier||DEFAULT_MULTIPLIER;
-      const notional = ps * mult;
-      // delta = target_USD × entry / notional  (same formula for all pair types)
-      const tpD = tpTarget * pos.entry / notional;
-      const slD = slTarget * pos.entry / notional;
-      const tp=isBuy ? pos.entry+tpD : pos.entry-tpD;
-      const sl=isBuy ? pos.entry-slD : pos.entry+slD;
-
       posLines.current.push(
-        cs.createPriceLine({price:pos.entry, color:entryCol,  lineWidth:2, lineStyle:LineStyle.Solid,  axisLabelVisible:true,  title:`${pos.type}`}),
-        cs.createPriceLine({price:tp,        color:"#00e676", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:`TP +$${tpTarget.toFixed(2)}`}),
-        cs.createPriceLine({price:sl,        color:"#ff1744", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:`SL -$${slTarget.toFixed(2)}`}),
+        cs.createPriceLine({price:pos.entry, color:entryCol, lineWidth:2, lineStyle:LineStyle.Solid, axisLabelVisible:true, title:`${pos.type} @ ${pos.entry}`}),
       );
     });
   },[positions]);
@@ -2515,9 +2590,8 @@ export default function TradingBot(){
               symbol={symbol}
               precision={asset.precision}
               srLevels={srLevels}
-              positionSize={positionSize}
-              tpTarget={tpTarget}
-              slTarget={slTarget}
+              aiResult={aiResult}
+              tfInterval={chartInterval}
             />
           </div>
         </div>
@@ -2631,132 +2705,73 @@ export default function TradingBot(){
           </button>
         </div>
 
-        {/* POSITION SIZE CONTROL */}
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>STAKE (USD por operación)</span>
-            <span className="mono" style={{fontSize:11,color:T.accent,fontWeight:700}}>${positionSize.toFixed(2)}</span>
-          </div>
-          <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-            {[5,10,25,50,100].map(v=>(
-              <button key={v} onClick={()=>setPositionSize(v)}
-                style={{flex:"1 1 auto",minWidth:44,background:positionSize===v?`${T.accent}22`:"transparent",
-                  border:`1px solid ${positionSize===v?T.accent:T.border}`,color:positionSize===v?T.accent:T.muted,
-                  borderRadius:6,padding:"6px 4px",cursor:"pointer",fontSize:10,fontWeight:positionSize===v?700:400}}>
-                ${v}
-              </button>
-            ))}
-            <input type="number" min="1" step="1"
-              value={positionSize}
-              onChange={e=>{const v=parseFloat(e.target.value);if(!isNaN(v)&&v>0)setPositionSize(v);}}
-              style={{width:70,background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,
-                padding:"6px 8px",fontSize:10,fontFamily:"monospace",outline:"none"}}
-            />
-          </div>
-          <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:6}}>
-            <span style={{fontSize:7,color:T.muted,letterSpacing:1,alignSelf:"center"}}>MULTIPLICADOR:</span>
-            {[10,20,50,100,200].map(v=>(
-              <button key={v} onClick={()=>setMultiplier(v)}
-                style={{flex:"1 1 auto",minWidth:36,background:multiplier===v?`${T.orange}22`:"transparent",
-                  border:`1px solid ${multiplier===v?T.orange:T.border}`,color:multiplier===v?T.orange:T.muted,
-                  borderRadius:6,padding:"4px 2px",cursor:"pointer",fontSize:9,fontWeight:multiplier===v?700:400}}>
-                {v}x
-              </button>
-            ))}
-          </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:8}}>
-            {[
-              {label:"TP (ganancia $)",val:tpTarget,set:setTpTarget,key:"bot_tp",col:T.green},
-              {label:"SL (pérdida $)",val:slTarget,set:setSlTarget,key:"bot_sl",col:T.red},
-            ].map(({label,val,set,col})=>(
-              <div key={label}>
-                <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>{label}</div>
-                <input type="number" min="0.001" step="0.01" value={val}
-                  onChange={e=>{const v=parseFloat(e.target.value);if(!isNaN(v)&&v>0)set(v);}}
-                  style={{width:"100%",background:T.dim,border:`1px solid ${col}50`,color:col,
-                    borderRadius:5,padding:"5px 8px",fontSize:11,fontFamily:"monospace",outline:"none",fontWeight:700}}
-                />
-              </div>
-            ))}
-          </div>
-          <div style={{fontSize:8,color:T.muted,marginTop:5}}>
-            ${positionSize.toFixed(0)} stake × {multiplier}x = ${(positionSize*multiplier).toFixed(0)} nocional · TP/SL en USD
-          </div>
-        </div>
-
-        {/* DERIV INTEGRATION PANEL */}
-        <div style={{background:T.card,border:`1px solid ${derivEnabled&&derivBalance!=null?T.accent:derivEnabled?T.yellow:T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>DERIV BROKER</span>
-              {derivEnabled&&derivLoginId&&(
-                <span style={{fontSize:7,color:String(derivLoginId).startsWith("VR")?T.yellow:T.green,
-                  background:`${String(derivLoginId).startsWith("VR")?T.yellow:T.green}18`,
-                  padding:"1px 6px",borderRadius:3,letterSpacing:1,fontWeight:700}}>
-                  {String(derivLoginId).startsWith("VR")?"DEMO":"REAL"}
-                </span>
-              )}
-            </div>
-            <div style={{display:"flex",gap:6,alignItems:"center"}}>
-              {derivEnabled&&(
-                <button onClick={async()=>{
-                  setDerivTesting(true); setDerivConnectErr(null);
-                  const b=await getDerivBalance();
-                  if(b){setDerivBalance(b.balance);setDerivLoginId(b.loginid);setDerivConnectErr(null);}
-                  else setDerivConnectErr("No se pudo conectar. Verifica DERIV_API_TOKEN en Vercel.");
-                  setDerivTesting(false);
-                }} style={{background:`${T.accent}15`,border:`1px solid ${T.accent}40`,color:T.accent,
-                  borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:9,fontWeight:700}}>
-                  {derivTesting?"⏳ probando...":"🔌 PROBAR"}
-                </button>
-              )}
-              <button onClick={()=>{setDerivEnabled(p=>!p);setDerivBalance(null);setDerivConnectErr(null);}}
-                style={{background:derivEnabled?`${T.accent}20`:"transparent",border:`1px solid ${derivEnabled?T.accent:T.border}`,
-                  color:derivEnabled?T.accent:T.muted,borderRadius:6,padding:"4px 12px",cursor:"pointer",
-                  fontSize:10,fontWeight:700,letterSpacing:1}}>
-                {derivEnabled?"🔵 ACTIVADO":"⚪ DESACTIVADO"}
-              </button>
-            </div>
-          </div>
-
-          {!derivEnabled&&(
-            <div style={{fontSize:9,color:T.muted,lineHeight:1.6}}>
-              Conecta para órdenes reales con contratos multiplier en Forex y Crypto.<br/>
-              Requiere en Vercel: <span style={{color:T.accent,fontFamily:"monospace"}}>DERIV_API_TOKEN</span>
-              <br/><span style={{color:T.muted}}>Obtén el token en app.deriv.com → Configuración → Seguridad → API Token (permisos: Read + Trade + Payments)</span>
-            </div>
-          )}
-
-          {derivEnabled&&(
-            <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              {derivConnectErr&&(
-                <div style={{background:`${T.red}12`,border:`1px solid ${T.red}40`,borderRadius:6,padding:"8px 10px",fontSize:9,color:T.red,lineHeight:1.5}}>
-                  ❌ {derivConnectErr}
+        {/* SEÑAL DE TRADING — guía para operar manualmente */}
+        {aiResult&&(()=>{
+          const isBuy=aiResult.signal==="BUY";
+          const isSell=aiResult.signal==="SELL";
+          const isHold=aiResult.signal==="HOLD";
+          const col=isBuy?T.green:isSell?T.red:T.muted;
+          const proj=calcProjection(candles,aiResult,srLevels,chartInterval);
+          return(
+            <div style={{background:T.card,border:`2px solid ${col}60`,borderRadius:8,padding:"12px 14px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <span style={{fontSize:22,fontWeight:900,color:col,letterSpacing:1}}>
+                    {isBuy?"▲ COMPRAR":isSell?"▼ VENDER":"◆ ESPERAR"}
+                  </span>
+                  <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                    <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>CONFIANZA IA</span>
+                    <span className="mono" style={{fontSize:18,fontWeight:700,color:col}}>{aiResult.confidence}%</span>
+                  </div>
                 </div>
-              )}
-              {derivBalance==null&&!derivConnectErr&&(
-                <div style={{fontSize:9,color:T.yellow}}>⏳ Cargando balance... Haz clic en "PROBAR" si tarda más de 5s.</div>
-              )}
-              {derivBalance!=null&&(
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3}}>
+                  <span style={{fontSize:9,color:T.muted}}>Par: <b style={{color:T.text}}>{symbol}</b></span>
+                  <span style={{fontSize:9,color:T.muted}}>Precio: <b className="mono" style={{color:T.accent}}>{fP(price,asset.precision)}</b></span>
+                </div>
+              </div>
+
+              {/* Niveles de entrada */}
+              {proj&&!isHold&&(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:8}}>
                   {[
-                    {l:"BALANCE",  v:`$${Number(derivBalance).toFixed(2)}`, c:T.text},
-                    {l:"LOGIN ID", v:String(derivLoginId||"—"),              c:T.muted},
+                    {l:"ENTRADA (precio actual)", v:fP(price,asset.precision), c:col},
+                    {l:`OBJETIVO ${isBuy?"RESISTENCIA":"SOPORTE"}`, v:fP(proj.targetPrice,asset.precision), c:isBuy?T.green:T.red},
+                    {l:"STOP LOSS", v:fP(proj.stopPrice,asset.precision), c:isBuy?T.red:T.green},
                   ].map(({l,v,c})=>(
-                    <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px"}}>
-                      <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
-                      <div className="mono" style={{fontSize:11,color:c,fontWeight:700}}>{v}</div>
+                    <div key={l} style={{background:T.dim,borderRadius:6,padding:"8px 10px",textAlign:"center"}}>
+                      <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:4}}>{l}</div>
+                      <div className="mono" style={{fontSize:13,fontWeight:700,color:c}}>{v}</div>
                     </div>
                   ))}
                 </div>
               )}
-              <div style={{fontSize:8,color:T.muted}}>
-                Contratos multiplier MULTUP/MULTDOWN · Stake ${positionSize} × {multiplier}x = ${positionSize*multiplier} nocional.
-                Crypto: paper trading (Deriv no soporta pares crypto directamente).
+
+              {/* Distancias en pips */}
+              {proj&&!isHold&&asset?.type==="forex"&&(
+                <div style={{display:"flex",gap:12,marginBottom:8,fontSize:9}}>
+                  <span style={{color:T.muted}}>Distancia objetivo: <b style={{color:isBuy?T.green:T.red}}>{Math.round(Math.abs(proj.targetPrice-price)/0.0001)} pips</b></span>
+                  <span style={{color:T.muted}}>Stop loss: <b style={{color:T.red}}>{Math.round(Math.abs(proj.stopPrice-price)/0.0001)} pips</b></span>
+                  <span style={{color:T.muted}}>R/R: <b style={{color:T.yellow}}>{(Math.abs(proj.targetPrice-price)/Math.abs(proj.stopPrice-price)).toFixed(1)}:1</b></span>
+                </div>
+              )}
+
+              {/* Razonamiento */}
+              <div style={{background:T.dim,borderRadius:6,padding:"8px 10px",fontSize:9,color:T.text,lineHeight:1.6}}>
+                {aiResult.reasoning}
               </div>
+              <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontSize:8,color:T.muted}}>
+                <span>Factor clave: <b style={{color:T.accent}}>{aiResult.key_factor}</b></span>
+                <span>Riesgo: <b style={{color:aiResult.risk==="ALTO"?T.red:aiResult.risk==="MEDIO"?T.yellow:T.green}}>{aiResult.risk}</b></span>
+                <span>Noticias: <b style={{color:aiResult.news_impact==="BULLISH"?T.green:aiResult.news_impact==="BEARISH"?T.red:T.muted}}>{aiResult.news_impact}</b></span>
+              </div>
+              {!isHold&&proj&&(
+                <div style={{marginTop:6,fontSize:8,color:T.muted,borderTop:`1px solid ${T.border}`,paddingTop:6}}>
+                  Proyección dibujada en el gráfico · línea punteada {isBuy?"verde":"roja"} → objetivo · zona sombreada = rango de incertidumbre
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          );
+        })()}
 
         {/* PATTERNS PANEL */}
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
@@ -2936,7 +2951,7 @@ export default function TradingBot(){
 
         {/* DISCLAIMER */}
         <div style={{fontSize:8,color:T.muted,textAlign:"center",lineHeight:1.9,paddingTop:8,borderTop:`1px solid ${T.border}`}}>
-          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Forex en vivo vía Yahoo Finance · Crypto en vivo vía Binance · Deriv (opcional) para órdenes reales · TP +$3.00 · SL -$2.00<br/>
+          ⚠️ SEÑALES EDUCATIVAS — Bot de análisis técnico con IA · Forex en vivo vía Yahoo Finance · Crypto vía Binance · Opera manualmente en tu broker · Las proyecciones son estimaciones, no garantías<br/>
           Las señales son educativas y no garantizan resultados en mercados reales. Opera siempre con responsabilidad.
         </div>
 
