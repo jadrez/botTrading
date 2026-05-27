@@ -33,7 +33,7 @@ export default async function handler(req, res) {
     patterns = [],
     correlations = [],
     positions, balance, news, reason,
-    positionSize = DEFAULT_LOTS,
+    positionSize = DEFAULT_STAKE,
     tpTarget = DEFAULT_TP_USD,
     slTarget = DEFAULT_SL_USD,
   } = req.body;
