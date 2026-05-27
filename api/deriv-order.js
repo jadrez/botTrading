@@ -11,22 +11,43 @@ const SYMBOL_MAP = {
 // Send one request over a fresh WebSocket connection (authorize → request → result → close)
 function derivWS(token, payload, appId = "1089") {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`wss://ws.binaryws.com/websockets/v3?app_id=${appId}`);
-    const timer = setTimeout(() => { ws.terminate(); reject(new Error("Timeout")); }, 15000);
+    const url = `wss://ws.binaryws.com/websockets/v3?app_id=${appId}`;
+    console.log("[deriv-order] connecting to", url);
+    const ws = new WebSocket(url);
+    const timer = setTimeout(() => {
+      console.error("[deriv-order] TIMEOUT after 15s");
+      ws.terminate();
+      reject(new Error("Timeout connecting to Deriv WebSocket"));
+    }, 15000);
 
-    ws.on("open", () => ws.send(JSON.stringify({ authorize: token })));
+    ws.on("open", () => {
+      console.log("[deriv-order] WS open — sending authorize");
+      ws.send(JSON.stringify({ authorize: token }));
+    });
 
     ws.on("message", (raw) => {
       const msg = JSON.parse(raw);
-      if (msg.error) { clearTimeout(timer); ws.close(); return reject(msg.error); }
+      console.log("[deriv-order] msg_type:", msg.msg_type, msg.error ? "ERROR:" + JSON.stringify(msg.error) : "");
+      if (msg.error) {
+        clearTimeout(timer);
+        ws.close();
+        return reject(new Error(`Deriv error [${msg.error.code}]: ${msg.error.message}`));
+      }
       if (msg.msg_type === "authorize") {
+        console.log("[deriv-order] authorized as", msg.authorize?.loginid, "— sending payload:", JSON.stringify(payload));
         ws.send(JSON.stringify(payload));
       } else {
-        clearTimeout(timer); ws.close(); resolve(msg);
+        clearTimeout(timer);
+        ws.close();
+        resolve(msg);
       }
     });
 
-    ws.on("error", (e) => { clearTimeout(timer); reject(e); });
+    ws.on("error", (e) => {
+      console.error("[deriv-order] WS error:", e.message);
+      clearTimeout(timer);
+      reject(e);
+    });
   });
 }
 
@@ -35,6 +56,7 @@ export default async function handler(req, res) {
 
   const token = process.env.DERIV_API_TOKEN;
   const appId = process.env.DERIV_APP_ID || "1089";
+  console.log("[deriv-order] action:", req.body?.action, "| token present:", !!token, "| appId:", appId);
   if (!token) return res.status(500).json({ error: "DERIV_API_TOKEN not configured" });
 
   const { action, symbol, side, stake = 10, multiplier = 100, contractId, tpTarget = 3, slTarget = 2 } = req.body || {};
@@ -102,6 +124,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: `Unknown action: ${action}` });
 
   } catch (e) {
+    console.error("[deriv-order] caught error:", e.message || String(e));
     return res.status(500).json({ error: e.message || String(e) });
   }
 }
