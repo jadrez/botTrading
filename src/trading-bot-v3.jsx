@@ -57,9 +57,17 @@ const ASSETS = {
 };
 
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
-const MAX_POSITIONS         = 3;    // per symbol — correlated pairs open in parallel
-const DEFAULT_LOTS          = 0.10; // fallback default lots (overridden by user state)
-const ANALYSIS_INTERVAL_MS  = 90000; // 90s — balanced for 5M charts and Groq free tier
+const MAX_POSITIONS         = 3;
+const DEFAULT_STAKE         = 10.00;  // USD stake per trade (Deriv multiplier contracts)
+const DEFAULT_MULTIPLIER    = 100;    // leverage multiplier
+const ANALYSIS_INTERVAL_MS  = 90000;
+
+// Deriv WebSocket symbol mapping
+const DERIV_SYMBOLS = {
+  "EUR/USD":"frxEURUSD","GBP/USD":"frxGBPUSD","USD/JPY":"frxUSDJPY",
+  "AUD/USD":"frxAUDUSD","NZD/USD":"frxNZDUSD","USD/CHF":"frxUSDCHF",
+  "USD/CAD":"frxUSDCAD","EUR/GBP":"frxEURGBP",
+};
 
 /* ─── UTILS ─────────────────────────────────────────────────────────────── */
 const fP   = (n, p) => Number(n).toFixed(p);
@@ -71,18 +79,11 @@ const fUSD = (n, sign=true) => {
 const fPct = n => (n>=0?"+":"")+n.toFixed(3)+"%";
 const now  = () => new Date().toLocaleTimeString("es");
 
-function posPnL(pos, price, lots=DEFAULT_LOTS){
-  const dir = pos.type==="BUY" ? 1 : -1;
-  const sym = pos.symbol || "";
-  const cfg = ASSETS[sym];
-  const units = lots * 100000;
-  if(cfg?.type==="forex"){
-    if(sym.startsWith("USD/"))
-      return dir * (price - pos.entry) / price * units; // quote is JPY/CHF/CAD → convert to USD
-    return dir * (price - pos.entry) * units;            // quote is USD (EUR/USD etc.)
-  }
-  // Crypto paper trading: 1 lot ≈ $1000 notional
-  return dir * (price - pos.entry) / pos.entry * (lots * 1000);
+// Deriv multiplier P&L: stake × multiplier × (Δprice / entry)
+function posPnL(pos, price, stake=DEFAULT_STAKE){
+  const dir  = pos.type==="BUY" ? 1 : -1;
+  const mult = pos.multiplier || DEFAULT_MULTIPLIER;
+  return dir * (price - pos.entry) / pos.entry * stake * mult;
 }
 
 function genCandles(base=1.0823, n=200, interval="5m"){
@@ -467,7 +468,7 @@ function calcShortTrend(candles, n=5){
 }
 
 /* ─── LIGHTWEIGHT CHART ─────────────────────────────────────────────────── */
-function LWChart({ candles, positions, trades, symbol, precision, srLevels, positionSize=DEFAULT_LOTS, tpTarget=3, slTarget=2 }){
+function LWChart({ candles, positions, trades, symbol, precision, srLevels, positionSize=DEFAULT_STAKE, tpTarget=3, slTarget=2 }){
   const mainRef  = useRef(null);
   const rsiRef   = useRef(null);
   const macdRef  = useRef(null);
@@ -713,18 +714,12 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
     positions.forEach(pos=>{
       const isBuy=pos.type==="BUY";
       const entryCol=isBuy?"#00e676":"#ff1744";
-      const ps=pos.allocatedSize||positionSize; // lots
-      const units=ps*100000;
-      const sym2=pos.symbol||symbol;
-      const cfg2=ASSETS[sym2];
-      let tpD,slD;
-      if(cfg2?.type==="forex"&&sym2.startsWith("USD/")){
-        tpD=tpTarget*pos.entry/units; slD=slTarget*pos.entry/units;
-      } else if(cfg2?.type==="forex"){
-        tpD=tpTarget/units; slD=slTarget/units;
-      } else {
-        tpD=(tpTarget/(ps*1000))*pos.entry; slD=(slTarget/(ps*1000))*pos.entry;
-      }
+      const ps  = pos.allocatedSize||positionSize; // stake USD
+      const mult= pos.multiplier||DEFAULT_MULTIPLIER;
+      const notional = ps * mult;
+      // delta = target_USD × entry / notional  (same formula for all pair types)
+      const tpD = tpTarget * pos.entry / notional;
+      const slD = slTarget * pos.entry / notional;
       const tp=isBuy ? pos.entry+tpD : pos.entry-tpD;
       const sl=isBuy ? pos.entry-slD : pos.entry+slD;
 
@@ -810,7 +805,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, posi
 
 /* ─── POSITION ROW ───────────────────────────────────────────────────────── */
 function PosRow({pos, price, precision, onClose, tpTarget=3, slTarget=2}){
-  const ps=pos.allocatedSize||DEFAULT_LOTS;
+  const ps=pos.allocatedSize||DEFAULT_STAKE;
   const pnl=posPnL(pos,price,ps);
   const col=pnl>=0?T.green:T.red;
   const pct=Math.min(100,Math.max(0,(pnl/tpTarget)*100));
@@ -837,7 +832,7 @@ function PosRow({pos, price, precision, onClose, tpTarget=3, slTarget=2}){
       </div>
       <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
         <span style={{fontSize:8,color:T.red}}>SL -{fUSD(slTarget,false)}</span>
-        {pos.oandaTradeId&&<span style={{fontSize:7,color:"#ff6d00",background:"#ff6d0015",padding:"1px 5px",borderRadius:3}}>🟠 OANDA #{String(pos.oandaTradeId)}</span>}
+        {pos.derivContractId&&<span style={{fontSize:7,color:"#00b8e6",background:"#00b8e615",padding:"1px 5px",borderRadius:3}}>DERIV #{String(pos.derivContractId)}</span>}
         <span style={{fontSize:8,color:pnl>=0?T.green:T.muted}}>{pct.toFixed(0)}% → TP +{fUSD(tpTarget,false)}</span>
       </div>
     </div>
@@ -913,39 +908,30 @@ async function fetchForexCandles(from,to,limit=200,interval="1m"){
   return null;
 }
 
-/* ─── OANDA HELPERS ─────────────────────────────────────────────────────── */
-async function fetchOandaPrice(symbol){
+/* ─── DERIV HELPERS ──────────────────────────────────────────────────────── */
+async function openDerivOrder(symbol,side,stake,multiplier,tpTarget,slTarget){
   try{
-    const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({action:"price",symbol})});
+    const r=await fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"open",symbol,side,stake,multiplier,tpTarget,slTarget})});
     const d=await r.json();
-    return(typeof d.mid==="number"&&!isNaN(d.mid))?d.mid:null;
-  }catch{return null;}
-}
-
-async function openOandaOrder(symbol,side,lots){
-  try{
-    const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({action:"open",symbol,side,lots})});
-    const d=await r.json();
-    if(!r.ok||d.error) return{ok:false,error:d.error||"Error OANDA"};
+    if(!r.ok||d.error) return{ok:false,error:d.error||"Error Deriv"};
     return{ok:true,...d};
   }catch(e){return{ok:false,error:e.message};}
 }
 
-async function closeOandaOrder(tradeId){
+async function closeDerivOrder(contractId){
   try{
-    const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({action:"close",tradeId})});
+    const r=await fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"close",contractId})});
     const d=await r.json();
-    if(!r.ok||d.error) return{ok:false,error:d.error||"Error OANDA"};
+    if(!r.ok||d.error) return{ok:false,error:d.error||"Error Deriv"};
     return{ok:true,...d};
   }catch(e){return{ok:false,error:e.message};}
 }
 
-async function getOandaBalance(){
+async function getDerivBalance(){
   try{
-    const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
+    const r=await fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({action:"balance"})});
     const d=await r.json();
     return r.ok&&!d.error?d:null;
@@ -981,7 +967,7 @@ export default function TradingBot(){
   const [patterns,setPatterns]   = useState([]);
   const [positions,setPositions] = useState([]);
   const [balance,setBalance]     = useState(()=>loadBalance());
-  const [positionSize,setPositionSize] = useState(()=>parseFloat(localStorage.getItem("bot_lots")||"0.10"));
+  const [positionSize,setPositionSize] = useState(()=>parseFloat(localStorage.getItem("bot_stake")||"10.00"));
   const [trades,setTrades]       = useState([]);
   const [log,setLog]             = useState([]);
   const [news,setNews]           = useState([]);
@@ -1015,12 +1001,13 @@ export default function TradingBot(){
   const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl")||"2.00"));
   const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp")||"3.00"));
   const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl")||"2.00"));
-  const [oandaEnabled,setOandaEnabled]    = useState(()=>localStorage.getItem("oandaEnabled")==="true");
-  const [oandaBalance,setOandaBalance]    = useState(null);
-  const [oandaPractice,setOandaPractice]  = useState(true);
-  const [oandaConnectErr,setOandaConnectErr]= useState(null);
-  const [oandaTesting,setOandaTesting]    = useState(false);
-  const oandaEnabledRef = useRef(localStorage.getItem("oandaEnabled")==="true");
+  const [derivEnabled,setDerivEnabled]    = useState(()=>localStorage.getItem("derivEnabled")==="true");
+  const [derivBalance,setDerivBalance]    = useState(null);
+  const [derivLoginId,setDerivLoginId]    = useState(null);
+  const [derivConnectErr,setDerivConnectErr]= useState(null);
+  const [derivTesting,setDerivTesting]    = useState(false);
+  const [multiplier,setMultiplier]        = useState(()=>parseInt(localStorage.getItem("bot_mult")||"100"));
+  const derivEnabledRef = useRef(localStorage.getItem("derivEnabled")==="true");
   const [livePrices,setLivePrices]        = useState({});
   const chartIntervalRef = useRef("1m");
   const bgPricesRef   = useRef({});
@@ -1046,7 +1033,8 @@ export default function TradingBot(){
   const patternsRef= useRef([]);
   const newsRef   = useRef([]);
   const balanceRef     = useRef(10000);
-  const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_lots")||"0.10"));
+  const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_stake")||"10.00"));
+  const multiplierRef  = useRef(parseInt(localStorage.getItem("bot_mult")||"100"));
   const timerRef  = useRef(null);
   const countRef  = useRef(null);
   const pendingAnalysisRef = useRef(false);
@@ -1065,10 +1053,11 @@ export default function TradingBot(){
   useEffect(()=>{patternsRef.current=patterns;},[patterns]);
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
-  useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_lots",String(positionSize));},[positionSize]);
+  useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_stake",String(positionSize));},[positionSize]);
+  useEffect(()=>{multiplierRef.current=multiplier;localStorage.setItem("bot_mult",String(multiplier));},[multiplier]);
   useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp",String(tpTarget));},[tpTarget]);
   useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl",String(slTarget));},[slTarget]);
-  useEffect(()=>{oandaEnabledRef.current=oandaEnabled;localStorage.setItem("oandaEnabled",String(oandaEnabled));},[oandaEnabled]);
+  useEffect(()=>{derivEnabledRef.current=derivEnabled;localStorage.setItem("derivEnabled",String(derivEnabled));},[derivEnabled]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
   useEffect(()=>{consLossesRef.current=consecutiveLosses;},[consecutiveLosses]);
   useEffect(()=>{shortTrendRef.current=shortTrend;},[shortTrend]);
@@ -1115,20 +1104,17 @@ export default function TradingBot(){
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
   },[]);
 
-  /* ── OANDA balance polling ──────────────────────────────────────────── */
+  /* ── Deriv balance polling ──────────────────────────────────────────── */
   useEffect(()=>{
-    if(!oandaEnabled) return;
+    if(!derivEnabled) return;
     const load=async()=>{
-      const b=await getOandaBalance();
-      if(b){
-        setOandaBalance(b);
-        if(typeof b.practice==="boolean") setOandaPractice(b.practice);
-      }
+      const b=await getDerivBalance();
+      if(b){ setDerivBalance(b.balance); setDerivLoginId(b.loginid); }
     };
     load();
     const iv=setInterval(load,30000);
     return()=>clearInterval(iv);
-  },[oandaEnabled]);
+  },[derivEnabled]);
 
   /* ── Symbol change ───────────────────────────────────────────────────── */
   const handleSymbolChange=useCallback((newSym)=>{
@@ -1279,11 +1265,10 @@ export default function TradingBot(){
       })();
 
       // Price update every 5s — appends to last real candle
-      // Uses OANDA live price if enabled (real-time bid/ask), else Yahoo Finance
+      // Price update via Yahoo Finance
       const tfSecs={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}[tfInterval]||300;
       iv=setInterval(async()=>{
-        let np = oandaEnabledRef.current ? await fetchOandaPrice(symbol) : null;
-        if(!np) np=await fetchForexRateCached(forexFrom,forexTo,5000);
+        let np=await fetchForexRateCached(forexFrom,forexTo,5000);
         if(!np||isNaN(np)) return;
         setCandles(prev=>{
           const updated=[...prev];
@@ -1494,9 +1479,9 @@ export default function TradingBot(){
     setPositions(prev=>{
       const pos=prev.find(p=>p.id===posId);
       if(!pos)return prev;
-      if(oandaEnabledRef.current && pos.oandaTradeId && ASSETS[pos.symbol||""]?.type==="forex"){
-        closeOandaOrder(pos.oandaTradeId)
-          .then(r=>{ if(!r.ok) console.warn("OANDA close error:",r.error); });
+      if(derivEnabledRef.current && pos.derivContractId){
+        closeDerivOrder(pos.derivContractId)
+          .then(r=>{ if(!r.ok) console.warn("Deriv close error:",r.error); });
       }
       const pnl=posPnL(pos,currentPrice,pos.allocatedSize||positionSizeRef.current);
       const posSym=pos.symbol||symbolRef.current;
@@ -1647,21 +1632,21 @@ export default function TradingBot(){
           const activeAssetCheck=ASSETS[activeSym];
           const ps=positionSizeRef.current;
 
-          // ── OANDA order for forex pairs
-          let oandaTradeId=null;
-          if(oandaEnabledRef.current && activeAssetCheck?.type==="forex"){
-            const oResult=await openOandaOrder(activeSym,result.signal,ps);
-            if(oResult.ok){
-              oandaTradeId=oResult.tradeId;
-              addLog(`🟠 OANDA orden ${result.signal} abierta | TradeID:${oandaTradeId} | ${oResult.units} units @ ${oResult.avgPrice}`,"info");
+          // ── Deriv order for forex pairs
+          let derivContractId=null;
+          if(derivEnabledRef.current && activeAssetCheck?.type==="forex"){
+            const dResult=await openDerivOrder(activeSym,result.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
+            if(dResult.ok){
+              derivContractId=dResult.contractId;
+              addLog(`🔵 Deriv orden ${result.signal} abierta | ContractID:${derivContractId} | Stake:$${ps} × ${multiplierRef.current}x @ ${dResult.buyPrice}`,"info");
             } else {
-              addLog(`⚠️ OANDA: ${oResult.error} — posición registrada en simulación`,"sell");
+              addLog(`⚠️ Deriv: ${dResult.error} — posición registrada en simulación`,"sell");
             }
           }
 
           const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
-            symbol:activeSym,openTime:Date.now(),allocatedSize:ps,
-            ...(oandaTradeId&&{oandaTradeId})};
+            symbol:activeSym,openTime:Date.now(),allocatedSize:ps,multiplier:multiplierRef.current,
+            ...(derivContractId&&{derivContractId})};
 
           // ── Open correlated positions on all forex pairs with a confirmed correlation
           const corrPositions=[];
@@ -1682,16 +1667,16 @@ export default function TradingBot(){
               // Skip if the correlated pair's own signal actively contradicts the expected direction
               const corrInfo=corrSignalsRef.current[corrSym];
               if(corrInfo?.signal&&corrInfo.signal!=="HOLD"&&corrInfo.signal!==corrSignal) continue;
-              // OANDA correlated order
-              let corrOandaId=null;
-              if(oandaEnabledRef.current){
-                const oCorr=await openOandaOrder(corrSym,corrSignal,ps);
-                if(oCorr.ok) corrOandaId=oCorr.tradeId;
+              // Deriv correlated order
+              let corrDerivId=null;
+              if(derivEnabledRef.current){
+                const dCorr=await openDerivOrder(corrSym,corrSignal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
+                if(dCorr.ok) corrDerivId=dCorr.contractId;
               }
               corrPositions.push({
                 type:corrSignal,entry:corrPrice,id:Date.now()+Math.random()+corrPositions.length*0.001,
-                symbol:corrSym,openTime:Date.now(),correlatedWith:activeSym,allocatedSize:ps,
-                ...(corrOandaId&&{oandaTradeId:corrOandaId}),
+                symbol:corrSym,openTime:Date.now(),correlatedWith:activeSym,allocatedSize:ps,multiplier:multiplierRef.current,
+                ...(corrDerivId&&{derivContractId:corrDerivId}),
               });
               addLog(`🔗 ${corrSignal==="BUY"?"🟢":"🔴"} CORR ${corrSignal} ${corrSym} @ ${fP(corrPrice,corrAsset.precision)} (${corrDir>0?"↑↑":"↓↑"} ${activeSym})`,corrSignal==="BUY"?"buy":"sell");
             }
@@ -2649,24 +2634,35 @@ export default function TradingBot(){
         {/* POSITION SIZE CONTROL */}
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>VOLUMEN (lotes) — 0.10L = 10,000 unidades</span>
-            <span className="mono" style={{fontSize:11,color:T.accent,fontWeight:700}}>{positionSize.toFixed(2)} L</span>
+            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>STAKE (USD por operación)</span>
+            <span className="mono" style={{fontSize:11,color:T.accent,fontWeight:700}}>${positionSize.toFixed(2)}</span>
           </div>
           <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-            {[0.01,0.05,0.10,0.50,1.00].map(v=>(
+            {[5,10,25,50,100].map(v=>(
               <button key={v} onClick={()=>setPositionSize(v)}
                 style={{flex:"1 1 auto",minWidth:44,background:positionSize===v?`${T.accent}22`:"transparent",
                   border:`1px solid ${positionSize===v?T.accent:T.border}`,color:positionSize===v?T.accent:T.muted,
                   borderRadius:6,padding:"6px 4px",cursor:"pointer",fontSize:10,fontWeight:positionSize===v?700:400}}>
-                {v.toFixed(2)}L
+                ${v}
               </button>
             ))}
-            <input type="number" min="0.01" step="0.01"
+            <input type="number" min="1" step="1"
               value={positionSize}
               onChange={e=>{const v=parseFloat(e.target.value);if(!isNaN(v)&&v>0)setPositionSize(v);}}
               style={{width:70,background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,
                 padding:"6px 8px",fontSize:10,fontFamily:"monospace",outline:"none"}}
             />
+          </div>
+          <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:6}}>
+            <span style={{fontSize:7,color:T.muted,letterSpacing:1,alignSelf:"center"}}>MULTIPLICADOR:</span>
+            {[10,20,50,100,200].map(v=>(
+              <button key={v} onClick={()=>setMultiplier(v)}
+                style={{flex:"1 1 auto",minWidth:36,background:multiplier===v?`${T.orange}22`:"transparent",
+                  border:`1px solid ${multiplier===v?T.orange:T.border}`,color:multiplier===v?T.orange:T.muted,
+                  borderRadius:6,padding:"4px 2px",cursor:"pointer",fontSize:9,fontWeight:multiplier===v?700:400}}>
+                {v}x
+              </button>
+            ))}
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:8}}>
             {[
@@ -2684,71 +2680,68 @@ export default function TradingBot(){
             ))}
           </div>
           <div style={{fontSize:8,color:T.muted,marginTop:5}}>
-            {asset?.type==="forex"
-              ? `${(positionSize*100000).toFixed(0)} unidades · $${(positionSize*10).toFixed(2)}/pip · TP ~${(tpTarget/(positionSize*10)).toFixed(0)} pips · SL ~${(slTarget/(positionSize*10)).toFixed(0)} pips`
-              : `~$${(positionSize*1000).toFixed(0)} nocional crypto (paper trading)`
-            }
+            ${positionSize.toFixed(0)} stake × {multiplier}x = ${(positionSize*multiplier).toFixed(0)} nocional · TP/SL en USD
           </div>
         </div>
 
-        {/* OANDA INTEGRATION PANEL */}
-        <div style={{background:T.card,border:`1px solid ${oandaEnabled&&oandaBalance?T.orange:oandaEnabled?T.yellow:T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+        {/* DERIV INTEGRATION PANEL */}
+        <div style={{background:T.card,border:`1px solid ${derivEnabled&&derivBalance!=null?T.accent:derivEnabled?T.yellow:T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>OANDA FOREX</span>
-              {oandaEnabled&&(
-                <span style={{fontSize:7,color:oandaPractice?T.yellow:T.green,background:`${oandaPractice?T.yellow:T.green}18`,
+              <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>DERIV BROKER</span>
+              {derivEnabled&&derivLoginId&&(
+                <span style={{fontSize:7,color:String(derivLoginId).startsWith("VR")?T.yellow:T.green,
+                  background:`${String(derivLoginId).startsWith("VR")?T.yellow:T.green}18`,
                   padding:"1px 6px",borderRadius:3,letterSpacing:1,fontWeight:700}}>
-                  {oandaPractice?"PRACTICE":"LIVE"}
+                  {String(derivLoginId).startsWith("VR")?"DEMO":"REAL"}
                 </span>
               )}
             </div>
             <div style={{display:"flex",gap:6,alignItems:"center"}}>
-              {oandaEnabled&&(
+              {derivEnabled&&(
                 <button onClick={async()=>{
-                  setOandaTesting(true); setOandaConnectErr(null);
-                  const b=await getOandaBalance();
-                  if(b){setOandaBalance(b);if(typeof b.practice==="boolean")setOandaPractice(b.practice);setOandaConnectErr(null);}
-                  else setOandaConnectErr("No se pudo conectar. Verifica OANDA_API_TOKEN y OANDA_ACCOUNT_ID en Vercel.");
-                  setOandaTesting(false);
-                }} style={{background:`${T.orange}15`,border:`1px solid ${T.orange}40`,color:T.orange,
+                  setDerivTesting(true); setDerivConnectErr(null);
+                  const b=await getDerivBalance();
+                  if(b){setDerivBalance(b.balance);setDerivLoginId(b.loginid);setDerivConnectErr(null);}
+                  else setDerivConnectErr("No se pudo conectar. Verifica DERIV_API_TOKEN en Vercel.");
+                  setDerivTesting(false);
+                }} style={{background:`${T.accent}15`,border:`1px solid ${T.accent}40`,color:T.accent,
                   borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:9,fontWeight:700}}>
-                  {oandaTesting?"⏳ probando...":"🔌 PROBAR"}
+                  {derivTesting?"⏳ probando...":"🔌 PROBAR"}
                 </button>
               )}
-              <button onClick={()=>{setOandaEnabled(p=>!p);setOandaBalance(null);setOandaConnectErr(null);}}
-                style={{background:oandaEnabled?`${T.orange}20`:"transparent",border:`1px solid ${oandaEnabled?T.orange:T.border}`,
-                  color:oandaEnabled?T.orange:T.muted,borderRadius:6,padding:"4px 12px",cursor:"pointer",
+              <button onClick={()=>{setDerivEnabled(p=>!p);setDerivBalance(null);setDerivConnectErr(null);}}
+                style={{background:derivEnabled?`${T.accent}20`:"transparent",border:`1px solid ${derivEnabled?T.accent:T.border}`,
+                  color:derivEnabled?T.accent:T.muted,borderRadius:6,padding:"4px 12px",cursor:"pointer",
                   fontSize:10,fontWeight:700,letterSpacing:1}}>
-                {oandaEnabled?"🟠 ACTIVADO":"⚪ DESACTIVADO"}
+                {derivEnabled?"🔵 ACTIVADO":"⚪ DESACTIVADO"}
               </button>
             </div>
           </div>
 
-          {!oandaEnabled&&(
+          {!derivEnabled&&(
             <div style={{fontSize:9,color:T.muted,lineHeight:1.6}}>
-              Conecta para órdenes reales en pares <span style={{color:T.orange}}>Forex</span> (EUR/USD, GBP/USD, USD/JPY...).<br/>
-              Requiere en Vercel: <span style={{color:T.orange,fontFamily:"monospace"}}>OANDA_API_TOKEN</span>, <span style={{color:T.orange,fontFamily:"monospace"}}>OANDA_ACCOUNT_ID</span>, <span style={{color:T.orange,fontFamily:"monospace"}}>OANDA_PRACTICE=true</span>
+              Conecta para órdenes reales con contratos multiplier en Forex y Crypto.<br/>
+              Requiere en Vercel: <span style={{color:T.accent,fontFamily:"monospace"}}>DERIV_API_TOKEN</span>
+              <br/><span style={{color:T.muted}}>Obtén el token en app.deriv.com → Configuración → Seguridad → API Token (permisos: Read + Trade + Payments)</span>
             </div>
           )}
 
-          {oandaEnabled&&(
+          {derivEnabled&&(
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              {oandaConnectErr&&(
+              {derivConnectErr&&(
                 <div style={{background:`${T.red}12`,border:`1px solid ${T.red}40`,borderRadius:6,padding:"8px 10px",fontSize:9,color:T.red,lineHeight:1.5}}>
-                  ❌ {oandaConnectErr}
+                  ❌ {derivConnectErr}
                 </div>
               )}
-              {!oandaBalance&&!oandaConnectErr&&(
+              {derivBalance==null&&!derivConnectErr&&(
                 <div style={{fontSize:9,color:T.yellow}}>⏳ Cargando balance... Haz clic en "PROBAR" si tarda más de 5s.</div>
               )}
-              {oandaBalance&&(
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6}}>
+              {derivBalance!=null&&(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
                   {[
-                    {l:"BALANCE",    v:`$${oandaBalance.balance?.toFixed(2)}`,              c:T.text},
-                    {l:"DISPONIBLE", v:`$${oandaBalance.availableBalance?.toFixed(2)}`,     c:T.green},
-                    {l:"PnL ABIERTO",v:fUSD(oandaBalance.unrealizedPnl||0),                c:(oandaBalance.unrealizedPnl||0)>=0?T.green:T.red},
-                    {l:"TRADES",     v:`${oandaBalance.openTrades} ${oandaBalance.currency||"USD"}`,c:T.muted},
+                    {l:"BALANCE",  v:`$${Number(derivBalance).toFixed(2)}`, c:T.text},
+                    {l:"LOGIN ID", v:String(derivLoginId||"—"),              c:T.muted},
                   ].map(({l,v,c})=>(
                     <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px"}}>
                       <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
@@ -2758,8 +2751,8 @@ export default function TradingBot(){
                 </div>
               )}
               <div style={{fontSize:8,color:T.muted}}>
-                Forex (EUR/USD, GBP/USD, etc.) ejecutado en OANDA {oandaPractice?"Practice":"Live"}.
-                Crypto: datos en vivo, operaciones simuladas (paper trading).
+                Contratos multiplier MULTUP/MULTDOWN · Stake ${positionSize} × {multiplier}x = ${positionSize*multiplier} nocional.
+                Crypto: paper trading (Deriv no soporta pares crypto directamente).
               </div>
             </div>
           )}
@@ -2943,7 +2936,7 @@ export default function TradingBot(){
 
         {/* DISCLAIMER */}
         <div style={{fontSize:8,color:T.muted,textAlign:"center",lineHeight:1.9,paddingTop:8,borderTop:`1px solid ${T.border}`}}>
-          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Forex en vivo vía OANDA (precio real) · Crypto en vivo vía feed público · TP +$3.00 · SL -$2.00<br/>
+          ⚠️ MODO PAPER TRADING — Dinero 100% simulado · Forex en vivo vía Yahoo Finance · Crypto en vivo vía Binance · Deriv (opcional) para órdenes reales · TP +$3.00 · SL -$2.00<br/>
           Las señales son educativas y no garantizan resultados en mercados reales. Opera siempre con responsabilidad.
         </div>
 
