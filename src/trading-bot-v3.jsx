@@ -516,6 +516,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
   const projSeries  = useRef([]);
   const firstLoad   = useRef(true);
   const prevFitPrice= useRef(null);
+  const prevCandlesLen = useRef(0);
   const [legend, setLegend] = useState(null);
 
   /* ── init charts ── */
@@ -545,6 +546,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
       upColor:"#00e676", downColor:"#ff1744",
       borderUpColor:"#00e676", borderDownColor:"#ff1744",
       wickUpColor:"#00e676cc", wickDownColor:"#ff1744cc",
+      priceFormat:{ type:"price", precision, minMove:Math.pow(10,-precision) },
     });
     const vs=main.addHistogramSeries({
       priceFormat:{type:"volume"}, priceScaleId:"vol",
@@ -644,8 +646,76 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
 
     const closes=clean.map(c=>c.c);
     const times =clean.map(c=>c.time);
+    const last=clean[clean.length-1];
 
-    // Candles & volume
+    // Detect live tick vs bulk load — use fast update() path when only last bar changed
+    const isTick=prevCandlesLen.current>50&&(clean.length===prevCandlesLen.current||clean.length===prevCandlesLen.current+1);
+    prevCandlesLen.current=clean.length;
+
+    if(isTick){
+      // ── Fast path: only update last bar — preserves scroll position and shows tick animation
+      try{
+        cs.update({time:last.time,open:last.o,high:last.h,low:last.l,close:last.c});
+        vs.update({time:last.time,value:last.v||0,color:last.c>=last.o?"#00e67640":"#ff174440"});
+        // Update last EMA9/21 point
+        const k9=2/10,k21=2/22;
+        let e9=closes[0],e21=closes[0];
+        for(let i=1;i<closes.length;i++){e9=closes[i]*k9+e9*(1-k9);e21=closes[i]*k21+e21*(1-k21);}
+        e9s.update({time:last.time,value:e9});
+        e21s.update({time:last.time,value:e21});
+        // Update last EMA200 point
+        if(e200s&&closes.length>=200){
+          let e200v=closes[0]; const k200=2/201;
+          for(let i=1;i<closes.length;i++) e200v=closes[i]*k200+e200v*(1-k200);
+          e200s.update({time:last.time,value:e200v});
+        }
+        // Update last BB point
+        if(closes.length>=20){
+          const sl=closes.slice(-20);
+          const mean=sl.reduce((a,b)=>a+b,0)/20;
+          const std=Math.sqrt(sl.reduce((a,b)=>a+(b-mean)**2,0)/20);
+          bbu.update({time:last.time,value:mean+2*std});
+          bbm.update({time:last.time,value:mean});
+          bbl.update({time:last.time,value:mean-2*std});
+        }
+        // Update last RSI point
+        if(closes.length>=15){
+          let g=0,l=0;
+          const n=closes.length;
+          for(let j=n-13;j<n;j++){const d=closes[j]-closes[j-1]; d>0?g+=d:l-=d;}
+          rsiS.update({time:last.time,value:100-100/(1+g/(l||0.0001))});
+        }
+        // Update last MACD point
+        if(closes.length>=27){
+          let e12v=closes[0],e26v=closes[0];
+          const k12=2/13,k26=2/27,kSig=2/10;
+          let sigV=0,sigVInit=false;
+          for(let i=1;i<closes.length;i++){
+            e12v=closes[i]*k12+e12v*(1-k12);
+            e26v=closes[i]*k26+e26v*(1-k26);
+            if(i>=25){
+              const mv=e12v-e26v;
+              if(!sigVInit){sigV=mv;sigVInit=true;}
+              else sigV=mv*kSig+sigV*(1-kSig);
+              const hv=mv-sigV;
+              if(i===closes.length-1){
+                mlD_last=mv; msD_last=sigV; mhD_last=hv;
+              }
+            }
+          }
+          // declare before use
+          var mlD_last,msD_last,mhD_last;
+          if(mlD_last!==undefined){
+            macdLine.update({time:last.time,value:mlD_last});
+            macdSig.update({time:last.time,value:msD_last});
+            macdHist.update({time:last.time,value:mhD_last,color:mhD_last>=0?"#00e67680":"#ff174480"});
+          }
+        }
+      }catch{}
+      return;
+    }
+
+    // ── Full setData path: initial load, symbol switch, timeframe change ──
     cs.setData(clean.map(c=>({time:c.time,open:c.o,high:c.h,low:c.l,close:c.c})));
     vs.setData(clean.map(c=>({time:c.time,value:c.v||0,color:c.c>=c.o?"#00e67640":"#ff174440"})));
 
@@ -1244,6 +1314,36 @@ export default function TradingBot(){
     const cur=ASSETS[symbol];
     const tfInterval=chartInterval||"1m";
     let iv;
+    let derivWs=null;
+    let wsAlive=true;
+
+    const applyForexCandles=(newCandles,rate)=>{
+      if(!newCandles?.length) return;
+      setCandles(newCandles);
+      const closes=newCandles.map(c=>c.c);
+      const newBB=calcBB(closes);
+      const e9=calcEMA(closes,9),e21=calcEMA(closes,21);
+      const e200=calcEMA(closes,200);
+      const t1h=calcTrend1h(closes);
+      const sr=calcSR(newCandles);
+      const pts=detectPatterns(newCandles);
+      const cpats=detectCandlePatterns(newCandles);
+      const st=calcShortTrend(newCandles,5);
+      const np=rate||closes.at(-1);
+      setPrice(np); priceRef.current=np;
+      setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
+      setBB(newBB); bbRef.current=newBB;
+      setEma9(e9); ema9Ref.current=e9;
+      setEma21(e21); ema21Ref.current=e21;
+      setEma200(e200); ema200Ref.current=e200;
+      setTrend1h(t1h); trend1hRef.current=t1h;
+      setPatterns([...pts,...cpats]); patternsRef.current=[...pts,...cpats];
+      setShortTrend(st); shortTrendRef.current=st;
+      setSrLevels(sr); srRef.current=sr;
+      const {forexFrom,forexTo}=cur;
+      if(np) _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+      setForexLive(true); setPriceVerified(true);
+    };
 
     if(cur.type==="crypto"){
       const fetchPrice=async()=>{
@@ -1289,96 +1389,132 @@ export default function TradingBot(){
       };
       fetchPrice();
       iv=setInterval(fetchPrice,3000);
+
     } else {
-      // ── FOREX: load real 1-min candles from Yahoo Finance, then update every 5s
+      // ── FOREX: Deriv WebSocket for zero-delay real-time candles
       const {forexFrom,forexTo}=cur;
+      const derivSym=DERIV_SYMBOLS[symbol];
+      const granularity={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}[tfInterval]||300;
 
-      const applyCandles=(newCandles,rate)=>{
-        if(!newCandles?.length) return;
-        setCandles(newCandles);
-        const closes=newCandles.map(c=>c.c);
-        const volumes=newCandles.map(c=>c.v||0);
-        const newBB=calcBB(closes);
-        const e9=calcEMA(closes,9),e21=calcEMA(closes,21);
-        const e200=calcEMA(closes,200);
-        const t1h=calcTrend1h(closes);
-        const sr=calcSR(newCandles);
-        const pts=detectPatterns(newCandles);
-        const cpats=detectCandlePatterns(newCandles);
-        const st=calcShortTrend(newCandles,5);
-        const allPats=[...pts,...cpats];
-        const np=rate||closes.at(-1);
-        setPrice(np); priceRef.current=np;
-        setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
-        setBB(newBB); bbRef.current=newBB;
-        setEma9(e9); ema9Ref.current=e9;
-        setEma21(e21); ema21Ref.current=e21;
-        setEma200(e200); ema200Ref.current=e200;
-        setTrend1h(t1h); trend1hRef.current=t1h;
-        setPatterns(allPats); patternsRef.current=allPats;
-        setShortTrend(st); shortTrendRef.current=st;
-        setSrLevels(sr); srRef.current=sr;
-        if(np) _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
-        setForexLive(true); setPriceVerified(true);
-      };
+      // Flag: once Deriv delivers candles, don't let Yahoo overwrite them
+      let derivCandlesLoaded=false;
 
-      // Initial load: real candles (1m fetched & aggregated server-side for better gap coverage)
+      // Show placeholder immediately, then load Yahoo history while WS connects
       (async()=>{
-        const data=await fetchForexCandles(forexFrom,forexTo,200,tfInterval);
-        if(data?.candles?.length>5){
-          applyCandles(data.candles,data.rate);
-        } else {
-          // Fallback: get real rate + use it as anchor for placeholder candles
-          const rate=await fetchForexRateCached(forexFrom,forexTo,30000);
-          if(rate){
-            // Try one more time with 1m directly in case 5m aggregation failed
-            const raw=await fetchForexCandles(forexFrom,forexTo,300,"1m");
-            if(raw?.candles?.length>5) applyCandles(raw.candles,raw.rate);
-            else applyCandles(genCandles(rate,80,tfInterval),rate);
-          }
-        }
+        const cached=_fxCache[`${forexFrom}_${forexTo}`];
+        const initRate=cached?.rate||cur.basePrice;
+        applyForexCandles(genCandles(initRate,80,tfInterval),initRate);
+        try{
+          const data=await fetchForexCandles(forexFrom,forexTo,200,tfInterval);
+          // Only apply Yahoo data if Deriv WebSocket hasn't already delivered real candles
+          if(data?.candles?.length>5 && wsAlive && !derivCandlesLoaded)
+            applyForexCandles(data.candles,data.rate);
+        }catch{}
       })();
 
-      // Price update every 5s — appends to last real candle
-      // Price update via Yahoo Finance
-      const tfSecs={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}[tfInterval]||300;
-      iv=setInterval(async()=>{
-        let np=await fetchForexRateCached(forexFrom,forexTo,5000);
-        if(!np||isNaN(np)) return;
-        setCandles(prev=>{
-          const updated=[...prev];
-          const last={...updated[updated.length-1]};
-          const nowSec=Math.floor(Date.now()/1000);
-          last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
-          if(nowSec-last.time>=tfSecs){
-            updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
-          } else {
-            updated[updated.length-1]=last;
-          }
-          const closes=updated.map(c=>c.c);
-          const newBB=calcBB(closes);
-          const e9=calcEMA(closes,9),e21=calcEMA(closes,21);
-          const pts=detectPatterns(updated);
-          const cpats=detectCandlePatterns(updated);
-          const st=calcShortTrend(updated,5);
-          const e200=calcEMA(closes,200);
-          const sr=calcSR(updated);
-          setPrice(np); priceRef.current=np;
-          _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
-          setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
-          setBB(newBB); bbRef.current=newBB;
-          setEma9(e9); ema9Ref.current=e9;
-          setEma21(e21); ema21Ref.current=e21;
-          setPatterns([...pts,...cpats]); patternsRef.current=[...pts,...cpats];
-          setShortTrend(st); shortTrendRef.current=st;
-          setEma200(e200); ema200Ref.current=e200;
-          setSrLevels(sr); srRef.current=sr;
-          return updated;
-        });
-      },5000);
+      if(!derivSym){
+        // No Deriv symbol mapping — fallback to polling
+        const tfSecs=granularity;
+        iv=setInterval(async()=>{
+          const np=await fetchForexRateCached(forexFrom,forexTo,2000);
+          if(!np||isNaN(np)) return;
+          setCandles(prev=>{
+            const updated=[...prev];
+            const last={...updated[updated.length-1]};
+            const nowSec=Math.floor(Date.now()/1000);
+            last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
+            if(nowSec-last.time>=tfSecs) updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
+            else updated[updated.length-1]=last;
+            setPrice(np); priceRef.current=np;
+            _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+            return updated;
+          });
+        },2000);
+        return;
+      }
+
+      // ── Deriv WebSocket connection
+      const connectWs=()=>{
+        if(!wsAlive) return;
+        derivWs=new WebSocket("wss://ws.derivws.com/websockets/v3?app_id=1089");
+
+        derivWs.onopen=()=>{
+          if(!wsAlive){derivWs.close();return;}
+          // Subscribe to candle history + live stream
+          derivWs.send(JSON.stringify({
+            ticks_history: derivSym,
+            count: 200,
+            style: "candles",
+            granularity,
+            end: "latest",
+            subscribe: 1,
+          }));
+        };
+
+        derivWs.onmessage=(evt)=>{
+          if(!wsAlive) return;
+          try{
+            const msg=JSON.parse(evt.data);
+
+            if(msg.msg_type==="candles"){
+              // Full history from Deriv — replace chart data and lock out Yahoo
+              derivCandlesLoaded=true;
+              const newCandles=(msg.candles||[]).map(c=>({
+                time: parseInt(c.epoch),
+                o: parseFloat(c.open),
+                h: parseFloat(c.high),
+                l: parseFloat(c.low),
+                c: parseFloat(c.close),
+                v: 0,
+              })).filter(c=>c.o&&c.h&&c.l&&c.c);
+              if(newCandles.length>5) applyForexCandles(newCandles, newCandles.at(-1)?.c);
+
+            } else if(msg.msg_type==="ohlc"){
+              // Live tick — update current candle
+              const ohlc=msg.ohlc;
+              const np=parseFloat(ohlc.close);
+              if(!np||isNaN(np)) return;
+              const candleTime=parseInt(ohlc.open_time);
+              setPrice(np); priceRef.current=np;
+              _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+              setPriceVerified(true); setForexLive(true);
+              setCandles(prev=>{
+                if(!prev.length) return prev;
+                const updated=[...prev];
+                const lastIdx=updated.length-1;
+                const last={...updated[lastIdx]};
+                if(last.time===candleTime){
+                  // Update existing current candle
+                  last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
+                  updated[lastIdx]=last;
+                } else if(candleTime>last.time){
+                  // New candle started
+                  updated.push({time:candleTime,o:parseFloat(ohlc.open),h:parseFloat(ohlc.high),l:parseFloat(ohlc.low),c:np,v:0});
+                }
+                return updated;
+              });
+
+            } else if(msg.msg_type==="error"){
+              console.warn("[Deriv WS forex]",msg.error?.message||msg.error);
+            }
+          }catch{}
+        };
+
+        derivWs.onerror=()=>{};
+        derivWs.onclose=()=>{
+          // Auto-reconnect after 3s if still active
+          if(wsAlive) setTimeout(connectWs, 3000);
+        };
+      };
+
+      connectWs();
     }
 
-    return()=>clearInterval(iv);
+    return()=>{
+      wsAlive=false;
+      clearInterval(iv);
+      if(derivWs){try{derivWs.close();}catch{} derivWs=null;}
+    };
   },[symbol,chartInterval]);
 
   /* ── Binance klines for indicators ──────────────────────────────────── */
@@ -1480,7 +1616,7 @@ export default function TradingBot(){
           if(!p||isNaN(p))continue;
           if(!bgPricesRef.current[sym])bgPricesRef.current[sym]=[];
           bgPricesRef.current[sym].push(p);
-          if(bgPricesRef.current[sym].length>60)bgPricesRef.current[sym].shift();
+          if(bgPricesRef.current[sym].length>120)bgPricesRef.current[sym].shift();
           const closes=bgPricesRef.current[sym];
           const k9=2/10,k21=2/22;
           let e9=closes[0],e21=closes[0];
@@ -1489,13 +1625,36 @@ export default function TradingBot(){
           const signal=e9>e21&&rsi<70?"BUY":e9<e21&&rsi>30?"SELL":"HOLD";
           const color=signal==="BUY"?T.green:signal==="SELL"?T.red:T.muted;
           const pct=closes.length>1?(closes.at(-1)-closes[0])/closes[0]*100:0;
-          results[sym]={price:p,signal,color,rsi:Math.round(rsi),pct,samples:closes.length};
+
+          // ATR estimate from recent price range
+          const recent=closes.slice(-40);
+          const maxP=Math.max(...recent);
+          const minP=Math.min(...recent);
+          const range=maxP-minP||p*0.001;
+          const atrEst=range*0.55;
+          const prec=cfg.precision;
+          const isBuy=signal==="BUY";
+          const target=isBuy?p+atrEst*2:p-atrEst*2;
+          const stop=isBuy?p-atrEst*1.3:p+atrEst*1.3;
+          // pip size: JPY pairs use 0.01, rest use 0.0001
+          const pipSz=prec<=3?0.01:0.0001;
+          const targetPips=Math.abs(target-p)/pipSz;
+          const stopPips=Math.abs(stop-p)/pipSz;
+          const rr=stopPips>0?(targetPips/stopPips).toFixed(1):"—";
+          // confidence: EMA spread + RSI divergence from 50
+          const emaSpreadPips=Math.abs(e9-e21)/pipSz;
+          const rsiDiv=isBuy?Math.max(0,60-rsi):Math.max(0,rsi-40);
+          const confidence=signal==="HOLD"?0:Math.min(88,Math.max(45,Math.round(50+emaSpreadPips*0.3+rsiDiv*0.5)));
+
+          results[sym]={price:p,signal,color,rsi:Math.round(rsi),pct,samples:closes.length,
+            target,stop,rr,targetPips:targetPips.toFixed(1),stopPips:stopPips.toFixed(1),
+            confidence,prec,entry:p};
         }catch{}
       }
       setForexWatch(results);
     };
     scan();
-    const iv=setInterval(scan,30000);
+    const iv=setInterval(scan,15000);
     return()=>clearInterval(iv);
   },[]);
 
@@ -2183,243 +2342,146 @@ export default function TradingBot(){
           ))}
         </div>
 
-        {/* ══════════ VISTA: OPERACIONES ══════════ */}
+        {/* ══════════ VISTA: OPERACIONES — SEÑALES FOREX ══════════ */}
         {activeView==="operations"&&(()=>{
-          const formatDuration=(ms)=>{
-            const s=Math.floor(ms/1000);
-            if(s<60)return `${s}s`;
-            const m=Math.floor(s/60);
-            if(m<60)return `${m}m ${s%60}s`;
-            return `${Math.floor(m/60)}h ${m%60}m`;
-          };
-          const allUnrealized=positions.reduce((s,p)=>{
-            const cp=livePrices[p.symbol]||p.entry;
-            return s+posPnL(p,cp,p.allocatedSize||positionSize);
-          },0);
-          const bestPos=positions.length?positions.reduce((b,p)=>{
-            const cp=livePrices[p.symbol]||p.entry;
-            return posPnL(p,cp,p.allocatedSize||positionSize)>posPnL(b,livePrices[b.symbol]||b.entry,b.allocatedSize||positionSize)?p:b;
-          },positions[0]):null;
-          const worstPos=positions.length?positions.reduce((w,p)=>{
-            const cp=livePrices[p.symbol]||p.entry;
-            return posPnL(p,cp,p.allocatedSize||positionSize)<posPnL(w,livePrices[w.symbol]||w.entry,w.allocatedSize||positionSize)?p:w;
-          },positions[0]):null;
-          // Group by symbol for summary
-          const bySymbol={};
-          positions.forEach(p=>{
-            const sym=p.symbol||symbol;
-            if(!bySymbol[sym])bySymbol[sym]={positions:[],pnl:0};
-            const cp=livePrices[sym]||p.entry;
-            bySymbol[sym].positions.push(p);
-            bySymbol[sym].pnl+=posPnL(p,cp,p.allocatedSize||positionSize);
-          });
+          const FOREX_PAIRS=["EUR/USD","GBP/USD","AUD/USD","NZD/USD","USD/JPY","USD/CHF","USD/CAD","EUR/GBP"];
+          const uniquePairs=[...new Set(FOREX_PAIRS)];
+          const buySignals=uniquePairs.filter(s=>forexWatch[s]?.signal==="BUY");
+          const sellSignals=uniquePairs.filter(s=>forexWatch[s]?.signal==="SELL");
           return(
             <div style={{animation:"fadeUp .3s ease"}}>
-              {/* Summary banner */}
-              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:7,marginBottom:12}}>
-                {[
-                  {l:"BALANCE TOTAL",   v:`$${balance.toFixed(2)}`,                 c:T.accent},
-                  {l:"NO REALIZ GLOBAL",v:fUSD(allUnrealized),                       c:allUnrealized>=0?T.green:T.red},
-                  {l:"P&L ACUMULADO",  v:fUSD(totalProfit),                         c:totalProfit>=0?T.green:T.red},
-                  {l:"POS. ABIERTAS",  v:`${positions.length}`,                     c:positions.length?T.yellow:T.muted},
-                  {l:"WIN RATE GLOBAL", v:`${winRate}%`,                            c:winRate>=50?T.green:T.red},
-                ].map(({l,v,c})=>(
-                  <div key={l} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:7,padding:"10px 12px",textAlign:"center"}}>
-                    <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:3}}>{l}</div>
-                    <div className="mono" style={{fontSize:15,fontWeight:700,color:c}}>{v}</div>
+              {/* Header */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                <div>
+                  <div style={{fontSize:18,fontWeight:700,color:T.accent,letterSpacing:1}}>SEÑALES DE APERTURA</div>
+                  <div style={{fontSize:9,color:T.muted,marginTop:2}}>
+                    Todos los pares forex · actualiza cada 15s · señales EMA+RSI · haz clic en un par para ver su gráfica
                   </div>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <div style={{background:`${T.green}18`,border:`1px solid ${T.green}40`,borderRadius:6,padding:"5px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:2}}>COMPRA</div>
+                    <div style={{fontSize:18,fontWeight:700,color:T.green}}>{buySignals.length}</div>
+                  </div>
+                  <div style={{background:`${T.red}18`,border:`1px solid ${T.red}40`,borderRadius:6,padding:"5px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:2}}>VENTA</div>
+                    <div style={{fontSize:18,fontWeight:700,color:T.red}}>{sellSignals.length}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Table header */}
+              <div style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+                gap:6,padding:"5px 10px",marginBottom:4,borderBottom:`1px solid ${T.border}40`}}>
+                {["PAR","SEÑAL","CONF.","ENTRADA","OBJETIVO","STOP LOSS","PIPS","R/R"].map(h=>(
+                  <div key={h} style={{fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>{h}</div>
                 ))}
               </div>
 
-              {/* Best / Worst */}
-              {positions.length>0&&(
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:12}}>
-                  {[{label:"MEJOR POSICIÓN",pos:bestPos,col:T.green},{label:"PEOR POSICIÓN",pos:worstPos,col:T.red}].map(({label,pos,col})=>{
-                    if(!pos)return null;
-                    const cp=livePrices[pos.symbol]||pos.entry;
-                    const pnl=posPnL(pos,cp,positionSize);
-                    const prec=ASSETS[pos.symbol]?.precision||5;
-                    return(
-                      <div key={label} style={{background:T.card,border:`1px solid ${col}30`,borderRadius:7,padding:"10px 14px",
-                        display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                        <div>
-                          <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:3}}>{label}</div>
-                          <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                            <span style={{fontSize:10,fontWeight:700,color:T.accent,background:`${T.accent}15`,padding:"2px 8px",borderRadius:4}}>{pos.symbol}</span>
-                            <span style={{fontSize:10,color:pos.type==="BUY"?T.green:T.red,fontWeight:700}}>{pos.type}</span>
-                            <span className="mono" style={{fontSize:10,color:T.muted}}>@ {fP(pos.entry,prec)}</span>
-                          </div>
-                        </div>
-                        <div className="mono" style={{fontSize:20,fontWeight:700,color:col}}>{fUSD(pnl)}</div>
+              {/* Rows */}
+              {uniquePairs.map(sym=>{
+                const d=forexWatch[sym];
+                if(!d)return(
+                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+                    gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
+                    border:`1px solid ${T.border}`,alignItems:"center"}}>
+                    <span style={{fontSize:11,fontWeight:700,color:T.accent}}>{sym}</span>
+                    <span style={{fontSize:9,color:T.muted}}>Cargando...</span>
+                    <span/><span/><span/><span/><span/><span/>
+                  </div>
+                );
+                const isBuy=d.signal==="BUY";
+                const isHold=d.signal==="HOLD";
+                const col=d.color;
+                const prec=d.prec||5;
+                const confBar=Math.min(100,d.confidence||0);
+                return(
+                  <div key={sym} className="fade-up"
+                    onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
+                    style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+                      gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
+                      background:isHold?T.card:`${col}08`,
+                      border:`1px solid ${isHold?T.border:col+"35"}`,
+                      alignItems:"center",transition:"filter .15s"}}
+                  >
+                    {/* Par */}
+                    <div>
+                      <div style={{fontSize:12,fontWeight:700,color:T.accent}}>{sym}</div>
+                      <div style={{fontSize:7,color:T.muted,marginTop:1}}>RSI {d.rsi} · {d.samples}pts</div>
+                    </div>
+
+                    {/* Señal */}
+                    <div style={{background:`${col}20`,border:`1px solid ${col}50`,borderRadius:5,
+                      padding:"4px 8px",textAlign:"center"}}>
+                      <div style={{fontSize:11,fontWeight:700,color:col}}>
+                        {isHold?"— HOLD":isBuy?"▲ BUY":"▼ SELL"}
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              {/* By symbol summary */}
-              {Object.keys(bySymbol).length>0&&(
-                <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:12}}>
-                  <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:8}}>POSICIONES POR ACTIVO</div>
-                  <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                    {Object.entries(bySymbol).map(([sym,data])=>{
-                      const col=data.pnl>=0?T.green:T.red;
-                      return(
-                        <div key={sym} onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
-                          style={{background:`${col}0a`,border:`1px solid ${col}30`,borderRadius:6,
-                            padding:"7px 12px",cursor:"pointer",minWidth:110,textAlign:"center"}}>
-                          <div style={{fontSize:9,fontWeight:700,color:T.accent,marginBottom:3}}>{sym}</div>
-                          <div style={{fontSize:8,color:T.muted,marginBottom:2}}>{data.positions.length} pos</div>
-                          <div className="mono" style={{fontSize:12,fontWeight:700,color:col}}>{fUSD(data.pnl)}</div>
-                          <div style={{fontSize:7,color:T.accent,marginTop:3}}>→ Ver gráfica</div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* All open positions table */}
-              <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:12}}>
-                <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:10}}>
-                  TODAS LAS POSICIONES ABIERTAS {positions.length===0&&"— Ninguna activa"}
-                </div>
-                {positions.length===0?(
-                  <div style={{fontSize:11,color:T.muted,fontStyle:"italic",padding:"20px",textAlign:"center"}}>
-                    No hay posiciones abiertas. Activa el modo AUTO o analiza un par para comenzar.
-                  </div>
-                ):(
-                  <>
-                    {/* Table header */}
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 60px 100px 100px 80px 120px 80px 40px",
-                      gap:6,padding:"4px 8px",marginBottom:4}}>
-                      {["ACTIVO","TIPO","ENTRADA","ACTUAL","PnL","PROGRESO TP","DURACIÓN",""].map(h=>(
-                        <div key={h} style={{fontSize:7,color:T.muted,letterSpacing:1}}>{h}</div>
-                      ))}
                     </div>
-                    {positions.map(pos=>{
-                      const sym=pos.symbol||symbol;
-                      const cfg=ASSETS[sym];
-                      const prec=cfg?.precision||5;
-                      const cp=livePrices[sym]||pos.entry;
-                      const ps=pos.allocatedSize||positionSize;
-                      const pnl=posPnL(pos,cp,ps);
-                      const pct=Math.min(100,Math.max(0,(pnl/tpTarget)*100));
-                      const pctChange=(cp-pos.entry)/pos.entry*100;
-                      const col=pnl>=0?T.green:T.red;
-                      const isBuy=pos.type==="BUY";
-                      const dur=pos.openTime?formatDuration(Date.now()-pos.openTime):"—";
-                      const units2=ps*100000;
-                      let tpD2,slD2;
-                      if(cfg?.type==="forex"&&sym.startsWith("USD/")){
-                        tpD2=tpTarget*pos.entry/units2; slD2=slTarget*pos.entry/units2;
-                      } else if(cfg?.type==="forex"){
-                        tpD2=tpTarget/units2; slD2=slTarget/units2;
-                      } else {
-                        tpD2=(tpTarget/(ps*1000))*pos.entry; slD2=(slTarget/(ps*1000))*pos.entry;
-                      }
-                      const tp=isBuy?pos.entry+tpD2:pos.entry-tpD2;
-                      const sl=isBuy?pos.entry-slD2:pos.entry+slD2;
-                      return(
-                        <div key={pos.id} className="fade-up" style={{
-                          display:"grid",gridTemplateColumns:"1fr 60px 100px 100px 80px 120px 80px 40px",
-                          gap:6,padding:"8px",marginBottom:4,borderRadius:6,
-                          background:`${col}06`,border:`1px solid ${col}20`,alignItems:"center",
-                        }}>
-                          {/* Activo */}
-                          <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                            <span style={{fontSize:10,fontWeight:700,color:T.accent,
-                              background:`${T.accent}15`,padding:"2px 7px",borderRadius:4}}>{sym}</span>
-                            {cfg?.type==="forex"&&<span style={{fontSize:7,color:T.muted}}>FOREX</span>}
-                          </div>
-                          {/* Tipo */}
-                          <span style={{fontSize:10,fontWeight:700,color:isBuy?T.green:T.red,
-                            background:`${isBuy?T.green:T.red}15`,padding:"2px 6px",borderRadius:3,textAlign:"center"}}>
-                            {isBuy?"▲ BUY":"▼ SELL"}
-                          </span>
-                          {/* Entrada */}
-                          <div>
-                            <div className="mono" style={{fontSize:10,color:T.muted}}>{fP(pos.entry,prec)}</div>
-                            <div style={{fontSize:7,color:T.muted}}>TP:{fP(tp,prec)}</div>
-                            <div style={{fontSize:7,color:T.muted}}>SL:{fP(sl,prec)}</div>
-                          </div>
-                          {/* Actual */}
-                          <div>
-                            <div className="mono" style={{fontSize:10,color:T.accent,fontWeight:700}}>{fP(cp,prec)}</div>
-                            <div style={{fontSize:7,color:pctChange>=0?T.green:T.red}}>{fPct(pctChange)}</div>
-                          </div>
-                          {/* PnL */}
-                          <span className="mono" style={{fontSize:13,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
-                          {/* Progress bar */}
-                          <div>
-                            <div style={{height:4,background:T.dim,borderRadius:2,overflow:"hidden",marginBottom:2}}>
-                              <div style={{height:"100%",width:`${pct}%`,background:col,borderRadius:2,transition:"width .4s"}}/>
-                            </div>
-                            <div style={{fontSize:7,display:"flex",justifyContent:"space-between"}}>
-                              <span style={{color:T.red}}>SL -{fUSD(slTarget,false)}</span>
-                              <span style={{color:col}}>{pct.toFixed(0)}%</span>
-                              <span style={{color:T.green}}>TP +{fUSD(tpTarget,false)}</span>
-                            </div>
-                          </div>
-                          {/* Duración */}
-                          <span className="mono" style={{fontSize:9,color:T.muted,textAlign:"center"}}>{dur}</span>
-                          {/* Cerrar */}
-                          <button onClick={()=>{
-                            closePosition(pos.id,cp,"MANUAL");
-                          }} style={{background:"transparent",border:`1px solid ${T.muted}40`,
-                            color:T.muted,borderRadius:4,padding:"3px 7px",cursor:"pointer",fontSize:10}}>✕</button>
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
-              </div>
 
-              {/* Historial de trades cerrados */}
-              <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:12}}>
-                <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:8}}>
-                  HISTORIAL COMPLETO · {trades.length} operaciones cerradas
-                </div>
-                {trades.length===0?(
-                  <div style={{fontSize:11,color:T.muted,fontStyle:"italic",padding:"10px"}}>Sin historial aún.</div>
-                ):(
-                  <>
-                    {/* Resumen rápido */}
-                    <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
-                      {Object.keys(ASSETS).map(sym=>{
-                        const symTrades=trades.filter(t=>t.symbol===sym);
-                        if(!symTrades.length)return null;
-                        const symPnl=symTrades.reduce((s,t)=>s+t.pnl,0);
-                        const symWR=Math.round(symTrades.filter(t=>t.pnl>0).length/symTrades.length*100);
-                        return(
-                          <div key={sym} style={{background:T.dim,borderRadius:5,padding:"5px 10px",minWidth:90,textAlign:"center"}}>
-                            <div style={{fontSize:8,fontWeight:700,color:T.accent}}>{sym}</div>
-                            <div className="mono" style={{fontSize:10,color:symPnl>=0?T.green:T.red}}>{fUSD(symPnl)}</div>
-                            <div style={{fontSize:7,color:T.muted}}>WR {symWR}% ({symTrades.length})</div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {/* Trade list */}
-                    {trades.slice(0,30).map((t,i)=>{
-                      const prec=ASSETS[t.symbol]?.precision||5;
-                      const reasonCol=t.reason==="TP"?T.green:t.reason==="SL"?T.red:T.muted;
-                      return(
-                        <div key={i} style={{display:"grid",gridTemplateColumns:"80px 50px 28px 80px 80px 50px 1fr",
-                          gap:6,padding:"5px 6px",borderBottom:`1px solid ${T.border}20`,alignItems:"center",fontSize:9}}>
-                          <span style={{color:T.accent,fontWeight:700}}>{t.symbol||"—"}</span>
-                          <span style={{color:t.type==="BUY"?T.green:T.red,fontWeight:700}}>{t.type}</span>
-                          <span style={{fontSize:7,color:reasonCol,background:`${reasonCol}15`,
-                            padding:"1px 4px",borderRadius:3,textAlign:"center"}}>{t.reason}</span>
-                          <span className="mono" style={{color:T.muted,fontSize:8}}>{fP(t.entry,prec)}</span>
-                          <span className="mono" style={{color:T.muted,fontSize:8}}>{fP(t.exit,prec)}</span>
-                          <span className="mono" style={{color:t.pnl>=0?T.green:T.red,fontWeight:700}}>{fUSD(t.pnl)}</span>
-                          <span style={{color:T.muted,fontSize:7}}>{t.time}</span>
+                    {/* Confianza */}
+                    <div>
+                      <div className="mono" style={{fontSize:12,fontWeight:700,color:isHold?T.muted:col}}>
+                        {isHold?"—":`${d.confidence}%`}
+                      </div>
+                      {!isHold&&(
+                        <div style={{height:3,background:T.dim,borderRadius:2,marginTop:3,overflow:"hidden"}}>
+                          <div style={{height:"100%",width:`${confBar}%`,background:col,borderRadius:2}}/>
                         </div>
-                      );
-                    })}
-                  </>
-                )}
+                      )}
+                    </div>
+
+                    {/* Entrada */}
+                    <div className="mono" style={{fontSize:11,fontWeight:700,color:T.text}}>
+                      {d.price.toFixed(prec)}
+                    </div>
+
+                    {/* Objetivo */}
+                    <div>
+                      {isHold?(
+                        <span className="mono" style={{fontSize:10,color:T.muted}}>—</span>
+                      ):(
+                        <>
+                          <div className="mono" style={{fontSize:11,fontWeight:700,color:T.green}}>
+                            {d.target.toFixed(prec)}
+                          </div>
+                          <div style={{fontSize:7,color:T.green,marginTop:1}}>🎯 Take Profit</div>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Stop Loss */}
+                    <div>
+                      {isHold?(
+                        <span className="mono" style={{fontSize:10,color:T.muted}}>—</span>
+                      ):(
+                        <>
+                          <div className="mono" style={{fontSize:11,fontWeight:700,color:T.red}}>
+                            {d.stop.toFixed(prec)}
+                          </div>
+                          <div style={{fontSize:7,color:T.red,marginTop:1}}>🛑 Stop Loss</div>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Pips al objetivo */}
+                    <div className="mono" style={{fontSize:11,fontWeight:700,color:isHold?T.muted:T.yellow}}>
+                      {isHold?"—":`${d.targetPips}p`}
+                    </div>
+
+                    {/* R/R */}
+                    <div className="mono" style={{fontSize:11,fontWeight:700,
+                      color:isHold?T.muted:parseFloat(d.rr)>=1.5?T.green:T.yellow}}>
+                      {isHold?"—":`1:${d.rr}`}
+                    </div>
+                  </div>
+                );
+              })}
+
+              <div style={{marginTop:12,padding:"8px 12px",background:T.card,borderRadius:6,
+                border:`1px solid ${T.border}`,fontSize:9,color:T.muted,lineHeight:1.6}}>
+                <strong style={{color:T.accent}}>Cómo usar estas señales:</strong> Haz clic en cualquier par para abrir su gráfica con la proyección detallada.
+                Los niveles de Objetivo y Stop se calculan con la volatilidad reciente (ATR estimado).
+                Señales generadas con EMA9/EMA21 + RSI(14). Actualiza cada 15s.
               </div>
             </div>
           );
