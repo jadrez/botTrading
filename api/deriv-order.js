@@ -46,7 +46,7 @@ export default async function handler(req, res) {
       if (!derivSymbol) return res.status(400).json({ error: `Symbol not supported: ${symbol}` });
 
       const result = await derivWS(token, {
-        buy: 1,
+        buy: "1",
         price: stake,
         parameters: {
           contract_type: side === "BUY" ? "MULTUP" : "MULTDOWN",
