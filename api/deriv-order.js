@@ -11,7 +11,8 @@ const SYMBOL_MAP = {
 // Send one request over a fresh WebSocket connection (authorize → request → result → close)
 function derivWS(token, payload, appId = "1089") {
   return new Promise((resolve, reject) => {
-    const url = `wss://ws.binaryws.com/websockets/v3?app_id=${appId}`;
+    // Use new Deriv WS endpoint (pat_xxx tokens) — legacy ws.binaryws.com uses a1-xxx tokens
+    const url = `wss://ws.derivws.com/websockets/v3?app_id=${appId}`;
     console.log("[deriv-order] connecting to", url);
     const ws = new WebSocket(url);
     const timer = setTimeout(() => {
