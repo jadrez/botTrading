@@ -1396,21 +1396,10 @@ export default function TradingBot(){
       const derivSym=DERIV_SYMBOLS[symbol];
       const granularity={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}[tfInterval]||300;
 
-      // Flag: once Deriv delivers candles, don't let Yahoo overwrite them
-      let derivCandlesLoaded=false;
-
-      // Show placeholder immediately, then load Yahoo history while WS connects
-      (async()=>{
-        const cached=_fxCache[`${forexFrom}_${forexTo}`];
-        const initRate=cached?.rate||cur.basePrice;
-        applyForexCandles(genCandles(initRate,80,tfInterval),initRate);
-        try{
-          const data=await fetchForexCandles(forexFrom,forexTo,200,tfInterval);
-          // Only apply Yahoo data if Deriv WebSocket hasn't already delivered real candles
-          if(data?.candles?.length>5 && wsAlive && !derivCandlesLoaded)
-            applyForexCandles(data.candles,data.rate);
-        }catch{}
-      })();
+      // Show placeholder immediately — Deriv WebSocket will replace within ~2s
+      const cached=_fxCache[`${forexFrom}_${forexTo}`];
+      const initRate=cached?.rate||cur.basePrice;
+      applyForexCandles(genCandles(initRate,80,tfInterval),initRate);
 
       if(!derivSym){
         // No Deriv symbol mapping — fallback to polling
@@ -1457,8 +1446,7 @@ export default function TradingBot(){
             const msg=JSON.parse(evt.data);
 
             if(msg.msg_type==="candles"){
-              // Full history from Deriv — replace chart data and lock out Yahoo
-              derivCandlesLoaded=true;
+              // Full history from Deriv — replace placeholder candles
               const newCandles=(msg.candles||[]).map(c=>({
                 time: parseInt(c.epoch),
                 o: parseFloat(c.open),
