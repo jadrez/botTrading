@@ -914,6 +914,15 @@ async function fetchForexCandles(from,to,limit=200,interval="1m"){
 }
 
 /* ─── OANDA HELPERS ─────────────────────────────────────────────────────── */
+async function fetchOandaPrice(symbol){
+  try{
+    const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"price",symbol})});
+    const d=await r.json();
+    return(typeof d.mid==="number"&&!isNaN(d.mid))?d.mid:null;
+  }catch{return null;}
+}
+
 async function openOandaOrder(symbol,side,lots){
   try{
     const r=await fetch("/api/oanda-order",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -1220,7 +1229,7 @@ export default function TradingBot(){
       fetchPrice();
       iv=setInterval(fetchPrice,3000);
     } else {
-      // ── FOREX: load real 1-min candles from Yahoo Finance, then update every 15s
+      // ── FOREX: load real 1-min candles from Yahoo Finance, then update every 5s
       const {forexFrom,forexTo}=cur;
 
       const applyCandles=(newCandles,rate)=>{
@@ -1259,7 +1268,7 @@ export default function TradingBot(){
           applyCandles(data.candles,data.rate);
         } else {
           // Fallback: get real rate + use it as anchor for placeholder candles
-          const rate=await fetchForexRateCached(forexFrom,forexTo,300000);
+          const rate=await fetchForexRateCached(forexFrom,forexTo,30000);
           if(rate){
             // Try one more time with 1m directly in case 5m aggregation failed
             const raw=await fetchForexCandles(forexFrom,forexTo,300,"1m");
@@ -1269,10 +1278,12 @@ export default function TradingBot(){
         }
       })();
 
-      // Price update every 15s — appends to last real candle
+      // Price update every 5s — appends to last real candle
+      // Uses OANDA live price if enabled (real-time bid/ask), else Yahoo Finance
       const tfSecs={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}[tfInterval]||300;
       iv=setInterval(async()=>{
-        const np=await fetchForexRateCached(forexFrom,forexTo,15000);
+        let np = oandaEnabledRef.current ? await fetchOandaPrice(symbol) : null;
+        if(!np) np=await fetchForexRateCached(forexFrom,forexTo,5000);
         if(!np||isNaN(np)) return;
         setCandles(prev=>{
           const updated=[...prev];
@@ -1304,7 +1315,7 @@ export default function TradingBot(){
           setSrLevels(sr); srRef.current=sr;
           return updated;
         });
-      },15000);
+      },5000);
     }
 
     return()=>clearInterval(iv);

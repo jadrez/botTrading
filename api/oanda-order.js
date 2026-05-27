@@ -82,6 +82,23 @@ export default async function handler(req, res) {
       });
     }
 
+    // ── LIVE PRICE — real-time bid/ask mid for a symbol
+    if (action === "price") {
+      const instrument = INSTRUMENT_MAP[symbol];
+      if (!instrument) return res.status(400).json({ error: `Símbolo no soportado: ${symbol}` });
+
+      const r = await fetch(`${base}/v3/accounts/${accountId}/pricing?instruments=${instrument}`, { headers });
+      const d = await r.json();
+      if (!r.ok) return res.status(r.status).json({ error: d.errorMessage || "OANDA error" });
+
+      const p = d.prices?.[0];
+      if (!p || !p.tradeable) return res.status(400).json({ error: "Precio no disponible" });
+
+      const ask = parseFloat(p.asks?.[0]?.price || p.closeoutAsk);
+      const bid = parseFloat(p.bids?.[0]?.price || p.closeoutBid);
+      return res.status(200).json({ ask, bid, mid: (ask + bid) / 2 });
+    }
+
     // ── BALANCE / account summary
     if (action === "balance") {
       const r = await fetch(`${base}/v3/accounts/${accountId}/summary`, { headers });
