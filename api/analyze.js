@@ -33,6 +33,7 @@ export default async function handler(req, res) {
     patterns = [],
     correlations = [],
     positions, balance, news, reason,
+    activePrediction = null,
     positionSize = DEFAULT_STAKE,
     tpTarget = DEFAULT_TP_USD,
     slTarget = DEFAULT_SL_USD,
@@ -98,6 +99,11 @@ export default async function handler(req, res) {
     ? `Nota: 1 pérdida reciente. Sé más estricto con la confluencia.`
     : "";
 
+  // Active prediction context
+  const activePredCtx = activePrediction
+    ? `Señal activa: ${activePrediction.signal} desde hace ~${Math.floor((Date.now()-(activePrediction.timestamp||Date.now()))/60000)}min, ${activePrediction.confirmations||1} confirmación(es), ${activePrediction.invalidations||0} invalidación(es). Entrada señalada: ${activePrediction.entryPrice}. ¿Confirmas mantener esta señal o hay evidencia clara de cambio?`
+    : "Sin señal activa. Evalúa si hay condición de inicio válida.";
+
   const prompt = `Eres trader experto en ${symbol}. Analiza y decide si abrir UNA posición.
 
 ═══ INDICADORES ═══
@@ -123,6 +129,9 @@ ${nc}
 ═══ CORRELACIÓN FOREX ═══
 ${corrStr}
 ${corrSummary}
+
+═══ PREDICCIÓN ACTIVA ═══
+${activePredCtx}
 
 ═══ PORTAFOLIO ═══
 Balance: $${balance?.toFixed(0)} | Posiciones: ${pc} | Slots: ${MAX_POSITIONS-positions.length}

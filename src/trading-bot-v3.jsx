@@ -60,7 +60,7 @@ const ASSETS = {
 const MAX_POSITIONS         = 3;
 const DEFAULT_STAKE         = 10.00;  // USD stake per trade (Deriv multiplier contracts)
 const DEFAULT_MULTIPLIER    = 100;    // leverage multiplier
-const ANALYSIS_INTERVAL_MS  = 90000;
+const ANALYSIS_INTERVAL_MS  = 300000;
 
 // Deriv WebSocket symbol mapping
 const DERIV_SYMBOLS = {
@@ -1083,11 +1083,11 @@ async function getDerivBalance(){
   }catch{return null;}
 }
 
-async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize,tpTarget,slTarget}){
+async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize,tpTarget,slTarget,activePrediction}){
   const r=await fetch("/api/analyze",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize,tpTarget,slTarget}),
+    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize,tpTarget,slTarget,activePrediction}),
   });
   if(!r.ok)return{signal:"HOLD",confidence:40,reasoning:"Error al conectar con el servidor.",news_impact:"NEUTRAL",key_factor:"Error conexión",risk:"ALTO",should_open:false};
   return r.json();
@@ -1118,6 +1118,8 @@ export default function TradingBot(){
   const [news,setNews]           = useState([]);
   const [newsData,setNewsData]   = useState(null);
   const [aiResult,setAiResult]   = useState(null);
+  const [activePrediction,setActivePrediction] = useState(null);
+  const activePredRef = useRef(null);
   const [autoMode,setAutoMode]   = useState(false);
   const [analyzing,setAnalyzing] = useState(false);
   const [loadingNews,setLoadingNews] = useState(false);
@@ -1177,6 +1179,7 @@ export default function TradingBot(){
   const trend1hRef = useRef(0);
   const patternsRef= useRef([]);
   const newsRef   = useRef([]);
+  const candlesRef = useRef([]);
   const balanceRef     = useRef(10000);
   const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_stake")||"10.00"));
   const multiplierRef  = useRef(parseInt(localStorage.getItem("bot_mult")||"100"));
@@ -1211,6 +1214,7 @@ export default function TradingBot(){
   useEffect(()=>{srRef.current=srLevels;},[srLevels]);
   useEffect(()=>{chartIntervalRef.current=chartInterval;},[chartInterval]);
   useEffect(()=>{corrSignalsRef.current=corrSignals;},[corrSignals]);
+  useEffect(()=>{ candlesRef.current=candles; },[candles]);
   // Keep livePrices in sync with the active symbol's real-time price
   useEffect(()=>{
     setLivePrices(p=>({...p,[symbol]:price}));
@@ -1839,10 +1843,76 @@ export default function TradingBot(){
         news:newsRef.current,    reason,
         positionSize:positionSizeRef.current,
         tpTarget:tpTargetRef.current, slTarget:slTargetRef.current,
+        activePrediction:activePredRef.current,
       });
       setAiResult(result);
       addLog(`📡 ${result.signal} (${result.confidence}%) — ${result.key_factor}`,
         result.signal==="BUY"?"buy":result.signal==="SELL"?"sell":"info");
+
+      // ── Medium-term prediction persistence ──────────────────────────────
+      const curr=activePredRef.current;
+      const validSignal=result.signal!=="HOLD"&&result.should_open&&result.confidence>=minConf;
+      const sameDir=curr&&curr.signal===result.signal;
+      const oppositeDir=curr&&result.signal!=="HOLD"&&curr.signal!==result.signal;
+      const cp2=priceRef.current;
+      const prec2=ASSETS[symbolRef.current]?.precision||5;
+      const rc=candlesRef.current;
+      const recentC=rc.slice(-14);
+      const atrEst=recentC.length>0?recentC.reduce((s,c)=>s+(c.h-c.l),0)/recentC.length:cp2*0.001;
+
+      if(validSignal&&!curr){
+        // New prediction
+        const ib=result.signal==="BUY";
+        const pred={
+          signal:result.signal,confidence:result.confidence,
+          entryPrice:cp2,
+          targetPrice:ib?cp2+atrEst*2.5:cp2-atrEst*2.5,
+          stopPrice:ib?cp2-atrEst*1.5:cp2+atrEst*1.5,
+          timestamp:Date.now(),confirmations:1,invalidations:0,holdCount:0,
+          reasoning:result.reasoning,symbol:symbolRef.current,key_factor:result.key_factor,
+        };
+        setActivePrediction(pred); activePredRef.current=pred;
+        addLog(`📊 PREDICCIÓN NUEVA: ${result.signal} ${symbolRef.current} @ ${fP(cp2,prec2)} — ${result.key_factor}`,"info");
+      } else if(curr&&sameDir){
+        // Confirm existing prediction
+        const updated={...curr,
+          confidence:Math.round(Math.min(99,curr.confidence*0.6+result.confidence*0.4)),
+          confirmations:curr.confirmations+1,holdCount:0,
+          reasoning:result.reasoning,key_factor:result.key_factor,
+        };
+        setActivePrediction(updated); activePredRef.current=updated;
+        addLog(`✅ CONFIRMACIÓN ${updated.confirmations}×: ${curr.signal} ${curr.symbol} — tendencia activa`,"info");
+      } else if(curr&&oppositeDir&&result.confidence>=70){
+        // Counter-signal
+        const invCount=curr.invalidations+1;
+        if(invCount>=2){
+          const ib2=result.signal==="BUY";
+          const newPred={
+            signal:result.signal,confidence:result.confidence,
+            entryPrice:cp2,
+            targetPrice:ib2?cp2+atrEst*2.5:cp2-atrEst*2.5,
+            stopPrice:ib2?cp2-atrEst*1.5:cp2+atrEst*1.5,
+            timestamp:Date.now(),confirmations:1,invalidations:0,holdCount:0,
+            reasoning:result.reasoning,symbol:symbolRef.current,key_factor:result.key_factor,
+          };
+          setActivePrediction(newPred); activePredRef.current=newPred;
+          addLog(`🔄 CAMBIO DE TENDENCIA: ${curr.signal}→${result.signal} ${symbolRef.current} (${invCount} invalidaciones)`,result.signal==="BUY"?"buy":"sell");
+        } else {
+          const upd={...curr,invalidations:invCount};
+          setActivePrediction(upd); activePredRef.current=upd;
+          addLog(`⚠️ SEÑAL CONTRARIA (${invCount}/2): ${result.signal} conf${result.confidence}% — manteniendo ${curr.signal}`,"info");
+        }
+      } else if(curr&&result.signal==="HOLD"){
+        const hc=(curr.holdCount||0)+1;
+        if(hc>=6){
+          addLog(`⏰ PREDICCIÓN ${curr.signal} expirada — 6 ciclos sin confirmar (~30min)`,"info");
+          setActivePrediction(null); activePredRef.current=null;
+        } else {
+          const upd={...curr,holdCount:hc};
+          setActivePrediction(upd); activePredRef.current=upd;
+        }
+      }
+      // ────────────────────────────────────────────────────────────────────
 
       if(autoRef.current){
         const activeSym=symbolRef.current;
@@ -2693,6 +2763,96 @@ export default function TradingBot(){
             </div>
           </div>
         )}
+
+        {/* ── PREDICCIÓN A MEDIANO PLAZO ── */}
+        {activePrediction&&(()=>{
+          const predCol=activePrediction.signal==="BUY"?T.green:T.red;
+          const elapsedMin=Math.floor((Date.now()-activePrediction.timestamp)/60000);
+          const elapsedStr=elapsedMin<60?`${elapsedMin}m`:`${Math.floor(elapsedMin/60)}h${elapsedMin%60}m`;
+          const status=activePrediction.confirmations>=3?"✅ TENDENCIA CONFIRMADA"
+            :activePrediction.invalidations>0?"⚠️ BAJO PRESIÓN"
+            :"🔄 VALIDANDO...";
+          const statusCol=activePrediction.confirmations>=3?T.green:activePrediction.invalidations>0?T.yellow:T.accent;
+          const prec3=ASSETS[activePrediction.symbol]?.precision||5;
+          const pipSz=prec3<=3?0.01:0.0001;
+          const targetPips=activePrediction.targetPrice?Math.abs(activePrediction.targetPrice-activePrediction.entryPrice)/pipSz:0;
+          const stopPips=activePrediction.stopPrice?Math.abs(activePrediction.stopPrice-activePrediction.entryPrice)/pipSz:0;
+          const rr=stopPips>0?(targetPips/stopPips).toFixed(1):"—";
+          const pctMove=activePrediction.entryPrice?((priceRef.current-activePrediction.entryPrice)/activePrediction.entryPrice*100):0;
+          const pnlDir=activePrediction.signal==="BUY"?pctMove:-pctMove;
+          return(
+            <div className="fade-up" style={{background:T.card,border:`2px solid ${predCol}`,borderRadius:10,padding:"14px 16px",marginBottom:10,position:"relative"}}>
+              {/* Glow strip */}
+              <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:`linear-gradient(90deg,${predCol}00,${predCol},${predCol}00)`,borderRadius:"10px 10px 0 0"}}/>
+              {/* Header */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div>
+                  <div style={{fontSize:8,color:T.muted,letterSpacing:3}}>PREDICCIÓN MEDIANO PLAZO · {activePrediction.symbol}</div>
+                  <div style={{fontSize:9,color:statusCol,marginTop:2,fontWeight:700}}>{status}</div>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <div style={{fontSize:8,color:T.muted,textAlign:"right"}}>
+                    <div>hace {elapsedStr}</div>
+                    <div style={{color:pnlDir>=0?T.green:T.red,fontWeight:700}}>{pnlDir>=0?"+":""}{pctMove.toFixed(3)}% desde entrada</div>
+                  </div>
+                  <button onClick={()=>{setActivePrediction(null);activePredRef.current=null;}}
+                    style={{background:"transparent",border:`1px solid ${T.muted}40`,color:T.muted,
+                      borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10}}>✕</button>
+                </div>
+              </div>
+              {/* Signal + Confidence */}
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+                <div style={{background:`${predCol}18`,border:`2px solid ${predCol}`,borderRadius:8,
+                  padding:"8px 20px",fontSize:28,fontWeight:900,color:predCol,letterSpacing:2}}>
+                  {activePrediction.signal==="BUY"?"▲ BUY":"▼ SELL"}
+                </div>
+                <div>
+                  <div className="mono" style={{fontSize:24,fontWeight:700,color:predCol}}>{activePrediction.confidence}%</div>
+                  <div style={{fontSize:8,color:T.muted}}>confianza actual</div>
+                </div>
+                {/* Confirmations dots */}
+                <div style={{marginLeft:"auto",textAlign:"right"}}>
+                  <div style={{display:"flex",gap:4,justifyContent:"flex-end",marginBottom:4}}>
+                    {Array.from({length:Math.min(activePrediction.confirmations,8)}).map((_,i)=>(
+                      <div key={i} style={{width:9,height:9,borderRadius:"50%",background:predCol,opacity:1-i*0.08}}/>
+                    ))}
+                    {Array.from({length:Math.min(activePrediction.invalidations,3)}).map((_,i)=>(
+                      <div key={i} style={{width:9,height:9,borderRadius:"50%",background:T.red}}/>
+                    ))}
+                  </div>
+                  <div style={{fontSize:8,color:T.muted}}>
+                    <span style={{color:predCol,fontWeight:700}}>{activePrediction.confirmations}✓</span>
+                    {activePrediction.invalidations>0&&<span style={{color:T.red,marginLeft:4}}>{activePrediction.invalidations}✗</span>}
+                    {activePrediction.holdCount>0&&<span style={{color:T.muted,marginLeft:4}}>{activePrediction.holdCount}⏸</span>}
+                  </div>
+                </div>
+              </div>
+              {/* Prices row */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+                {[
+                  {l:"ENTRADA",v:fP(activePrediction.entryPrice,prec3),c:T.accent,s:"precio al señalizar"},
+                  {l:"🎯 OBJETIVO",v:fP(activePrediction.targetPrice,prec3),c:T.green,s:`+${targetPips.toFixed(1)} pips · R:${rr}`},
+                  {l:"🛑 STOP",v:fP(activePrediction.stopPrice,prec3),c:T.red,s:`-${stopPips.toFixed(1)} pips`},
+                ].map(({l,v,c,s})=>(
+                  <div key={l} style={{background:T.dim,borderRadius:6,padding:"8px 10px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>{l}</div>
+                    <div className="mono" style={{fontSize:12,fontWeight:700,color:c}}>{v}</div>
+                    <div style={{fontSize:7,color:c,marginTop:2,opacity:.8}}>{s}</div>
+                  </div>
+                ))}
+              </div>
+              {/* Reasoning */}
+              <div style={{background:T.dim,borderRadius:5,padding:"8px 12px",fontSize:10,color:T.text,lineHeight:1.6,borderLeft:`3px solid ${predCol}`}}>
+                {activePrediction.reasoning}
+              </div>
+              {/* Factor clave */}
+              <div style={{marginTop:6,fontSize:9,color:T.muted}}>
+                Factor clave: <span style={{color:predCol,fontWeight:700}}>{activePrediction.key_factor}</span>
+                <span style={{marginLeft:10,color:T.muted}}>· próxima confirmación en {nextAnalysis?`${Math.ceil(nextAnalysis/1000)}s`:"—"}</span>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* AI LAST SIGNAL */}
         {aiResult&&(
