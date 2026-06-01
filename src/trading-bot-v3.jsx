@@ -2708,9 +2708,10 @@ export default function TradingBot(){
           const uniquePairs=[...new Set(FOREX_PAIRS)];
 
           // Build precise signal data for the ACTIVE symbol using real chart indicators
-          // (watchlist uses sampled price EMA which diverges from candle-based chart EMA)
+          // Returns null when no AI analysis has run yet → watchlist data used as fallback
           const buildActiveData=(sym)=>{
             if(sym!==symbol) return null;
+            if(!aiResult) return null; // no analysis yet — avoid showing 0% confidence
             const cfg=ASSETS[sym];
             const prec=cfg.precision;
             const emaSignal=ema9>ema21?"BUY":ema9<ema21?"SELL":"HOLD";
