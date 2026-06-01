@@ -10,7 +10,7 @@ async function fetchFromYahoo(from, to, wantCandles, limit, interval = "1m", yah
   // For 1H and 4H use native 60m data (need more history than 1m allows)
   const useNative60m = interval === "1h" || interval === "4h";
   const yfInterval = useNative60m ? "60m" : "1m";
-  const yfRange    = useNative60m ? "60d" : "5d"; // 5d of 1m covers ~7200 candles (enough for any TF)
+  const yfRange    = useNative60m ? "60d" : "10d"; // 10d of 1m covers ~14400 candles (~500 5m candles)
 
   const r = await fetch(
     `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=${yfInterval}&range=${yfRange}`,
@@ -64,7 +64,7 @@ function aggregateCandles(candles, n) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  const { from = "EUR", to = "USD", candles: wantCandles = false, limit = 200, interval = "1m", yahooSym } = req.body || {};
+  const { from = "EUR", to = "USD", candles: wantCandles = false, limit = 500, interval = "1m", yahooSym } = req.body || {};
   const cacheKey = yahooSym ? `_ys_${yahooSym}_${interval}` : `${from}_${to}_${interval}`;
 
   // Serve candles from cache if fresh

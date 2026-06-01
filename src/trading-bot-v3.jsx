@@ -151,7 +151,7 @@ function calcBB(closes,p=20){
 /* ─── SUPPORT & RESISTANCE ──────────────────────────────────────────────── */
 function calcSR(candles, tol=0.004){
   if(candles.length<20) return {supports:[], resistances:[]};
-  const recent=candles.slice(-200);
+  const recent=candles.slice(-600);
   const currentPrice=recent.at(-1).c;
   const levels=[];
 
@@ -315,7 +315,7 @@ function findPivots(candles, lb=3){
 function detectPatterns(candles){
   if(candles.length<25) return [];
   const results=[];
-  const recent=candles.slice(-60);
+  const recent=candles.slice(-120);
   const {highs,lows}=findPivots(recent,3);
   const tol=0.025; // 2.5% tolerancia para precios similares
 
@@ -1075,7 +1075,7 @@ async function fetchCommodityRateCached(yahooTicker,ttlMs=15000){
 }
 
 // Fetch real 1-min candles for forex from Yahoo Finance (via serverless proxy)
-async function fetchForexCandles(from,to,limit=200,interval="1m"){
+async function fetchForexCandles(from,to,limit=500,interval="1m"){
   try{
     const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({from,to,candles:true,limit,interval})});
@@ -1133,11 +1133,11 @@ export default function TradingBot(){
   const [symbol,setSymbol]       = useState("ETH/USDT");
   const asset                    = ASSETS[symbol];
 
-  const [candles,setCandles]     = useState(()=>genCandles(ASSETS["ETH/USDT"].basePrice,80));
+  const [candles,setCandles]     = useState(()=>genCandles(ASSETS["ETH/USDT"].basePrice,300));
   const [price,setPrice]         = useState(ASSETS["ETH/USDT"].basePrice);
   const [rsi,setRsi]             = useState(50);
   const [macd,setMacd]           = useState({macd:0,signal:0,hist:0});
-  const [bb,setBB]               = useState(()=>calcBB(genCandles(ASSETS["ETH/USDT"].basePrice,80).map(c=>c.c)));
+  const [bb,setBB]               = useState(()=>calcBB(genCandles(ASSETS["ETH/USDT"].basePrice,300).map(c=>c.c)));
   const [ema9,setEma9]           = useState(0);
   const [ema21,setEma21]         = useState(0);
   const [volTrend,setVolTrend]   = useState({current:0,avg:0,ratio:1});
@@ -1439,7 +1439,7 @@ export default function TradingBot(){
       // Show placeholder immediately — Deriv WebSocket will replace within ~2s
       const cached=_fxCache[`${forexFrom}_${forexTo}`];
       const initRate=cached?.rate||cur.basePrice;
-      applyForexCandles(genCandles(initRate,80,tfInterval),initRate);
+      applyForexCandles(genCandles(initRate,300,tfInterval),initRate);
 
       if(!derivSym){
         // No Deriv symbol mapping — use Yahoo Finance candle history + polling
@@ -1450,7 +1450,7 @@ export default function TradingBot(){
           (async()=>{
             try{
               const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({yahooSym:cur.yahooTicker,candles:true,limit:200,interval:tfInterval})});
+                body:JSON.stringify({yahooSym:cur.yahooTicker,candles:true,limit:500,interval:tfInterval})});
               if(r.ok){
                 const d=await r.json();
                 if(d.candles?.length>5){
@@ -1506,7 +1506,7 @@ export default function TradingBot(){
           // Subscribe to candle history + live stream
           derivWs.send(JSON.stringify({
             ticks_history: derivSym,
-            count: 200,
+            count: 1000,
             style: "candles",
             granularity,
             end: "latest",
@@ -1606,7 +1606,7 @@ export default function TradingBot(){
     if(cur.type!=="crypto")return;
     const load=async()=>{
       try{
-        const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${cur.binance}&interval=${chartInterval}&limit=250`);
+        const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${cur.binance}&interval=${chartInterval}&limit=1000`);
         const d=await r.json();
         if(!Array.isArray(d))return;
         const newCandles=d.map(k=>({time:Math.floor(parseInt(k[0])/1000),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
