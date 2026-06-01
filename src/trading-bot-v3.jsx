@@ -521,9 +521,10 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
   const macdRef  = useRef(null);
   const charts      = useRef({});
   const series      = useRef({});
-  const posLines    = useRef([]);
-  const srLines     = useRef([]);
-  const projSeries  = useRef([]);
+  const posLines       = useRef([]);
+  const srLines        = useRef([]);
+  const projSeries     = useRef([]);
+  const projPriceLines = useRef([]);
   const firstLoad   = useRef(true);
   const prevFitPrice= useRef(null);
   const prevCandlesLen = useRef(0);
@@ -634,6 +635,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
       posLines.current=[];
       srLines.current=[];
       projSeries.current=[];
+      projPriceLines.current=[];
       series.current={};
       charts.current={};
       firstLoad.current=true;
@@ -826,10 +828,17 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
   /* ── AI projection lines ── */
   useEffect(()=>{
     const {main}=charts.current;
+    const {cs}=series.current;
     if(!main) return;
-    // Remove old projection series
+
+    // Remove old projection series (line series on main chart)
     projSeries.current.forEach(s=>{try{main.removeSeries(s);}catch{}});
     projSeries.current=[];
+    // Remove old projection price lines (cs.createPriceLine — must use removePriceLine)
+    if(cs){
+      projPriceLines.current.forEach(l=>{try{cs.removePriceLine(l);}catch{}});
+    }
+    projPriceLines.current=[];
 
     const proj=calcProjection(candles,aiResult,srLevels,tfInterval);
     if(!proj) return;
@@ -838,31 +847,27 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
     const col=isBuy?"#00e676":"#ff1744";
     const colFaint=isBuy?"#00e67628":"#ff174428";
 
-    // Center projection line
     const centerS=main.addLineSeries({color:col,lineWidth:2,lineStyle:LineStyle.Dashed,
       priceLineVisible:false,lastValueVisible:true,title:isBuy?"▲ Target":"▼ Target"});
     centerS.setData(center);
     projSeries.current.push(centerS);
 
-    // Upper bound
     const upperS=main.addLineSeries({color:colFaint,lineWidth:1,lineStyle:LineStyle.Dotted,
       priceLineVisible:false,lastValueVisible:false});
     upperS.setData(upper);
     projSeries.current.push(upperS);
 
-    // Lower bound
     const lowerS=main.addLineSeries({color:colFaint,lineWidth:1,lineStyle:LineStyle.Dotted,
       priceLineVisible:false,lastValueVisible:false});
     lowerS.setData(lower);
     projSeries.current.push(lowerS);
 
-    // Target price line
-    const {cs}=series.current;
+    // Target/stop price lines tracked separately so removePriceLine works
     if(cs){
-      projSeries.current.push(
+      projPriceLines.current.push(
         cs.createPriceLine({price:targetPrice,color:col,lineWidth:1,
           lineStyle:LineStyle.Dashed,axisLabelVisible:true,
-          title:`${isBuy?"🎯 Objetivo":"🎯 Objetivo"} ${targetPrice.toFixed(precision)}`}),
+          title:`🎯 Objetivo ${targetPrice.toFixed(precision)}`}),
         cs.createPriceLine({price:stopPrice,color:isBuy?"#ff1744":"#00e676",lineWidth:1,
           lineStyle:LineStyle.Dotted,axisLabelVisible:true,
           title:`🛑 Stop ${stopPrice.toFixed(precision)}`}),
@@ -2701,10 +2706,41 @@ export default function TradingBot(){
           const FOREX_PAIRS=["EUR/USD","GBP/USD","AUD/USD","NZD/USD","USD/JPY","USD/CHF","USD/CAD","EUR/GBP"];
           const COMMODITY_PAIRS=["XAU/USD","XAG/USD","XTI/USD"];
           const uniquePairs=[...new Set(FOREX_PAIRS)];
-          const buySignals=uniquePairs.filter(s=>forexWatch[s]?.signal==="BUY");
-          const sellSignals=uniquePairs.filter(s=>forexWatch[s]?.signal==="SELL");
-          const commBuy=COMMODITY_PAIRS.filter(s=>commodityWatch[s]?.signal==="BUY");
-          const commSell=COMMODITY_PAIRS.filter(s=>commodityWatch[s]?.signal==="SELL");
+
+          // Build precise signal data for the ACTIVE symbol using real chart indicators
+          // (watchlist uses sampled price EMA which diverges from candle-based chart EMA)
+          const buildActiveData=(sym)=>{
+            if(sym!==symbol) return null;
+            const cfg=ASSETS[sym];
+            const prec=cfg.precision;
+            const emaSignal=ema9>ema21?"BUY":ema9<ema21?"SELL":"HOLD";
+            const sig=aiResult?.signal||emaSignal;
+            const conf=aiResult?.confidence||0;
+            const col=sig==="BUY"?T.green:sig==="SELL"?T.red:T.muted;
+            const isBuy=sig==="BUY";
+            let target,stop;
+            if(activePrediction?.symbol===sym&&activePrediction.signal===sig){
+              target=activePrediction.targetPrice;
+              stop=activePrediction.stopPrice;
+            } else {
+              const recentC=candles.slice(-14);
+              const atr=recentC.length>0?recentC.reduce((s,c)=>s+(c.h-c.l),0)/recentC.length:price*0.001;
+              target=isBuy?price+atr*2.5:price-atr*2.5;
+              stop=isBuy?price-atr*1.5:price+atr*1.5;
+            }
+            const pipSz=Math.pow(10,-prec);
+            const targetPips=Math.abs(target-price)/pipSz;
+            const stopPips=Math.abs(stop-price)/pipSz;
+            const rr=stopPips>0?(targetPips/stopPips).toFixed(1):"—";
+            return{price,signal:sig,color:col,rsi:Math.round(rsi),confidence:conf,prec,
+              entry:price,target,stop,targetPips:targetPips.toFixed(1),stopPips:stopPips.toFixed(1),
+              rr,samples:candles.length,pct:0};
+          };
+
+          const buySignals=uniquePairs.filter(s=>s===symbol?(aiResult?.signal==="BUY"):forexWatch[s]?.signal==="BUY");
+          const sellSignals=uniquePairs.filter(s=>s===symbol?(aiResult?.signal==="SELL"):forexWatch[s]?.signal==="SELL");
+          const commBuy=COMMODITY_PAIRS.filter(s=>s===symbol?(aiResult?.signal==="BUY"):commodityWatch[s]?.signal==="BUY");
+          const commSell=COMMODITY_PAIRS.filter(s=>s===symbol?(aiResult?.signal==="SELL"):commodityWatch[s]?.signal==="SELL");
           return(
             <div style={{animation:"fadeUp .3s ease"}}>
               {/* Header */}
@@ -2737,7 +2773,7 @@ export default function TradingBot(){
 
               {/* Rows */}
               {uniquePairs.map(sym=>{
-                const d=forexWatch[sym];
+                const d=buildActiveData(sym)||forexWatch[sym];
                 if(!d)return(
                   <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
                     gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
@@ -2763,8 +2799,11 @@ export default function TradingBot(){
                   >
                     {/* Par */}
                     <div>
-                      <div style={{fontSize:12,fontWeight:700,color:T.accent}}>{sym}</div>
-                      <div style={{fontSize:7,color:T.muted,marginTop:1}}>RSI {d.rsi} · {d.samples}pts</div>
+                      <div style={{display:"flex",alignItems:"center",gap:5}}>
+                        <span style={{fontSize:12,fontWeight:700,color:sym===symbol?T.yellow:T.accent}}>{sym}</span>
+                        {sym===symbol&&<span style={{fontSize:6,color:T.yellow,background:`${T.yellow}25`,padding:"1px 4px",borderRadius:3,letterSpacing:1}}>ACTIVO</span>}
+                      </div>
+                      <div style={{fontSize:7,color:T.muted,marginTop:1}}>RSI {d.rsi} · {sym===symbol?"velas reales":d.samples+"pts"}</div>
                     </div>
 
                     {/* Señal */}
@@ -2853,7 +2892,7 @@ export default function TradingBot(){
               </div>
               {COMMODITY_PAIRS.map(sym=>{
                 const cfg=ASSETS[sym];
-                const d=commodityWatch[sym];
+                const d=buildActiveData(sym)||commodityWatch[sym];
                 if(!d)return(
                   <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
                     gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
