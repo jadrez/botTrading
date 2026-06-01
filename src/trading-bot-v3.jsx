@@ -1178,10 +1178,10 @@ export default function TradingBot(){
   const [forexWatch,setForexWatch]        = useState({});
   const [commodityWatch,setCommodityWatch]= useState({});
   const [activeView,setActiveView]        = useState("dashboard");
-  const [tpTarget,setTpTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_tp")||"6.00"));
-  const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl")||"3.00"));
-  const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp")||"6.00"));
-  const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl")||"3.00"));
+  const [tpTarget,setTpTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_tp_v2")||"6.00"));
+  const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl_v2")||"3.00"));
+  const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp_v2")||"6.00"));
+  const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl_v2")||"3.00"));
   const [derivEnabled,setDerivEnabled]    = useState(()=>localStorage.getItem("derivEnabled")==="true");
   const [derivBalance,setDerivBalance]    = useState(null);
   const [derivLoginId,setDerivLoginId]    = useState(null);
@@ -1237,8 +1237,8 @@ export default function TradingBot(){
   useEffect(()=>{balanceRef.current=balance;},[balance]);
   useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_stake",String(positionSize));},[positionSize]);
   useEffect(()=>{multiplierRef.current=multiplier;localStorage.setItem("bot_mult",String(multiplier));},[multiplier]);
-  useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp",String(tpTarget));},[tpTarget]);
-  useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl",String(slTarget));},[slTarget]);
+  useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp_v2",String(tpTarget));},[tpTarget]);
+  useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl_v2",String(slTarget));},[slTarget]);
   useEffect(()=>{derivEnabledRef.current=derivEnabled;localStorage.setItem("derivEnabled",String(derivEnabled));},[derivEnabled]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
   useEffect(()=>{consLossesRef.current=consecutiveLosses;},[consecutiveLosses]);
