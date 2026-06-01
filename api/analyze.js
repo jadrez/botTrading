@@ -1,8 +1,8 @@
 const MAX_POSITIONS    = 5;
 const DEFAULT_STAKE    = 10.00;
 const DEFAULT_MULT     = 100;
-const DEFAULT_TP_USD   = 3.00;
-const DEFAULT_SL_USD   = 2.00;
+const DEFAULT_TP_USD   = 6.00;
+const DEFAULT_SL_USD   = 3.00;
 
 const fUSD = (n, sign=true) => {
   const abs=Math.abs(n);

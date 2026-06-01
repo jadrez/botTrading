@@ -1178,10 +1178,10 @@ export default function TradingBot(){
   const [forexWatch,setForexWatch]        = useState({});
   const [commodityWatch,setCommodityWatch]= useState({});
   const [activeView,setActiveView]        = useState("dashboard");
-  const [tpTarget,setTpTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_tp")||"3.00"));
-  const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl")||"2.00"));
-  const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp")||"3.00"));
-  const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl")||"2.00"));
+  const [tpTarget,setTpTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_tp")||"6.00"));
+  const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl")||"3.00"));
+  const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp")||"6.00"));
+  const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl")||"3.00"));
   const [derivEnabled,setDerivEnabled]    = useState(()=>localStorage.getItem("derivEnabled")==="true");
   const [derivBalance,setDerivBalance]    = useState(null);
   const [derivLoginId,setDerivLoginId]    = useState(null);
