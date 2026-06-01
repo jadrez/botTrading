@@ -74,8 +74,9 @@ const DERIV_SYMBOLS = {
   "EUR/USD":"frxEURUSD","GBP/USD":"frxGBPUSD","USD/JPY":"frxUSDJPY",
   "AUD/USD":"frxAUDUSD","NZD/USD":"frxNZDUSD","USD/CHF":"frxUSDCHF",
   "USD/CAD":"frxUSDCAD","EUR/GBP":"frxEURGBP",
-  // Commodities
-  "XAU/USD":"frxXAUUSD","XAG/USD":"frxXAGUSD","XTI/USD":"XTIUSD",
+  // Commodities — Gold and Silver have valid frx symbols on Deriv; Oil uses Yahoo Finance polling
+  "XAU/USD":"frxXAUUSD","XAG/USD":"frxXAGUSD",
+  // XTI/USD intentionally omitted — XTIUSD is not available on the public Deriv WS; uses Yahoo Finance
 };
 
 /* ─── UTILS ─────────────────────────────────────────────────────────────── */
@@ -1436,25 +1437,57 @@ export default function TradingBot(){
       applyForexCandles(genCandles(initRate,80,tfInterval),initRate);
 
       if(!derivSym){
-        // No Deriv symbol mapping — fallback to polling
+        // No Deriv symbol mapping — use Yahoo Finance candle history + polling
         const tfSecs=granularity;
+
+        // For commodities: fetch real candle history from Yahoo Finance first
+        if(cur.yahooTicker){
+          (async()=>{
+            try{
+              const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({yahooSym:cur.yahooTicker,candles:true,limit:200,interval:tfInterval})});
+              if(r.ok){
+                const d=await r.json();
+                if(d.candles?.length>5){
+                  const np=d.rate||d.candles.at(-1)?.c;
+                  if(np&&!isNaN(np)){
+                    _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+                    applyForexCandles(d.candles.map(c=>({...c,v:c.v||0})), np);
+                  }
+                }
+              }
+            }catch{}
+          })();
+        }
+
         iv=setInterval(async()=>{
           const np=cur.type==="commodity"
-            ?await fetchCommodityRateCached(cur.yahooTicker,2000)
+            ?await fetchCommodityRateCached(cur.yahooTicker,5000)
             :await fetchForexRateCached(forexFrom,forexTo,2000);
           if(!np||isNaN(np)) return;
+          _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+          setPrice(np); priceRef.current=np;
+          setPriceVerified(true); setForexLive(true);
           setCandles(prev=>{
+            if(!prev.length) return prev;
             const updated=[...prev];
-            const last={...updated[updated.length-1]};
+            const lastIdx=updated.length-1;
+            const last={...updated[lastIdx]};
             const nowSec=Math.floor(Date.now()/1000);
             last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
             if(nowSec-last.time>=tfSecs) updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
-            else updated[updated.length-1]=last;
-            setPrice(np); priceRef.current=np;
-            _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+            else updated[lastIdx]=last;
+            const closes=updated.map(c=>c.c);
+            const newBB=calcBB(closes); bbRef.current=newBB;
+            const e9=calcEMA(closes,9),e21=calcEMA(closes,21);
+            const e200=calcEMA(closes,200);
+            setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
+            setBB(newBB); setEma9(e9); ema9Ref.current=e9;
+            setEma21(e21); ema21Ref.current=e21;
+            setEma200(e200); ema200Ref.current=e200;
             return updated;
           });
-        },2000);
+        }, cur.type==="commodity"?8000:2000);
         return;
       }
 
@@ -1520,6 +1553,27 @@ export default function TradingBot(){
 
             } else if(msg.msg_type==="error"){
               console.warn("[Deriv WS forex]",msg.error?.message||msg.error);
+              // If this commodity has a Yahoo fallback and WS failed, start polling
+              if(cur.yahooTicker&&!iv){
+                iv=setInterval(async()=>{
+                  const np=await fetchCommodityRateCached(cur.yahooTicker,5000);
+                  if(!np||isNaN(np)) return;
+                  _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+                  setPrice(np); priceRef.current=np;
+                  setPriceVerified(true); setForexLive(true);
+                  setCandles(prev=>{
+                    if(!prev.length) return prev;
+                    const updated=[...prev];
+                    const lastIdx=updated.length-1;
+                    const last={...updated[lastIdx]};
+                    const nowSec=Math.floor(Date.now()/1000);
+                    last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
+                    if(nowSec-last.time>=granularity) updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
+                    else updated[lastIdx]=last;
+                    return updated;
+                  });
+                },8000);
+              }
             }
           }catch{}
         };
