@@ -3,8 +3,9 @@ const _candleCache = {};
 const CANDLE_TTL = 60 * 1000;
 
 // Always fetch 1-min data from Yahoo and aggregate — 1m data has far fewer gaps than native 5m/15m
-async function fetchFromYahoo(from, to, wantCandles, limit, interval = "1m") {
-  const sym = `${from}${to}=X`;
+// yahooSym allows direct override for commodities (GC=F, SI=F, CL=F) vs forex (EURUSD=X)
+async function fetchFromYahoo(from, to, wantCandles, limit, interval = "1m", yahooSym) {
+  const sym = yahooSym || `${from}${to}=X`;
 
   // For 1H and 4H use native 60m data (need more history than 1m allows)
   const useNative60m = interval === "1h" || interval === "4h";
@@ -63,8 +64,8 @@ function aggregateCandles(candles, n) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  const { from = "EUR", to = "USD", candles: wantCandles = false, limit = 200, interval = "1m" } = req.body || {};
-  const cacheKey = `${from}_${to}_${interval}`;
+  const { from = "EUR", to = "USD", candles: wantCandles = false, limit = 200, interval = "1m", yahooSym } = req.body || {};
+  const cacheKey = yahooSym ? `_ys_${yahooSym}_${interval}` : `${from}_${to}_${interval}`;
 
   // Serve candles from cache if fresh
   if (wantCandles) {
@@ -76,39 +77,41 @@ export default async function handler(req, res) {
 
   // Primary: Yahoo Finance — fetch 1m and aggregate for better gap coverage
   try {
-    const data = await fetchFromYahoo(from, to, wantCandles, limit, interval);
+    const data = await fetchFromYahoo(from, to, wantCandles, limit, interval, yahooSym);
     if (wantCandles && data.candles?.length > 5) {
       _candleCache[cacheKey] = { data, ts: Date.now() };
     }
     return res.status(200).json(data);
   } catch {}
 
-  // Fallback: ECB (price only)
-  try {
-    const r = await fetch(`https://open.er-api.com/v6/latest/${from}`);
-    const d = await r.json();
-    if (d.result === "success" && d.rates?.[to]) {
-      const resp = { rate: d.rates[to], source: "openexchangerates", updated: d.time_last_update_utc };
-      if (wantCandles) return res.status(200).json({ ...resp, candles: [], _fallback: "ecb_price_only" });
-      return res.status(200).json(resp);
-    }
-  } catch {}
-
-  // Fallback: Alpha Vantage
-  const avKey = process.env.ALPHA_VANTAGE_KEY;
-  if (avKey) {
+  // Fallback: ECB (price only) — not applicable for commodities
+  if (!yahooSym) {
     try {
-      const r2 = await fetch(
-        `https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=${from}&to_currency=${to}&apikey=${avKey}`
-      );
-      const d2 = await r2.json();
-      const rate = parseFloat(d2?.["Realtime Currency Exchange Rate"]?.["5. Exchange Rate"]);
-      if (!isNaN(rate)) {
-        const resp = { rate, source: "alphavantage" };
-        if (wantCandles) return res.status(200).json({ ...resp, candles: [], _fallback: "av_price_only" });
+      const r = await fetch(`https://open.er-api.com/v6/latest/${from}`);
+      const d = await r.json();
+      if (d.result === "success" && d.rates?.[to]) {
+        const resp = { rate: d.rates[to], source: "openexchangerates", updated: d.time_last_update_utc };
+        if (wantCandles) return res.status(200).json({ ...resp, candles: [], _fallback: "ecb_price_only" });
         return res.status(200).json(resp);
       }
     } catch {}
+
+    // Fallback: Alpha Vantage
+    const avKey = process.env.ALPHA_VANTAGE_KEY;
+    if (avKey) {
+      try {
+        const r2 = await fetch(
+          `https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=${from}&to_currency=${to}&apikey=${avKey}`
+        );
+        const d2 = await r2.json();
+        const rate = parseFloat(d2?.["Realtime Currency Exchange Rate"]?.["5. Exchange Rate"]);
+        if (!isNaN(rate)) {
+          const resp = { rate, source: "alphavantage" };
+          if (wantCandles) return res.status(200).json({ ...resp, candles: [], _fallback: "av_price_only" });
+          return res.status(200).json(resp);
+        }
+      } catch {}
+    }
   }
 
   return res.status(503).json({ error: "Rate unavailable" });

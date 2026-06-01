@@ -54,6 +54,13 @@ const ASSETS = {
     correlations:{"EUR/USD":-1,"GBP/USD":-1,"AUD/USD":-1,"NZD/USD":-1,"USD/JPY":+1,"USD/CHF":+1} },
   "EUR/GBP":  { label:"EUR/GBP",  type:"forex", binance:null, forexFrom:"EUR", forexTo:"GBP", precision:5, basePrice:0.8450,
     correlations:{"EUR/USD":+1,"GBP/USD":-1,"USD/CHF":-1} },
+  // ── Commodities (via Deriv WebSocket; Yahoo Finance fallback for watchlist)
+  "XAU/USD":  { label:"ORO",       type:"commodity", binance:null, forexFrom:"XAU", forexTo:"USD", precision:2, basePrice:2700,
+    yahooTicker:"GC=F",  correlations:{} },
+  "XAG/USD":  { label:"PLATA",     type:"commodity", binance:null, forexFrom:"XAG", forexTo:"USD", precision:3, basePrice:32,
+    yahooTicker:"SI=F",  correlations:{} },
+  "XTI/USD":  { label:"PETRÓLEO",  type:"commodity", binance:null, forexFrom:"XTI", forexTo:"USD", precision:2, basePrice:80,
+    yahooTicker:"CL=F",  correlations:{} },
 };
 
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
@@ -67,6 +74,8 @@ const DERIV_SYMBOLS = {
   "EUR/USD":"frxEURUSD","GBP/USD":"frxGBPUSD","USD/JPY":"frxUSDJPY",
   "AUD/USD":"frxAUDUSD","NZD/USD":"frxNZDUSD","USD/CHF":"frxUSDCHF",
   "USD/CAD":"frxUSDCAD","EUR/GBP":"frxEURGBP",
+  // Commodities
+  "XAU/USD":"frxXAUUSD","XAG/USD":"frxXAGUSD","XTI/USD":"XTIUSD",
 };
 
 /* ─── UTILS ─────────────────────────────────────────────────────────────── */
@@ -1041,6 +1050,24 @@ async function fetchForexRateCached(from,to,ttlMs=15000){
   return rate||_fxCache[key]?.rate||null;
 }
 
+// Fetch commodity spot price via serverless proxy (Yahoo Finance GC=F / SI=F / CL=F)
+async function fetchCommodityRate(yahooTicker){
+  try{
+    const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({yahooSym:yahooTicker})});
+    if(r.ok){const d=await r.json();if(typeof d.rate==="number")return d.rate;}
+  }catch{}
+  return null;
+}
+async function fetchCommodityRateCached(yahooTicker,ttlMs=15000){
+  const key=`_commodity_${yahooTicker}`;
+  const now=Date.now();
+  if(_fxCache[key]&&now-_fxCache[key].ts<ttlMs)return _fxCache[key].rate;
+  const rate=await fetchCommodityRate(yahooTicker);
+  if(rate)_fxCache[key]={rate,ts:now};
+  return rate||_fxCache[key]?.rate||null;
+}
+
 // Fetch real 1-min candles for forex from Yahoo Finance (via serverless proxy)
 async function fetchForexCandles(from,to,limit=200,interval="1m"){
   try{
@@ -1143,6 +1170,7 @@ export default function TradingBot(){
   const [priceVerified,setPriceVerified]  = useState(false);
   const [corrSignals,setCorrSignals]      = useState({});
   const [forexWatch,setForexWatch]        = useState({});
+  const [commodityWatch,setCommodityWatch]= useState({});
   const [activeView,setActiveView]        = useState("dashboard");
   const [tpTarget,setTpTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_tp")||"3.00"));
   const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl")||"2.00"));
@@ -1234,6 +1262,8 @@ export default function TradingBot(){
             const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cfg.binance}`);
             const d=await r.json();
             p=parseFloat(d.price);
+          } else if(cfg.type==="commodity"){
+            p=await fetchCommodityRateCached(cfg.yahooTicker,5000);
           } else {
             p=await fetchForexRateCached(cfg.forexFrom,cfg.forexTo,5000);
           }
@@ -1279,8 +1309,8 @@ export default function TradingBot(){
     setNextAnalysis(null);
     setCorrSignals({}); corrSignalsRef.current={};
 
-    // Forex pairs with small absolute values (< 10) need 5m+ timeframe to have visible candles
-    if(newAsset.type==="forex" && chartIntervalRef.current==="1m"){
+    // Forex/commodity pairs use 5m+ timeframe; 1m candles are too noisy for slow-moving prices
+    if((newAsset.type==="forex"||newAsset.type==="commodity") && chartIntervalRef.current==="1m"){
       setChartInterval("5m");
       chartIntervalRef.current="5m";
     } else if(newAsset.type==="crypto" && chartIntervalRef.current!=="1m" && chartIntervalRef.current!=="5m"){
@@ -1289,7 +1319,7 @@ export default function TradingBot(){
 
     // Use cached real rate if available — prevents TP/SL firing at wrong price
     let initPrice=newAsset.basePrice;
-    if(newAsset.type==="forex"){
+    if(newAsset.type==="forex"||newAsset.type==="commodity"){
       const cacheKey=`${newAsset.forexFrom}_${newAsset.forexTo}`;
       if(_fxCache[cacheKey]?.rate) initPrice=_fxCache[cacheKey].rate;
     }
@@ -1306,10 +1336,10 @@ export default function TradingBot(){
     setEma9(e9); ema9Ref.current=e9;
     setEma21(e21); ema21Ref.current=e21;
     setEma200(e200); ema200Ref.current=e200;
-    const cachedForex=newAsset.type==="forex"&&!!_fxCache[`${newAsset.forexFrom}_${newAsset.forexTo}`]?.rate;
+    const cachedForex=(newAsset.type==="forex"||newAsset.type==="commodity")&&!!_fxCache[`${newAsset.forexFrom}_${newAsset.forexTo}`]?.rate;
     setForexLive(cachedForex);
     // Price not yet confirmed from live feed — block TP/SL watcher until first real tick
-    setPriceVerified(cachedForex); // forex with cache = already verified; crypto = false until Binance responds
+    setPriceVerified(cachedForex); // forex/commodity with cache = already verified; crypto = false until Binance responds
     addLog(`🔄 Cambiando a ${newSym}...`,"info");
   },[addLog]);
 
@@ -1409,7 +1439,9 @@ export default function TradingBot(){
         // No Deriv symbol mapping — fallback to polling
         const tfSecs=granularity;
         iv=setInterval(async()=>{
-          const np=await fetchForexRateCached(forexFrom,forexTo,2000);
+          const np=cur.type==="commodity"
+            ?await fetchCommodityRateCached(cur.yahooTicker,2000)
+            :await fetchForexRateCached(forexFrom,forexTo,2000);
           if(!np||isNaN(np)) return;
           setCandles(prev=>{
             const updated=[...prev];
@@ -1565,6 +1597,8 @@ export default function TradingBot(){
             const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cfg.binance}`);
             const d=await r.json();
             price=parseFloat(d.price);
+          } else if(cfg.type==="commodity"){
+            price=await fetchCommodityRateCached(cfg.yahooTicker,10000);
           } else {
             // Each forex pair gets its own correct rate
             price=await fetchForexRateCached(cfg.forexFrom,cfg.forexTo);
@@ -1647,6 +1681,64 @@ export default function TradingBot(){
     };
     scan();
     const iv=setInterval(scan,15000);
+    return()=>clearInterval(iv);
+  },[]);
+
+  /* ── Commodity watchlist — always running, 3 commodities ────────────── */
+  useEffect(()=>{
+    const COMMODITY_SYMS=["XAU/USD","XAG/USD","XTI/USD"];
+    const scan=async()=>{
+      const results={};
+      for(const sym of COMMODITY_SYMS){
+        const cfg=ASSETS[sym];
+        if(!cfg)continue;
+        try{
+          // Try Deriv WS cache first (populated when that commodity is active)
+          const cacheKey=`${cfg.forexFrom}_${cfg.forexTo}`;
+          let p=_fxCache[cacheKey]?.rate;
+          // Fallback: Yahoo Finance via serverless proxy
+          if(!p) p=await fetchCommodityRateCached(cfg.yahooTicker,30000);
+          if(!p||isNaN(p))continue;
+
+          if(!bgPricesRef.current[sym])bgPricesRef.current[sym]=[];
+          bgPricesRef.current[sym].push(p);
+          if(bgPricesRef.current[sym].length>120)bgPricesRef.current[sym].shift();
+          const closes=bgPricesRef.current[sym];
+          const k9=2/10,k21=2/22;
+          let e9=closes[0],e21=closes[0];
+          for(let i=1;i<closes.length;i++){e9=closes[i]*k9+e9*(1-k9);e21=closes[i]*k21+e21*(1-k21);}
+          const rsi=closes.length>14?calcRSI(closes):50;
+          const signal=e9>e21&&rsi<70?"BUY":e9<e21&&rsi>30?"SELL":"HOLD";
+          const color=signal==="BUY"?T.green:signal==="SELL"?T.red:T.muted;
+          const pct=closes.length>1?(closes.at(-1)-closes[0])/closes[0]*100:0;
+
+          // ATR estimate
+          const recent=closes.slice(-40);
+          const maxP=Math.max(...recent), minP=Math.min(...recent);
+          const range=maxP-minP||p*0.002;
+          const atrEst=range*0.55;
+          const prec=cfg.precision;
+          const isBuy=signal==="BUY";
+          const target=isBuy?p+atrEst*2:p-atrEst*2;
+          const stop=isBuy?p-atrEst*1.3:p+atrEst*1.3;
+          // Commodities use dollar-based pip (0.01 for 2dp, 0.001 for 3dp)
+          const pipSz=Math.pow(10,-prec);
+          const targetPips=Math.abs(target-p)/pipSz;
+          const stopPips=Math.abs(stop-p)/pipSz;
+          const rr=stopPips>0?(targetPips/stopPips).toFixed(1):"—";
+          const emaSpreadPips=Math.abs(e9-e21)/pipSz;
+          const rsiDiv=isBuy?Math.max(0,60-rsi):Math.max(0,rsi-40);
+          const confidence=signal==="HOLD"?0:Math.min(88,Math.max(45,Math.round(50+emaSpreadPips*0.3+rsiDiv*0.5)));
+
+          results[sym]={price:p,signal,color,rsi:Math.round(rsi),pct,samples:closes.length,
+            target,stop,rr,targetPips:targetPips.toFixed(1),stopPips:stopPips.toFixed(1),
+            confidence,prec,entry:p};
+        }catch{}
+      }
+      setCommodityWatch(results);
+    };
+    scan();
+    const iv=setInterval(scan,20000);
     return()=>clearInterval(iv);
   },[]);
 
@@ -1782,6 +1874,7 @@ export default function TradingBot(){
       return;
     }
     // ── Trading session filter for forex (don't trade during Asian dead hours)
+    // Commodities (Gold, Silver, Oil) trade nearly 24/5 — skip this filter
     const curAsset=ASSETS[symbolRef.current];
     if(curAsset?.type==="forex"){
       const utcHour=new Date().getUTCHours();
@@ -2164,6 +2257,39 @@ export default function TradingBot(){
                 })()}
               </div>
 
+              {/* ── COMMODITIES dropdown ── */}
+              <div style={{display:"flex",alignItems:"center",gap:5,
+                background:ASSETS[symbol]?.type==="commodity"?`${T.yellow}10`:T.dim,
+                border:`1px solid ${ASSETS[symbol]?.type==="commodity"?T.yellow:T.border}`,
+                borderRadius:7,padding:"4px 8px"}}>
+                <span style={{fontSize:7,color:ASSETS[symbol]?.type==="commodity"?T.yellow:T.muted,letterSpacing:2,fontWeight:700}}>⬡ MATERIAS</span>
+                <select
+                  value={ASSETS[symbol]?.type==="commodity"?symbol:""}
+                  onChange={e=>e.target.value&&handleSymbolChange(e.target.value)}
+                  style={{
+                    background:"transparent",border:"none",
+                    color:ASSETS[symbol]?.type==="commodity"?T.yellow:T.muted,
+                    cursor:"pointer",fontSize:11,fontWeight:700,outline:"none",
+                    minWidth:100,
+                  }}>
+                  {ASSETS[symbol]?.type!=="commodity"&&<option value="">Seleccionar...</option>}
+                  {Object.entries(ASSETS).filter(([,v])=>v.type==="commodity").map(([s,v])=>{
+                    const w=commodityWatch[s];
+                    const sigLabel=w?.signal&&w.signal!=="—"?` · ${w.signal}`:"";
+                    return(<option key={s} value={s}>{v.label}{sigLabel}</option>);
+                  })}
+                </select>
+                {ASSETS[symbol]?.type==="commodity"&&(()=>{
+                  const w=commodityWatch[symbol];
+                  return w?.signal&&w.signal!=="—"?(
+                    <span style={{fontSize:8,fontWeight:700,color:"#04060f",
+                      background:w.color||T.muted,padding:"1px 5px",borderRadius:3,lineHeight:1.4}}>
+                      {w.signal}
+                    </span>
+                  ):null;
+                })()}
+              </div>
+
               <button onClick={()=>setMultiMonitor(p=>!p)}
                 style={{
                   background:multiMonitor?`${T.yellow}18`:"transparent",
@@ -2180,7 +2306,7 @@ export default function TradingBot(){
             <div style={{fontSize:11,display:"flex",alignItems:"center",gap:5,justifyContent:"flex-end",marginBottom:2}}>
               <span style={{width:7,height:7,borderRadius:"50%",background:T.green,display:"inline-block",animation:"pulse 1.4s ease-in-out infinite"}}/>
               <span style={{color:T.green}}>
-                {asset.type==="crypto"?"EN VIVO • BINANCE":forexLive?"EN VIVO • Forex":"CARGANDO PRECIO REAL..."}
+                {asset.type==="crypto"?"EN VIVO • BINANCE":asset.type==="commodity"?(forexLive?"EN VIVO • DERIV":"CARGANDO..."):forexLive?"EN VIVO • Forex":"CARGANDO PRECIO REAL..."}
               </span>
             </div>
             <div className="mono" style={{fontSize:26,fontWeight:700,color:T.accent}}>{fP(price,asset.precision)}</div>
@@ -2284,6 +2410,86 @@ export default function TradingBot(){
           );
         })()}
 
+        {/* COMMODITIES WATCHLIST — always visible, 3 instrumentos */}
+        {(()=>{
+          const COMMODITY_SYMS=["XAU/USD","XAG/USD","XTI/USD"];
+          const COMMODITY_LABELS={"XAU/USD":"⬡ ORO","XAG/USD":"⬡ PLATA","XTI/USD":"⬡ PETRÓLEO"};
+          return(
+            <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,
+              padding:"8px 14px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}>
+                <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>MATERIAS PRIMAS · ORO · PLATA · PETRÓLEO · Deriv en vivo · actualiza cada 20s</span>
+                <span style={{fontSize:8,color:T.muted}}>haz clic para abrir gráfica</span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+                {COMMODITY_SYMS.map(sym=>{
+                  const cfg=ASSETS[sym];
+                  const isActive=sym===symbol;
+                  const info=isActive&&asset.type==="commodity"
+                    ?{price,signal:aiResult?.signal||"—",
+                      color:aiResult?.signal==="BUY"?T.green:aiResult?.signal==="SELL"?T.red:T.muted,
+                      rsi:Math.round(rsi),pct:0,samples:99}
+                    :commodityWatch[sym];
+                  const borderCol=isActive?T.yellow:(info?.color||T.border);
+                  return(
+                    <div key={sym}
+                      onClick={()=>handleSymbolChange(sym)}
+                      style={{
+                        background:isActive?`${T.yellow}12`:`${borderCol}08`,
+                        border:`1px solid ${borderCol}${isActive?"":"40"}`,
+                        borderRadius:7,padding:"9px 11px",cursor:"pointer",
+                        transition:"border-color .2s,background .2s",
+                      }}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                        <span style={{fontSize:10,fontWeight:700,color:isActive?T.yellow:T.text}}>{COMMODITY_LABELS[sym]}</span>
+                        {isActive
+                          ?<span style={{fontSize:7,color:T.yellow,background:`${T.yellow}20`,padding:"1px 5px",borderRadius:3}}>● ACTIVO</span>
+                          :<span style={{fontSize:7,color:T.muted,background:`${T.muted}18`,padding:"1px 5px",borderRadius:3}}>COMMOD.</span>
+                        }
+                      </div>
+                      {info?(
+                        <>
+                          <div className="mono" style={{fontSize:14,fontWeight:700,
+                            color:isActive?T.yellow:(info.color||T.text),marginBottom:3}}>
+                            {fP(info.price,cfg.precision)}
+                          </div>
+                          <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:3}}>
+                            <span style={{fontSize:8,fontWeight:700,
+                              color:info.signal==="—"||info.signal==="HOLD"?T.muted:"#04060f",
+                              background:info.signal==="BUY"?T.green:info.signal==="SELL"?T.red:`${T.muted}40`,
+                              borderRadius:3,padding:"1px 5px"}}>
+                              {info.signal}
+                            </span>
+                            <span style={{fontSize:8,color:T.muted}}>RSI {info.rsi}</span>
+                          </div>
+                          {!isActive&&typeof info.pct==="number"&&(
+                            <div style={{display:"flex",alignItems:"center",gap:4}}>
+                              <div style={{flex:1,height:2,background:T.dim,borderRadius:1}}>
+                                <div style={{height:"100%",
+                                  width:`${Math.min(100,Math.abs(info.pct)*200)}%`,
+                                  background:info.pct>=0?T.green:T.red,
+                                  borderRadius:1,transition:"width .4s"}}/>
+                              </div>
+                              <span style={{fontSize:8,color:info.pct>=0?T.green:T.red,minWidth:38,textAlign:"right"}}>
+                                {info.pct>=0?"+":""}{info.pct.toFixed(3)}%
+                              </span>
+                            </div>
+                          )}
+                          {!isActive&&info.samples<10&&(
+                            <div style={{fontSize:7,color:T.orange,marginTop:2}}>⏳ {info.samples}/10 muestras</div>
+                          )}
+                        </>
+                      ):(
+                        <div style={{fontSize:9,color:T.muted,marginTop:4}}>Conectando...</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+
         {/* NEWS TICKER */}
         {news.length>0&&<div style={{marginBottom:10}}><Ticker headlines={news}/></div>}
 
@@ -2296,6 +2502,7 @@ export default function TradingBot(){
               <div style={{display:"flex",gap:8,fontSize:8,color:T.muted}}>
                 <span>◈ {Object.values(ASSETS).filter(a=>a.type==="crypto").length} crypto</span>
                 <span>€ {Object.values(ASSETS).filter(a=>a.type==="forex").length} forex</span>
+                <span>⬡ {Object.values(ASSETS).filter(a=>a.type==="commodity").length} materias</span>
               </div>
             </div>
             {/* Crypto section */}
@@ -2330,7 +2537,7 @@ export default function TradingBot(){
             </div>
             {/* Forex section */}
             <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>FOREX</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:5}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:5,marginBottom:8}}>
               {Object.entries(ASSETS).filter(([,cfg])=>cfg.type==="forex").map(([sym,cfg])=>{
                 const isActive=sym===symbol;
                 const sig=isActive?{
@@ -2375,6 +2582,41 @@ export default function TradingBot(){
                 );
               })}
             </div>
+            {/* Commodities section */}
+            <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>MATERIAS PRIMAS</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>
+              {Object.entries(ASSETS).filter(([,cfg])=>cfg.type==="commodity").map(([sym,cfg])=>{
+                const isActive=sym===symbol;
+                const w=isActive&&asset.type==="commodity"
+                  ?{price,signal:aiResult?.signal||"—",
+                    color:aiResult?.signal==="BUY"?T.green:aiResult?.signal==="SELL"?T.red:T.muted,
+                    rsi:Math.round(rsi),pct:0}
+                  :commodityWatch[sym];
+                const col=w?.color||T.yellow;
+                return(
+                  <div key={sym} onClick={()=>!isActive&&handleSymbolChange(sym)}
+                    style={{background:isActive?`${T.yellow}12`:`${col}08`,border:`1px solid ${isActive?T.yellow:col}40`,
+                      borderRadius:6,padding:"8px 10px",cursor:isActive?"default":"pointer",transition:"all .2s"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                      <span style={{fontSize:9,color:isActive?T.yellow:T.text,fontWeight:700}}>⬡ {cfg.label}</span>
+                      {isActive&&<span style={{fontSize:7,color:T.yellow,background:`${T.yellow}20`,padding:"1px 5px",borderRadius:3}}>ACTIVO</span>}
+                    </div>
+                    {w?(
+                      <>
+                        <div className="mono" style={{fontSize:12,fontWeight:700,color:isActive?T.yellow:col,marginBottom:2}}>
+                          {fP(w.price,cfg.precision)}
+                        </div>
+                        <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                          <span style={{fontSize:8,fontWeight:700,color:"#04060f",background:col,borderRadius:3,padding:"1px 5px"}}>{w.signal}</span>
+                          <span style={{fontSize:8,color:T.muted}}>RSI {w.rsi}</span>
+                          {w.pct!=null&&<span style={{fontSize:8,color:w.pct>=0?T.green:T.red,marginLeft:"auto"}}>{w.pct>=0?"+":""}{w.pct?.toFixed(2)}%</span>}
+                        </div>
+                      </>
+                    ):<div style={{fontSize:9,color:T.muted,marginTop:4}}>Cargando...</div>}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -2403,9 +2645,12 @@ export default function TradingBot(){
         {/* ══════════ VISTA: OPERACIONES — SEÑALES FOREX ══════════ */}
         {activeView==="operations"&&(()=>{
           const FOREX_PAIRS=["EUR/USD","GBP/USD","AUD/USD","NZD/USD","USD/JPY","USD/CHF","USD/CAD","EUR/GBP"];
+          const COMMODITY_PAIRS=["XAU/USD","XAG/USD","XTI/USD"];
           const uniquePairs=[...new Set(FOREX_PAIRS)];
           const buySignals=uniquePairs.filter(s=>forexWatch[s]?.signal==="BUY");
           const sellSignals=uniquePairs.filter(s=>forexWatch[s]?.signal==="SELL");
+          const commBuy=COMMODITY_PAIRS.filter(s=>commodityWatch[s]?.signal==="BUY");
+          const commSell=COMMODITY_PAIRS.filter(s=>commodityWatch[s]?.signal==="SELL");
           return(
             <div style={{animation:"fadeUp .3s ease"}}>
               {/* Header */}
@@ -2535,11 +2780,99 @@ export default function TradingBot(){
                 );
               })}
 
+              {/* ── MATERIAS PRIMAS section ── */}
+              <div style={{marginTop:16,marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700,color:T.yellow,letterSpacing:1}}>⬡ MATERIAS PRIMAS</div>
+                  <div style={{fontSize:9,color:T.muted,marginTop:2}}>ORO · PLATA · PETRÓLEO WTI · Deriv en vivo · señales EMA+RSI</div>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <div style={{background:`${T.green}18`,border:`1px solid ${T.green}40`,borderRadius:6,padding:"5px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:2}}>COMPRA</div>
+                    <div style={{fontSize:18,fontWeight:700,color:T.green}}>{commBuy.length}</div>
+                  </div>
+                  <div style={{background:`${T.red}18`,border:`1px solid ${T.red}40`,borderRadius:6,padding:"5px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:2}}>VENTA</div>
+                    <div style={{fontSize:18,fontWeight:700,color:T.red}}>{commSell.length}</div>
+                  </div>
+                </div>
+              </div>
+              {COMMODITY_PAIRS.map(sym=>{
+                const cfg=ASSETS[sym];
+                const d=commodityWatch[sym];
+                if(!d)return(
+                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+                    gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
+                    border:`1px solid ${T.border}`,alignItems:"center"}}>
+                    <span style={{fontSize:11,fontWeight:700,color:T.yellow}}>⬡ {cfg.label}</span>
+                    <span style={{fontSize:9,color:T.muted}}>Cargando...</span>
+                    <span/><span/><span/><span/><span/><span/>
+                  </div>
+                );
+                const isBuy=d.signal==="BUY";
+                const isHold=d.signal==="HOLD";
+                const col=d.color;
+                const prec=d.prec||cfg.precision;
+                const confBar=Math.min(100,d.confidence||0);
+                return(
+                  <div key={sym} className="fade-up"
+                    onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
+                    style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+                      gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
+                      background:isHold?T.card:`${col}08`,
+                      border:`1px solid ${isHold?T.border:col+"35"}`,
+                      alignItems:"center",transition:"filter .15s"}}
+                  >
+                    <div>
+                      <div style={{fontSize:12,fontWeight:700,color:T.yellow}}>⬡ {cfg.label}</div>
+                      <div style={{fontSize:7,color:T.muted,marginTop:1}}>RSI {d.rsi} · {d.samples}pts</div>
+                    </div>
+                    <div style={{background:`${col}20`,border:`1px solid ${col}50`,borderRadius:5,padding:"4px 8px",textAlign:"center"}}>
+                      <div style={{fontSize:11,fontWeight:700,color:col}}>{isHold?"— HOLD":isBuy?"▲ BUY":"▼ SELL"}</div>
+                    </div>
+                    <div>
+                      <div className="mono" style={{fontSize:12,fontWeight:700,color:isHold?T.muted:col}}>
+                        {isHold?"—":`${d.confidence}%`}
+                      </div>
+                      {!isHold&&(
+                        <div style={{height:3,background:T.dim,borderRadius:2,marginTop:3,overflow:"hidden"}}>
+                          <div style={{height:"100%",width:`${confBar}%`,background:col,borderRadius:2}}/>
+                        </div>
+                      )}
+                    </div>
+                    <div className="mono" style={{fontSize:11,fontWeight:700,color:T.text}}>{d.price.toFixed(prec)}</div>
+                    <div>
+                      {isHold?<span className="mono" style={{fontSize:10,color:T.muted}}>—</span>:(
+                        <>
+                          <div className="mono" style={{fontSize:11,fontWeight:700,color:T.green}}>{d.target.toFixed(prec)}</div>
+                          <div style={{fontSize:7,color:T.green,marginTop:1}}>🎯 Take Profit</div>
+                        </>
+                      )}
+                    </div>
+                    <div>
+                      {isHold?<span className="mono" style={{fontSize:10,color:T.muted}}>—</span>:(
+                        <>
+                          <div className="mono" style={{fontSize:11,fontWeight:700,color:T.red}}>{d.stop.toFixed(prec)}</div>
+                          <div style={{fontSize:7,color:T.red,marginTop:1}}>🛑 Stop Loss</div>
+                        </>
+                      )}
+                    </div>
+                    <div className="mono" style={{fontSize:11,fontWeight:700,color:isHold?T.muted:T.yellow}}>
+                      {isHold?"—":`${d.targetPips}p`}
+                    </div>
+                    <div className="mono" style={{fontSize:11,fontWeight:700,
+                      color:isHold?T.muted:parseFloat(d.rr)>=1.5?T.green:T.yellow}}>
+                      {isHold?"—":`1:${d.rr}`}
+                    </div>
+                  </div>
+                );
+              })}
+
               <div style={{marginTop:12,padding:"8px 12px",background:T.card,borderRadius:6,
                 border:`1px solid ${T.border}`,fontSize:9,color:T.muted,lineHeight:1.6}}>
                 <strong style={{color:T.accent}}>Cómo usar estas señales:</strong> Haz clic en cualquier par para abrir su gráfica con la proyección detallada.
                 Los niveles de Objetivo y Stop se calculan con la volatilidad reciente (ATR estimado).
-                Señales generadas con EMA9/EMA21 + RSI(14). Actualiza cada 15s.
+                Señales generadas con EMA9/EMA21 + RSI(14). Actualiza cada 15s · materias primas cada 20s.
               </div>
             </div>
           );
