@@ -1329,7 +1329,7 @@ export default function TradingBot(){
       const cacheKey=`${newAsset.forexFrom}_${newAsset.forexTo}`;
       if(_fxCache[cacheKey]?.rate) initPrice=_fxCache[cacheKey].rate;
     }
-    const initCandles=genCandles(initPrice,200,chartIntervalRef.current);
+    const initCandles=genCandles(initPrice,300,chartIntervalRef.current);
     setCandles(initCandles);
     setPrice(initPrice);
     priceRef.current=initPrice;
