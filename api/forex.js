@@ -10,10 +10,10 @@ async function fetchFromYahoo(from, to, wantCandles, limit, interval = "1m", yah
   // For 1H and 4H use native 60m data (need more history than 1m allows)
   const useNative60m = interval === "1h" || interval === "4h";
   const yfInterval = useNative60m ? "60m" : "1m";
-  const yfRange    = useNative60m ? "60d" : "10d"; // 10d of 1m covers ~14400 candles (~500 5m candles)
+  const yfRange    = useNative60m ? "60d" : "7d"; // Yahoo Finance max for 1m is 7 days (~500 5m candles)
 
   const r = await fetch(
-    `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=${yfInterval}&range=${yfRange}`,
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=${yfInterval}&range=${yfRange}`,
     { headers: { "User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)" } }
   );
   if (!r.ok) throw new Error(`Yahoo ${r.status}`);
