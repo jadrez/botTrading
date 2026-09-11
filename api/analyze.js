@@ -172,7 +172,11 @@ Responde SOLO JSON sin backticks:
         "Authorization": `Bearer ${groqKey}`,
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        // llama-3.3-70b-versatile was deprecated by Groq on 2026-08-16 for
+        // free/developer tiers (enterprise-only now). openai/gpt-oss-120b is
+        // Groq's recommended replacement at comparable capability. Overridable
+        // via GROQ_MODEL so a future Groq deprecation doesn't need a redeploy.
+        model: process.env.GROQ_MODEL || "openai/gpt-oss-120b",
         max_tokens: 320,
         temperature: 0.15,
         messages: [
