@@ -1,34 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createChart, LineStyle, CrosshairMode } from "lightweight-charts";
-
-/* ─── THEME ─────────────────────────────────────────────────────────────── */
-const T = {
-  bg:"#04060f", panel:"#080d1c", card:"#0c1220", border:"#152035",
-  accent:"#00b8e6", green:"#00e676", red:"#ff1744", yellow:"#ffd600",
-  orange:"#ff6d00", text:"#c8d8f0", muted:"#344d70", dim:"#0f1828",
-};
-
-const STYLES = `
-  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=Barlow:wght@300;400;600;700;900&display=swap');
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-  html,body{background:${T.bg};color:${T.text};font-family:'Barlow',sans-serif;overflow-x:hidden;}
-  ::-webkit-scrollbar{width:3px;height:3px;}
-  ::-webkit-scrollbar-track{background:${T.bg};}
-  ::-webkit-scrollbar-thumb{background:${T.border};border-radius:2px;}
-  .mono{font-family:'IBM Plex Mono',monospace;}
-  button{font-family:'Barlow',sans-serif;transition:all .15s ease;}
-  button:hover{filter:brightness(1.15);}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  @keyframes ticker{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
-  @keyframes breathe{0%,100%{box-shadow:0 0 0 0 #00e67630}50%{box-shadow:0 0 0 6px #00e67600}}
-  @keyframes scanPulse{0%,100%{opacity:.03}50%{opacity:.07}}
-  .live::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;background:${T.green};animation:pulse 1.4s ease-in-out infinite;margin-right:6px;}
-  .fade-up{animation:fadeUp .3s ease forwards;}
-  .breathe{animation:breathe 2s ease-in-out infinite;}
-  .scanlines{position:fixed;inset:0;pointer-events:none;z-index:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,184,230,.008) 2px,rgba(0,184,230,.008) 4px);animation:scanPulse 5s ease-in-out infinite;}
-`;
+import { T, STYLES } from "./theme.js";
+import { SYMBOL_STRATEGY, scaledTpSl } from "./lib/symbolStrategy.js";
+import { MAX_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK } from "./lib/constants.js";
+import Sparkline from "./components/Sparkline.jsx";
+import TierBadge from "./components/TierBadge.jsx";
+import TechnicalPanel from "./components/TechnicalPanel.jsx";
+import CapitalPanel from "./components/CapitalPanel.jsx";
+import SchedulePanel from "./components/SchedulePanel.jsx";
 
 /* ─── ASSETS CONFIG ─────────────────────────────────────────────────────── */
 const ASSETS = {
@@ -63,67 +42,13 @@ const ASSETS = {
     yahooTicker:"CL=F",  correlations:{} },
 };
 
-/* ─── VALIDATED STRATEGY CONFIG ─────────────────────────────────────────────
-   Backed by backtest/walkforward.mjs — 365 days of 1h candles, 4 rolling
-   walk-forward folds (params re-picked on train, judged on unseen test data).
-   ROBUSTO   = profit factor > 1 held in ≥3/4 folds → auto-trading enabled
-               with the TP/SL that generalized best.
-   MIXTO     = edge inconsistent across folds → kept enabled but held to a
-               much higher confidence bar (fewer, more selective trades).
-   SIN-EDGE  = 0/4 folds profitable → auto-trading disabled. The symbol stays
-               visible for manual analysis, it just won't self-open trades.
-   Re-run `npm run backtest:wf -- --symbols "..."` periodically — markets
-   drift, so this table is a snapshot, not a permanent verdict. */
-const SYMBOL_STRATEGY = {
-  "ETH/USDT": { tier:"ROBUSTO", tp:8, sl:4, minConf:70 },
-  "XAU/USD":  { tier:"ROBUSTO", tp:8, sl:4, minConf:70 },
-  "USD/CAD":  { tier:"ROBUSTO", tp:6, sl:3, minConf:60 },
-  "AUD/USD":  { tier:"ROBUSTO", tp:6, sl:6, minConf:70 },
-
-  "BTC/USDT": { tier:"MIXTO",   tp:9, sl:3, minConf:80 },
-  "EUR/USD":  { tier:"MIXTO",   tp:8, sl:4, minConf:80 },
-  "GBP/USD":  { tier:"MIXTO",   tp:6, sl:3, minConf:80 },
-  "USD/JPY":  { tier:"MIXTO",   tp:9, sl:3, minConf:80 },
-  "NZD/USD":  { tier:"MIXTO",   tp:8, sl:4, minConf:80 },
-  "USD/CHF":  { tier:"MIXTO",   tp:6, sl:3, minConf:80 },
-
-  "SOL/USDT": { tier:"SIN-EDGE" },
-  "EUR/GBP":  { tier:"SIN-EDGE" },
-  "XAG/USD":  { tier:"SIN-EDGE" },
-  "XTI/USD":  { tier:"SIN-EDGE" },
-};
-
-// The backtest (backtest/*.mjs) always ran at stake=$10, multiplier=100x —
-// SYMBOL_STRATEGY's tp/sl are dollar amounts calibrated to THAT stake, which
-// really encode a validated PRICE-MOVE PERCENTAGE (tp/(stake*mult)). If you
-// trade a different stake (e.g. $0.05) but keep the same dollar tp/sl, the
-// price-move target becomes absurd (thousands of %) and the trade can never
-// realistically hit TP/SL. Scale tp/sl by the actual stake×multiplier so the
-// validated price-move percentage is preserved at any position size.
-const BACKTEST_STAKE=10, BACKTEST_MULT=100;
-function scaledTpSl(sym, stake, multiplier){
-  const strat=SYMBOL_STRATEGY[sym];
-  if(!strat?.tp||!strat?.sl||!stake||!multiplier) return null;
-  const factor=(stake*multiplier)/(BACKTEST_STAKE*BACKTEST_MULT);
-  return{
-    tp:Math.max(0.001,+(strat.tp*factor).toFixed(4)),
-    sl:Math.max(0.001,+(strat.sl*factor).toFixed(4)),
-  };
-}
+// SYMBOL_STRATEGY / scaledTpSl now live in ./lib/symbolStrategy.js (imported
+// above) so both the app and backtest tooling can reference the same shape —
+// see that file for the tier methodology and re-validation instructions.
 
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
-const MAX_POSITIONS         = 3;
-const DEFAULT_STAKE         = 0.05;   // USD stake per trade (Deriv multiplier contracts) — small-capital start
-const DEFAULT_MULTIPLIER    = 100;    // leverage multiplier
-const ANALYSIS_INTERVAL_MS  = 300000;
-
-// Dynamic stop-loss: once a trade's unrealized profit reaches this fraction
-// of its TP target, the stop moves to breakeven (can't turn into a loss
-// anymore); beyond that it trails the peak profit, allowing it to give back
-// only this fraction before locking in and closing. Symmetric for BUY/SELL —
-// posPnL() already folds direction in, so this just compares dollar PnL.
-const TRAIL_BREAKEVEN_AT = 0.5;  // 50% of TP reached → stop moves to breakeven
-const TRAIL_GIVEBACK     = 0.4;  // once trailing, allow giving back 40% of the peak
+// Moved to ./lib/constants.js (imported above) so components like
+// CapitalPanel can reference DEFAULT_STAKE without importing this whole file.
 
 // Deriv WebSocket symbol mapping
 const DERIV_SYMBOLS = {
@@ -1039,35 +964,6 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
       </div>
       <div ref={macdRef} style={{flex:1,minHeight:0}}/>
     </div>
-  );
-}
-
-/* ─── SPARKLINE ─────────────────────────────────────────────────────────── */
-function Sparkline({data, color, width=80, height=22}){
-  if(!data||data.length<2) return <svg width={width} height={height}/>;
-  const min=Math.min(...data), max=Math.max(...data), range=(max-min)||1;
-  const pts=data.map((v,i)=>{
-    const x=(i/(data.length-1))*width;
-    const y=height-2-((v-min)/range)*(height-4);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-  return(
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.4"/>
-    </svg>
-  );
-}
-
-/* ─── SYMBOL TIER BADGE ─────────────────────────────────────────────────── */
-function TierBadge({symbol}){
-  const strat=SYMBOL_STRATEGY[symbol];
-  if(!strat) return null;
-  const col=strat.tier==="ROBUSTO"?T.green:strat.tier==="MIXTO"?T.yellow:T.red;
-  return(
-    <span style={{fontSize:6,fontWeight:700,color:col,background:`${col}18`,
-      padding:"1px 5px",borderRadius:3,letterSpacing:.5,whiteSpace:"nowrap"}}>
-      {strat.tier==="SIN-EDGE"?"🔒 SIN-EDGE":strat.tier}
-    </span>
   );
 }
 
@@ -3212,6 +3108,87 @@ export default function TradingBot(){
         {/* ══════════ VISTA: DASHBOARD ══════════ */}
         {activeView==="dashboard"&&(<>
 
+        <div style={{display:"grid",gridTemplateColumns:"1fr 380px",gap:16,alignItems:"start"}}>
+        <div style={{minWidth:0}}>
+
+        {/* SIGNAL HERO — la señal activa es lo primero que se ve en el Dashboard */}
+        {aiResult&&(
+          <div className="fade-up" style={{background:`linear-gradient(180deg,${T.panel},${T.card})`,border:`1px solid ${sigCol}40`,borderRadius:10,padding:"18px 20px",marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:16,flexWrap:"wrap"}}>
+              <div style={{flex:1,minWidth:220}}>
+                <div style={{fontSize:8,color:T.muted,letterSpacing:3,marginBottom:5}}>SEÑAL ACTIVA · {symbol}</div>
+                <div style={{display:"flex",alignItems:"baseline",gap:14,flexWrap:"wrap"}}>
+                  <div style={{fontSize:42,fontWeight:900,letterSpacing:2,color:sigCol,lineHeight:1}}>{aiResult.signal}</div>
+                  <div style={{display:"flex",flexDirection:"column"}}>
+                    <span style={{fontSize:8,color:T.muted,letterSpacing:1}}>CONFIANZA</span>
+                    <span className="mono" style={{fontSize:20,fontWeight:700,color:sigCol}}>{aiResult.confidence}%</span>
+                  </div>
+                </div>
+                <div style={{fontSize:11,color:T.muted,marginTop:8}}>
+                  Riesgo <span style={{color:aiResult.risk==="BAJO"?T.green:aiResult.risk==="ALTO"?T.red:T.yellow}}>{aiResult.risk}</span>
+                  {" "}· Noticias <span style={{color:aiResult.news_impact==="BULLISH"?T.green:aiResult.news_impact==="BEARISH"?T.red:T.muted}}>{aiResult.news_impact}</span>
+                  {" "}· <span style={{color:aiResult.should_open&&aiResult.confidence>=dynamicMinConf?T.green:T.orange}}>
+                    {aiResult.should_open&&aiResult.confidence>=dynamicMinConf
+                      ?`ABRIR ✓ (≥${dynamicMinConf}%)`
+                      :aiResult.should_open
+                        ?`🔒 UMBRAL ${dynamicMinConf}% (${aiResult.confidence}%)`
+                        :"NO ABRIR"
+                    }
+                  </span>
+                </div>
+                <div style={{background:T.dim,borderRadius:5,padding:"9px 12px",fontSize:11,color:T.text,lineHeight:1.65,borderLeft:`3px solid ${sigCol}`,marginTop:10}}>
+                  {aiResult.reasoning}
+                </div>
+                {!autoMode&&aiResult.signal!=="HOLD"&&positions.filter(p=>!p.symbol||p.symbol===symbol).length<MAX_POSITIONS&&(
+                  <button onClick={()=>{
+                    const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now(),symbol,openTime:Date.now()};
+                    setPositions(p=>[...p,pos]);
+                    addLog(`${aiResult.signal==="BUY"?"🟢":"🔴"} ${aiResult.signal} manual @ ${fP(priceRef.current,asset.precision)}`,aiResult.signal==="BUY"?"buy":"sell");
+                  }} style={{marginTop:10,width:"100%",background:`${sigCol}18`,border:`1px solid ${sigCol}`,
+                    color:sigCol,borderRadius:7,padding:"9px",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1}}>
+                    ▶ EJECUTAR {aiResult.signal} MANUALMENTE (pos {positions.filter(p=>!p.symbol||p.symbol===symbol).length+1}/{MAX_POSITIONS})
+                  </button>
+                )}
+              </div>
+
+              <div style={{width:1,alignSelf:"stretch",background:T.border}}/>
+
+              <div style={{width:180,display:"flex",flexDirection:"column",gap:12}}>
+                <div style={{background:`${sigCol}12`,border:`1px solid ${sigCol}30`,borderRadius:6,padding:"8px 12px"}}>
+                  <div style={{fontSize:7,color:T.muted,marginBottom:2,letterSpacing:1}}>FACTOR CLAVE</div>
+                  <div style={{fontSize:10,color:sigCol,fontWeight:600,lineHeight:1.3}}>{aiResult.key_factor}</div>
+                </div>
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:4}}><span style={{color:T.muted,letterSpacing:1}}>TAKE PROFIT</span><span className="mono" style={{color:T.green,fontWeight:700}}>+{fUSD(tpTarget,false)}</span></div>
+                  <div style={{height:5,borderRadius:3,background:T.dim,overflow:"hidden"}}><div style={{width:"0%",height:"100%",background:T.green}}/></div>
+                </div>
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:4}}><span style={{color:T.muted,letterSpacing:1}}>STOP LOSS</span><span className="mono" style={{color:T.red,fontWeight:700}}>-{fUSD(slTarget,false)}</span></div>
+                  <div style={{height:5,borderRadius:3,background:T.dim,overflow:"hidden"}}><div style={{width:"0%",height:"100%",background:T.red}}/></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* STRATEGY TIER BANNER — from backtest/walkforward.mjs validation */}
+        {SYMBOL_STRATEGY[symbol]&&SYMBOL_STRATEGY[symbol].tier!=="ROBUSTO"&&(()=>{
+          const tier=SYMBOL_STRATEGY[symbol].tier;
+          const isDisabled=tier==="SIN-EDGE";
+          const col=isDisabled?T.red:T.yellow;
+          return(
+            <div style={{background:`${col}0e`,border:`1px solid ${col}35`,borderRadius:8,padding:"8px 14px",marginBottom:10,
+              display:"flex",alignItems:"center",gap:8,fontSize:10,color:col}}>
+              <span style={{fontWeight:900}}>{isDisabled?"⛔":"⚠"}</span>
+              <span>
+                {isDisabled
+                  ?`${symbol}: sin ventaja estadística validada (walk-forward 0/4 folds) — auto-trading desactivado. Solo análisis manual.`
+                  :`${symbol}: ventaja inconsistente entre folds de validación — auto-trading activo con umbral de confianza elevado (≥${SYMBOL_STRATEGY[symbol].minConf}%).`}
+              </span>
+            </div>
+          );
+        })()}
+
         {/* STATS ROW */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:10}}>
           {[
@@ -3230,111 +3207,8 @@ export default function TradingBot(){
         </div>
 
         {/* INDICATORS */}
-        {(()=>{
-          const emaCross=ema9>ema21?"ALCISTA":"BAJISTA";
-          const emaCrossCol=ema9>ema21?T.green:T.red;
-          const volLabel=volTrend.ratio>1.5?"ALTO":volTrend.ratio<0.7?"BAJO":"NORMAL";
-          const volCol=volTrend.ratio>1.5?T.green:volTrend.ratio<0.7?T.muted:T.yellow;
-          const trend1hCol=trend1h>0?T.green:T.red;
-          const indicators=[
-            {l:"RSI (14)",    v:rsi.toFixed(1),        c:rsi<30?T.green:rsi>70?T.red:T.yellow, s:rsi<30?"SOBREVENTA":rsi>70?"SOBRECOMPRA":"NEUTRAL"},
-            {l:"MACD HIST",  v:macd.hist.toFixed(asset.precision>3?5:2), c:macd.hist>0?T.green:T.red, s:macd.hist>0?"ALCISTA":"BAJISTA"},
-            {l:"BB UPPER",   v:fP(bb.upper,asset.precision), c:price>bb.upper?T.red:T.muted, s:price>bb.upper?"⚠ SOBRE BANDA":"normal"},
-            {l:"BB LOWER",   v:fP(bb.lower,asset.precision), c:price<bb.lower?T.green:T.muted, s:price<bb.lower?"⚠ BAJO BANDA":"normal"},
-            {l:"EMA 9/21",   v:`${fP(ema9,asset.precision>3?4:1)}`, c:emaCrossCol, s:`CRUCE ${emaCross}`},
-            {l:"VOLUMEN",    v:`×${volTrend.ratio.toFixed(2)}`, c:volCol, s:`${volLabel} vs promedio`},
-            {l:"TENDENCIA 1H",v:`${trend1h>=0?"+":""}${trend1h.toFixed(3)}%`, c:trend1hCol, s:trend1h>0?"ALCISTA 1H":"BAJISTA 1H"},
-            {l:"EMA SEÑAL",  v:ema9>ema21?"BUY":"SELL", c:emaCrossCol, s:ema9>ema21?"EMA9 > EMA21":"EMA9 < EMA21"},
-          ];
-          return(
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:10}}>
-              {indicators.map(({l,v,c,s})=>(
-                <div key={l} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:6,padding:"8px 12px"}}>
-                  <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:2}}>{l}</div>
-                  <div className="mono" style={{fontSize:13,fontWeight:700,color:c}}>{v}</div>
-                  <div style={{fontSize:8,color:c,marginTop:2,opacity:.75}}>{s}</div>
-                </div>
-              ))}
-            </div>
-          );
-        })()}
-
-        {/* CORRELATION PANEL — only for forex pairs with correlation data */}
-        {asset.type==="forex"&&Object.keys(asset.correlations||{}).length>0&&(()=>{
-          const corrEntries=Object.entries(asset.correlations);
-          const loaded=corrEntries.filter(([s])=>corrSignals[s]);
-          const confirmed=loaded.filter(([s,d])=>corrSignals[s]?.confirms);
-          const total=corrEntries.length;
-          const confCount=confirmed.length;
-          const allConfirm=confCount===total&&total>0;
-          const noneConfirm=confCount===0&&loaded.length>0;
-          const summaryCol=allConfirm?T.green:noneConfirm?T.red:T.yellow;
-          return(
-            <div style={{background:T.card,border:`1px solid ${summaryCol}40`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>CONFIRMACIÓN DE CORRELACIÓN · {symbol}</span>
-                <span style={{fontSize:9,fontWeight:700,color:summaryCol,
-                  background:`${summaryCol}18`,padding:"2px 10px",borderRadius:4}}>
-                  {loaded.length===0?"⏳ CARGANDO...":
-                   allConfirm?"✓✓ MÁXIMA CONFLUENCIA":
-                   noneConfirm?"✗ SIN CONFIRMACIÓN — PRECAUCIÓN":
-                   `${confCount}/${total} CONFIRMAN`}
-                </span>
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:`repeat(${total},1fr)`,gap:6}}>
-                {corrEntries.map(([sym,direction])=>{
-                  const info=corrSignals[sym];
-                  const col=info?.color||T.muted;
-                  const confirms=info?.confirms;
-                  const dirLabel=direction>0?"Corr +":"Corr −";
-                  const dirDesc=direction>0?"Se mueve igual":"Se mueve opuesto";
-                  return(
-                    <div key={sym} onClick={()=>handleSymbolChange(sym)}
-                      style={{background:`${col}0a`,border:`1px solid ${col}35`,borderRadius:7,
-                        padding:"8px 10px",cursor:"pointer",transition:"all .2s"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                        <span style={{fontSize:10,fontWeight:700,color:T.text}}>{sym}</span>
-                        <span style={{fontSize:7,color:direction>0?T.green:T.red,
-                          background:`${direction>0?T.green:T.red}18`,
-                          padding:"1px 5px",borderRadius:3}}>{dirLabel}</span>
-                      </div>
-                      {info?(
-                        <>
-                          <div className="mono" style={{fontSize:12,fontWeight:700,color:col,marginBottom:3}}>
-                            {fP(info.price,info.precision||5)}
-                          </div>
-                          <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
-                            <span style={{fontSize:8,fontWeight:700,color:"#04060f",
-                              background:col,borderRadius:3,padding:"1px 5px"}}>{info.signal}</span>
-                            <span style={{fontSize:8,color:T.muted}}>RSI {info.rsi}</span>
-                            <span style={{fontSize:9,color:confirms?T.green:T.red,marginLeft:"auto",fontWeight:700}}>
-                              {confirms?"✓ CONFIRMA":"✗ DIVERGE"}
-                            </span>
-                          </div>
-                          <div style={{fontSize:8,color:T.muted,marginTop:3,opacity:.7}}>{dirDesc}</div>
-                          {info.samples<10&&<div style={{fontSize:7,color:T.orange,marginTop:2}}>⏳ acumulando datos ({info.samples}/10)</div>}
-                        </>
-                      ):(
-                        <div style={{fontSize:9,color:T.muted}}>Cargando...</div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              {loaded.length>0&&(
-                <div style={{marginTop:8,padding:"5px 10px",borderRadius:5,
-                  background:allConfirm?`${T.green}10`:noneConfirm?`${T.red}10`:`${T.yellow}08`,
-                  borderLeft:`3px solid ${summaryCol}`,fontSize:10,color:summaryCol}}>
-                  {allConfirm
-                    ?"Todos los pares confirman la misma dirección del mercado. Alta probabilidad de movimiento sostenido."
-                    :noneConfirm
-                    ?"Los pares correlacionados contradicen esta señal. Evitar abrir posición hasta que haya confluencia."
-                    :"Confluencia parcial. Señal moderada — opera con tamaño reducido o espera mejor confirmación."}
-                </div>
-              )}
-            </div>
-          );
-        })()}
+        <TechnicalPanel symbol={symbol} price={price} rsi={rsi} macd={macd} bb={bb}
+          ema9={ema9} ema21={ema21} volTrend={volTrend} trend1h={trend1h} precision={asset.precision}/>
 
         {/* CHART — Lightweight Charts */}
         <div style={{background:"#04060f",border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:10}}>
@@ -3518,66 +3392,6 @@ export default function TradingBot(){
           );
         })()}
 
-        {/* AI LAST SIGNAL */}
-        {aiResult&&(
-          <div className="fade-up" style={{background:T.card,border:`1px solid ${sigCol}40`,borderRadius:8,padding:"12px 16px",marginBottom:10}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-              <div>
-                <div style={{fontSize:8,color:T.muted,letterSpacing:3,marginBottom:3}}>ÚLTIMO ANÁLISIS IA · {symbol}</div>
-                <div style={{fontSize:28,fontWeight:900,letterSpacing:3,color:sigCol}}>{aiResult.signal}</div>
-                <div style={{fontSize:9,color:T.muted,marginTop:2}}>
-                  Confianza <span style={{color:sigCol,fontWeight:700}}>{aiResult.confidence}%</span>
-                  {" "}· Riesgo <span style={{color:aiResult.risk==="BAJO"?T.green:aiResult.risk==="ALTO"?T.red:T.yellow}}>{aiResult.risk}</span>
-                  {" "}· Noticias <span style={{color:aiResult.news_impact==="BULLISH"?T.green:aiResult.news_impact==="BEARISH"?T.red:T.muted}}>{aiResult.news_impact}</span>
-                  {" "}· <span style={{color:aiResult.should_open&&aiResult.confidence>=dynamicMinConf?T.green:T.orange}}>
-                    {aiResult.should_open&&aiResult.confidence>=dynamicMinConf
-                      ?`ABRIR ✓ (≥${dynamicMinConf}%)`
-                      :aiResult.should_open
-                        ?`🔒 UMBRAL ${dynamicMinConf}% (${aiResult.confidence}%)`
-                        :"NO ABRIR"
-                    }
-                  </span>
-                </div>
-              </div>
-              <div style={{background:`${sigCol}12`,border:`1px solid ${sigCol}30`,borderRadius:6,padding:"6px 12px",textAlign:"center",maxWidth:140}}>
-                <div style={{fontSize:8,color:T.muted,marginBottom:2}}>FACTOR CLAVE</div>
-                <div style={{fontSize:10,color:sigCol,fontWeight:600,lineHeight:1.3}}>{aiResult.key_factor}</div>
-              </div>
-            </div>
-            <div style={{background:T.dim,borderRadius:5,padding:"9px 12px",fontSize:11,color:T.text,lineHeight:1.65,borderLeft:`3px solid ${sigCol}`}}>
-              {aiResult.reasoning}
-            </div>
-            {!autoMode&&aiResult.signal!=="HOLD"&&positions.filter(p=>!p.symbol||p.symbol===symbol).length<MAX_POSITIONS&&(
-              <button onClick={()=>{
-                const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now(),symbol,openTime:Date.now()};
-                setPositions(p=>[...p,pos]);
-                addLog(`${aiResult.signal==="BUY"?"🟢":"🔴"} ${aiResult.signal} manual @ ${fP(priceRef.current,asset.precision)}`,aiResult.signal==="BUY"?"buy":"sell");
-              }} style={{marginTop:10,width:"100%",background:`${sigCol}18`,border:`1px solid ${sigCol}`,
-                color:sigCol,borderRadius:7,padding:"9px",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1}}>
-                ▶ EJECUTAR {aiResult.signal} MANUALMENTE (pos {positions.filter(p=>!p.symbol||p.symbol===symbol).length+1}/{MAX_POSITIONS})
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* STRATEGY TIER BANNER — from backtest/walkforward.mjs validation */}
-        {SYMBOL_STRATEGY[symbol]&&SYMBOL_STRATEGY[symbol].tier!=="ROBUSTO"&&(()=>{
-          const tier=SYMBOL_STRATEGY[symbol].tier;
-          const isDisabled=tier==="SIN-EDGE";
-          const col=isDisabled?T.red:T.yellow;
-          return(
-            <div style={{background:`${col}0e`,border:`1px solid ${col}35`,borderRadius:8,padding:"8px 14px",marginBottom:10,
-              display:"flex",alignItems:"center",gap:8,fontSize:10,color:col}}>
-              <span style={{fontWeight:900}}>{isDisabled?"⛔":"⚠"}</span>
-              <span>
-                {isDisabled
-                  ?`${symbol}: sin ventaja estadística validada (walk-forward 0/4 folds) — auto-trading desactivado. Solo análisis manual.`
-                  :`${symbol}: ventaja inconsistente entre folds de validación — auto-trading activo con umbral de confianza elevado (≥${SYMBOL_STRATEGY[symbol].minConf}%).`}
-              </span>
-            </div>
-          );
-        })()}
-
         {/* CONTROLS */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
           <button onClick={()=>runAnalysis("Análisis manual")} disabled={analyzing}
@@ -3598,139 +3412,17 @@ export default function TradingBot(){
         </div>
 
         {/* PROGRAMAR INICIO AUTOMÁTICO */}
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"14px 16px",marginBottom:10}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M12 6v6l4 2" stroke={T.accent} strokeWidth="2" strokeLinecap="round"/><circle cx="12" cy="12" r="9" stroke={T.accent} strokeWidth="2"/></svg>
-            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>INICIO AUTOMÁTICO PROGRAMADO</span>
-          </div>
-          {!scheduledStart?(
-            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-              <input type="datetime-local" value={scheduleInput} onChange={e=>setScheduleInput(e.target.value)}
-                min={new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)}
-                style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"7px 10px",fontSize:11,fontFamily:"inherit"}}/>
-              <button disabled={!scheduleInput||autoMode}
-                onClick={()=>{
-                  const ts=new Date(scheduleInput).getTime();
-                  if(isNaN(ts)||ts<=Date.now()){addLog("⚠️ Elige una fecha/hora futura válida","sell");return;}
-                  setScheduledStart(ts);
-                  addLog(`⏰ AUTO se activará el ${new Date(ts).toLocaleString("es")}`,"info");
-                }}
-                style={{background:!scheduleInput||autoMode?T.dim:`${T.accent}18`,border:`1px solid ${!scheduleInput||autoMode?T.border:T.accent}`,
-                  color:!scheduleInput||autoMode?T.muted:T.accent,borderRadius:6,padding:"7px 14px",fontSize:11,fontWeight:700,
-                  cursor:!scheduleInput||autoMode?"not-allowed":"pointer"}}>
-                Programar
-              </button>
-              {autoMode&&<span style={{fontSize:9,color:T.muted}}>AUTO ya está encendido</span>}
-            </div>
-          ):(
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,
-              background:T.dim,border:`1px solid ${T.accent}45`,borderRadius:8,padding:"12px 16px"}}>
-              <div style={{display:"flex",alignItems:"center",gap:12}}>
-                <div style={{width:34,height:34,borderRadius:8,background:`${T.accent}18`,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="16" rx="2" stroke={T.accent} strokeWidth="1.8"/><path d="M3 10h18M8 3v4M16 3v4" stroke={T.accent} strokeWidth="1.8" strokeLinecap="round"/></svg>
-                </div>
-                <div>
-                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>AUTO SE ACTIVARÁ EL</div>
-                  <div className="mono" style={{fontSize:13,fontWeight:700,color:T.accent}}>{new Date(scheduledStart).toLocaleString("es")}</div>
-                </div>
-              </div>
-              <div style={{display:"flex",alignItems:"center",gap:10}}>
-                {scheduleRemainingMs!=null&&(
-                  <div style={{textAlign:"right"}}>
-                    <div className="mono" style={{fontSize:14,fontWeight:700,color:T.text}}>
-                      {String(Math.floor(scheduleRemainingMs/3600000)).padStart(2,"0")}:
-                      {String(Math.floor(scheduleRemainingMs%3600000/60000)).padStart(2,"0")}:
-                      {String(Math.floor(scheduleRemainingMs%60000/1000)).padStart(2,"0")}
-                    </div>
-                    <div style={{fontSize:6,color:T.muted,letterSpacing:1}}>TIEMPO RESTANTE</div>
-                  </div>
-                )}
-                <button onClick={()=>{setScheduledStart(null);addLog("⏰ Programación de inicio cancelada","info");}}
-                  style={{background:"transparent",border:`1px solid ${T.red}`,color:T.red,borderRadius:6,padding:"6px 12px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
-                  Cancelar
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
+        <SchedulePanel scheduledStart={scheduledStart} setScheduledStart={setScheduledStart}
+          scheduleInput={scheduleInput} setScheduleInput={setScheduleInput}
+          scheduleRemainingMs={scheduleRemainingMs} autoMode={autoMode} addLog={addLog}/>
 
         {/* GESTIÓN DE CAPITAL — stake y escalado */}
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
-          <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:8}}>GESTIÓN DE CAPITAL</div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginBottom:stakeAutoScale?8:0}}>
-            <label style={{display:"flex",flexDirection:"column",gap:3}}>
-              <span style={{fontSize:8,color:T.muted}}>Capital inicial ($)</span>
-              <input type="number" min="1" step="1" value={initialCapital}
-                onChange={e=>setInitialCapital(parseFloat(e.target.value)||0)}
-                className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
-            </label>
-            <label style={{display:"flex",flexDirection:"column",gap:3}}>
-              <span style={{fontSize:8,color:T.muted}}>Stake actual ($)</span>
-              <input type="number" min="0.01" step="0.01" value={positionSize}
-                onChange={e=>setPositionSize(parseFloat(e.target.value)||DEFAULT_STAKE)}
-                className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
-            </label>
-            <label style={{display:"flex",alignItems:"center",gap:6,marginTop:14}}>
-              <input type="checkbox" checked={stakeAutoScale} onChange={e=>setStakeAutoScale(e.target.checked)}/>
-              <span style={{fontSize:9,color:T.muted}}>Escalado automático</span>
-            </label>
-          </div>
-          {stakeAutoScale&&(
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10}}>
-              <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                <span style={{fontSize:8,color:T.muted}}>Incremento ($)</span>
-                <input type="number" min="0.01" step="0.01" value={stakeStep}
-                  onChange={e=>setStakeStep(parseFloat(e.target.value)||0.05)}
-                  className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
-              </label>
-              <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                <span style={{fontSize:8,color:T.muted}}>Umbral de crecimiento (%)</span>
-                <input type="number" min="1" step="1" value={Math.round(stakeGrowthTrigger*100)}
-                  onChange={e=>setStakeGrowthTrigger((parseFloat(e.target.value)||20)/100)}
-                  className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
-              </label>
-              <label style={{display:"flex",flexDirection:"column",gap:3}}>
-                <span style={{fontSize:8,color:T.muted}}>Stake mínimo ($)</span>
-                <input type="number" min="0.01" step="0.01" value={minStake}
-                  onChange={e=>setMinStake(parseFloat(e.target.value)||0.05)}
-                  className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
-              </label>
-            </div>
-          )}
-          {stakeAutoScale&&(()=>{
-            const steps=Array.from({length:5},(_,i)=>+(minStake+stakeStep*i).toFixed(2));
-            const curIdx=steps.reduce((best,s,i)=>Math.abs(s-positionSize)<Math.abs(steps[best]-positionSize)?i:best,0);
-            const maxH=64;
-            return(
-              <>
-                <div style={{fontSize:8,color:T.muted,letterSpacing:1,margin:"14px 0 8px"}}>ESCALERA DE STAKE</div>
-                <div style={{display:"flex",alignItems:"flex-end",gap:10,height:maxH+28,padding:"0 4px"}}>
-                  {steps.map((s,i)=>{
-                    const isCur=i===curIdx;
-                    const h=12+((i+1)/steps.length)*maxH;
-                    return(
-                      <div key={s} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,flex:1}}>
-                        <span className="mono" style={{fontSize:9,fontWeight:isCur?700:400,color:isCur?T.accent:T.muted}}>${s.toFixed(2)}</span>
-                        <div style={{width:"100%",height:h,background:isCur?T.accent:T.border,borderRadius:"4px 4px 0 0",
-                          boxShadow:isCur?`0 0 0 2px ${T.accent}55`:"none"}}/>
-                        <span style={{fontSize:7,color:isCur?T.accent:T.muted,fontWeight:isCur?700:400}}>
-                          {isCur?"ACTUAL":i===0?"mín":`+${Math.round((s/minStake-1)*100)}%`}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            );
-          })()}
-          {stakeAutoScale&&(
-            <div style={{fontSize:8,color:T.muted,marginTop:10,lineHeight:1.5}}>
-              Cada vez que el balance suba (o baje) un {Math.round(stakeGrowthTrigger*100)}% desde el último ajuste,
-              el stake sube (o baja) ${stakeStep.toFixed(2)}, sin bajar de ${minStake.toFixed(2)}.
-              TP/SL se re-escalan automáticamente para mantener el mismo % de movimiento de precio validado por backtest.
-            </div>
-          )}
-        </div>
+        <CapitalPanel initialCapital={initialCapital} setInitialCapital={setInitialCapital}
+          positionSize={positionSize} setPositionSize={setPositionSize}
+          stakeAutoScale={stakeAutoScale} setStakeAutoScale={setStakeAutoScale}
+          stakeStep={stakeStep} setStakeStep={setStakeStep}
+          stakeGrowthTrigger={stakeGrowthTrigger} setStakeGrowthTrigger={setStakeGrowthTrigger}
+          minStake={minStake} setMinStake={setMinStake}/>
 
         {/* SEÑAL DE TRADING — guía para operar manualmente */}
         {aiResult&&(()=>{
@@ -3831,6 +3523,87 @@ export default function TradingBot(){
             </div>
           )}
         </div>
+
+        </div>{/* end left column */}
+
+        <div style={{minWidth:0}}>{/* right column: contexto */}
+
+        {/* CORRELATION PANEL — only for forex pairs with correlation data */}
+        {asset.type==="forex"&&Object.keys(asset.correlations||{}).length>0&&(()=>{
+          const corrEntries=Object.entries(asset.correlations);
+          const loaded=corrEntries.filter(([s])=>corrSignals[s]);
+          const confirmed=loaded.filter(([s,d])=>corrSignals[s]?.confirms);
+          const total=corrEntries.length;
+          const confCount=confirmed.length;
+          const allConfirm=confCount===total&&total>0;
+          const noneConfirm=confCount===0&&loaded.length>0;
+          const summaryCol=allConfirm?T.green:noneConfirm?T.red:T.yellow;
+          return(
+            <div style={{background:T.card,border:`1px solid ${summaryCol}40`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>CONFIRMACIÓN DE CORRELACIÓN · {symbol}</span>
+                <span style={{fontSize:9,fontWeight:700,color:summaryCol,
+                  background:`${summaryCol}18`,padding:"2px 10px",borderRadius:4}}>
+                  {loaded.length===0?"⏳ CARGANDO...":
+                   allConfirm?"✓✓ MÁXIMA CONFLUENCIA":
+                   noneConfirm?"✗ SIN CONFIRMACIÓN — PRECAUCIÓN":
+                   `${confCount}/${total} CONFIRMAN`}
+                </span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:`repeat(${Math.min(total,2)},1fr)`,gap:6}}>
+                {corrEntries.map(([sym,direction])=>{
+                  const info=corrSignals[sym];
+                  const col=info?.color||T.muted;
+                  const confirms=info?.confirms;
+                  const dirLabel=direction>0?"Corr +":"Corr −";
+                  const dirDesc=direction>0?"Se mueve igual":"Se mueve opuesto";
+                  return(
+                    <div key={sym} onClick={()=>handleSymbolChange(sym)}
+                      style={{background:`${col}0a`,border:`1px solid ${col}35`,borderRadius:7,
+                        padding:"8px 10px",cursor:"pointer",transition:"all .2s"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                        <span style={{fontSize:10,fontWeight:700,color:T.text}}>{sym}</span>
+                        <span style={{fontSize:7,color:direction>0?T.green:T.red,
+                          background:`${direction>0?T.green:T.red}18`,
+                          padding:"1px 5px",borderRadius:3}}>{dirLabel}</span>
+                      </div>
+                      {info?(
+                        <>
+                          <div className="mono" style={{fontSize:12,fontWeight:700,color:col,marginBottom:3}}>
+                            {fP(info.price,info.precision||5)}
+                          </div>
+                          <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+                            <span style={{fontSize:8,fontWeight:700,color:"#04060f",
+                              background:col,borderRadius:3,padding:"1px 5px"}}>{info.signal}</span>
+                            <span style={{fontSize:8,color:T.muted}}>RSI {info.rsi}</span>
+                            <span style={{fontSize:9,color:confirms?T.green:T.red,marginLeft:"auto",fontWeight:700}}>
+                              {confirms?"✓ CONFIRMA":"✗ DIVERGE"}
+                            </span>
+                          </div>
+                          <div style={{fontSize:8,color:T.muted,marginTop:3,opacity:.7}}>{dirDesc}</div>
+                          {info.samples<10&&<div style={{fontSize:7,color:T.orange,marginTop:2}}>⏳ acumulando datos ({info.samples}/10)</div>}
+                        </>
+                      ):(
+                        <div style={{fontSize:9,color:T.muted}}>Cargando...</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {loaded.length>0&&(
+                <div style={{marginTop:8,padding:"5px 10px",borderRadius:5,
+                  background:allConfirm?`${T.green}10`:noneConfirm?`${T.red}10`:`${T.yellow}08`,
+                  borderLeft:`3px solid ${summaryCol}`,fontSize:10,color:summaryCol}}>
+                  {allConfirm
+                    ?"Todos los pares confirman la misma dirección del mercado. Alta probabilidad de movimiento sostenido."
+                    :noneConfirm
+                    ?"Los pares correlacionados contradicen esta señal. Evitar abrir posición hasta que haya confluencia."
+                    :"Confluencia parcial. Señal moderada — opera con tamaño reducido o espera mejor confirmación."}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* LEARNING STATS PANEL */}
         <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
@@ -3975,6 +3748,9 @@ export default function TradingBot(){
             </div>
           </div>
         )}
+
+        </div>{/* end right column */}
+        </div>{/* end two-column grid */}
 
         {/* DISCLAIMER */}
         <div style={{fontSize:8,color:T.muted,textAlign:"center",lineHeight:1.9,paddingTop:8,borderTop:`1px solid ${T.border}`}}>
