@@ -8,6 +8,9 @@ import TierBadge from "./components/TierBadge.jsx";
 import TechnicalPanel from "./components/TechnicalPanel.jsx";
 import CapitalPanel from "./components/CapitalPanel.jsx";
 import SchedulePanel from "./components/SchedulePanel.jsx";
+import RangeBar from "./components/RangeBar.jsx";
+import TierLegend from "./components/TierLegend.jsx";
+import SignalDistribution from "./components/SignalDistribution.jsx";
 
 /* ─── ASSETS CONFIG ─────────────────────────────────────────────────────── */
 const ASSETS = {
@@ -1126,7 +1129,19 @@ async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,tre
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,marketBias,newsSummary,reason,positionSize,tpTarget,slTarget,activePrediction}),
   });
-  if(!r.ok)return{signal:"HOLD",confidence:40,reasoning:"Error al conectar con el servidor.",news_impact:"NEUTRAL",key_factor:"Error conexión",risk:"ALTO",should_open:false};
+  if(!r.ok){
+    // 401/403 here means Groq rejected the API key itself — this is a config
+    // problem in Vercel's env vars (GROQ_API_KEY), not a bug in this app.
+    // Distinguish it from a generic network error so it's obvious to fix.
+    const isAuthError=r.status===401||r.status===403;
+    return{signal:"HOLD",confidence:40,
+      reasoning:isAuthError
+        ?"GROQ_API_KEY inválida o expirada — genera una nueva en console.groq.com y actualízala en Vercel (Settings → Environment Variables), luego redeploy."
+        :`Error del servidor de análisis (HTTP ${r.status}).`,
+      news_impact:"NEUTRAL",
+      key_factor:isAuthError?"API key de Groq inválida":"Error conexión",
+      risk:"ALTO",should_open:false};
+  }
   return r.json();
 }
 
@@ -2871,8 +2886,18 @@ export default function TradingBot(){
           const sellSignals=uniquePairs.filter(s=>s===symbol?(aiResult?.signal==="SELL"):forexWatch[s]?.signal==="SELL");
           const commBuy=COMMODITY_PAIRS.filter(s=>s===symbol?(aiResult?.signal==="BUY"):commodityWatch[s]?.signal==="BUY");
           const commSell=COMMODITY_PAIRS.filter(s=>s===symbol?(aiResult?.signal==="SELL"):commodityWatch[s]?.signal==="SELL");
+
+          // Distribution + best-opportunity across every watched pair (for the sidebar)
+          const allSyms=[...uniquePairs,...COMMODITY_PAIRS];
+          const allData=allSyms.map(s=>({sym:s,d:buildActiveData(s)||forexWatch[s]||commodityWatch[s]})).filter(x=>x.d);
+          const totalBuy=buySignals.length+commBuy.length;
+          const totalSell=sellSignals.length+commSell.length;
+          const totalHold=Math.max(0,allSyms.length-totalBuy-totalSell);
+          const best=allData.filter(x=>x.d.signal!=="HOLD").sort((a,b)=>(b.d.confidence||0)-(a.d.confidence||0))[0];
+
           return(
-            <div style={{animation:"fadeUp .3s ease"}}>
+            <div style={{animation:"fadeUp .3s ease",display:"grid",gridTemplateColumns:"1fr 360px",gap:16,alignItems:"start"}}>
+            <div style={{minWidth:0}}>
               {/* Header */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
                 <div>
@@ -2894,9 +2919,9 @@ export default function TradingBot(){
               </div>
 
               {/* Table header */}
-              <div style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
+              <div style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
                 gap:6,padding:"5px 10px",marginBottom:4,borderBottom:`1px solid ${T.border}40`}}>
-                {["PAR","TENDENCIA","SEÑAL","CONF.","ENTRADA","OBJETIVO","STOP LOSS","PIPS","R/R"].map(h=>(
+                {["PAR","TENDENCIA","SEÑAL","CONF.","ENTRADA","RANGO STOP · OBJETIVO","PIPS","R/R"].map(h=>(
                   <div key={h} style={{fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>{h}</div>
                 ))}
               </div>
@@ -2905,12 +2930,12 @@ export default function TradingBot(){
               {uniquePairs.map(sym=>{
                 const d=buildActiveData(sym)||forexWatch[sym];
                 if(!d)return(
-                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
+                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
                     gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
                     border:`1px solid ${T.border}`,alignItems:"center"}}>
                     <span style={{fontSize:11,fontWeight:700,color:T.accent}}>{sym}</span>
                     <span style={{fontSize:9,color:T.muted}}>Cargando...</span>
-                    <span/><span/><span/><span/><span/><span/><span/>
+                    <span/><span/><span/><span/><span/><span/>
                   </div>
                 );
                 const isBuy=d.signal==="BUY";
@@ -2921,7 +2946,7 @@ export default function TradingBot(){
                 return(
                   <div key={sym} className="fade-up"
                     onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
-                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
+                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
                       border:`1px solid ${isHold?T.border:col+"35"}`,
@@ -2964,33 +2989,8 @@ export default function TradingBot(){
                       {d.price.toFixed(prec)}
                     </div>
 
-                    {/* Objetivo */}
-                    <div>
-                      {isHold?(
-                        <span className="mono" style={{fontSize:10,color:T.muted}}>—</span>
-                      ):(
-                        <>
-                          <div className="mono" style={{fontSize:11,fontWeight:700,color:T.green}}>
-                            {d.target.toFixed(prec)}
-                          </div>
-                          <div style={{fontSize:7,color:T.green,marginTop:1}}>🎯 Take Profit</div>
-                        </>
-                      )}
-                    </div>
-
-                    {/* Stop Loss */}
-                    <div>
-                      {isHold?(
-                        <span className="mono" style={{fontSize:10,color:T.muted}}>—</span>
-                      ):(
-                        <>
-                          <div className="mono" style={{fontSize:11,fontWeight:700,color:T.red}}>
-                            {d.stop.toFixed(prec)}
-                          </div>
-                          <div style={{fontSize:7,color:T.red,marginTop:1}}>🛑 Stop Loss</div>
-                        </>
-                      )}
-                    </div>
+                    {/* Rango stop/objetivo */}
+                    <RangeBar entry={d.price} target={d.target} stop={d.stop} isHold={isHold} precision={prec}/>
 
                     {/* Pips al objetivo */}
                     <div className="mono" style={{fontSize:11,fontWeight:700,color:isHold?T.muted:T.yellow}}>
@@ -3027,12 +3027,12 @@ export default function TradingBot(){
                 const cfg=ASSETS[sym];
                 const d=buildActiveData(sym)||commodityWatch[sym];
                 if(!d)return(
-                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
+                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
                     gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
                     border:`1px solid ${T.border}`,alignItems:"center"}}>
                     <span style={{fontSize:11,fontWeight:700,color:T.yellow}}>⬡ {cfg.label}</span>
                     <span style={{fontSize:9,color:T.muted}}>Cargando...</span>
-                    <span/><span/><span/><span/><span/><span/><span/>
+                    <span/><span/><span/><span/><span/><span/>
                   </div>
                 );
                 const isBuy=d.signal==="BUY";
@@ -3043,7 +3043,7 @@ export default function TradingBot(){
                 return(
                   <div key={sym} className="fade-up"
                     onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
-                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
+                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
                       border:`1px solid ${isHold?T.border:col+"35"}`,
@@ -3068,22 +3068,7 @@ export default function TradingBot(){
                       )}
                     </div>
                     <div className="mono" style={{fontSize:11,fontWeight:700,color:T.text}}>{d.price.toFixed(prec)}</div>
-                    <div>
-                      {isHold?<span className="mono" style={{fontSize:10,color:T.muted}}>—</span>:(
-                        <>
-                          <div className="mono" style={{fontSize:11,fontWeight:700,color:T.green}}>{d.target.toFixed(prec)}</div>
-                          <div style={{fontSize:7,color:T.green,marginTop:1}}>🎯 Take Profit</div>
-                        </>
-                      )}
-                    </div>
-                    <div>
-                      {isHold?<span className="mono" style={{fontSize:10,color:T.muted}}>—</span>:(
-                        <>
-                          <div className="mono" style={{fontSize:11,fontWeight:700,color:T.red}}>{d.stop.toFixed(prec)}</div>
-                          <div style={{fontSize:7,color:T.red,marginTop:1}}>🛑 Stop Loss</div>
-                        </>
-                      )}
-                    </div>
+                    <RangeBar entry={d.price} target={d.target} stop={d.stop} isHold={isHold} precision={prec}/>
                     <div className="mono" style={{fontSize:11,fontWeight:700,color:isHold?T.muted:T.yellow}}>
                       {isHold?"—":`${d.targetPips}p`}
                     </div>
@@ -3099,8 +3084,34 @@ export default function TradingBot(){
                 border:`1px solid ${T.border}`,fontSize:9,color:T.muted,lineHeight:1.6}}>
                 <strong style={{color:T.accent}}>Cómo usar estas señales:</strong> Haz clic en cualquier par para abrir su gráfica con la proyección detallada.
                 Los niveles de Objetivo y Stop se calculan con la volatilidad reciente (ATR estimado).
-                Señales generadas con EMA9/EMA21 + RSI(14). Actualiza cada 15s · materias primas cada 20s.
+                Señales generadas con EMA9/EMA21 + RSI(14). Esta vista es una guía para operar manualmente en cualquier par, incluidos los marcados 🔒 SIN-EDGE:
+                el bot solo bloquea la apertura automática en esos pares, no la información. Actualiza cada 15s · materias primas cada 20s.
               </div>
+            </div>{/* end left column */}
+
+            <div style={{minWidth:0}}>
+              <SignalDistribution buy={totalBuy} sell={totalSell} hold={totalHold}/>
+              <TierLegend/>
+              {best&&(
+                <div style={{background:`linear-gradient(180deg,${best.d.signal==="BUY"?T.green:T.red}0f,transparent 60%),${T.panel}`,
+                  border:`1px solid ${best.d.signal==="BUY"?T.green:T.red}40`,borderRadius:8,padding:"14px 16px"}}>
+                  <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:10}}>MEJOR OPORTUNIDAD ACTUAL</div>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                    <span style={{fontSize:15,fontWeight:700,color:T.text}}>{best.sym}</span>
+                    <span style={{fontSize:9,fontWeight:700,color:"#04060f",
+                      background:best.d.signal==="BUY"?T.green:T.red,padding:"3px 9px",borderRadius:4}}>
+                      {best.d.signal==="BUY"?"▲":"▼"} {best.d.signal} {best.d.confidence}%
+                    </span>
+                  </div>
+                  <div style={{fontSize:9,color:T.muted,lineHeight:1.5}}>
+                    R:R 1:{best.d.rr} · {best.d.targetPips} pips al objetivo
+                    {SYMBOL_STRATEGY[best.sym]&&SYMBOL_STRATEGY[best.sym].tier!=="ROBUSTO"&&(
+                      <> · tier <b style={{color:SYMBOL_STRATEGY[best.sym].tier==="SIN-EDGE"?T.red:T.yellow}}>{SYMBOL_STRATEGY[best.sym].tier}</b> — opera manual con precaución.</>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>{/* end right column */}
             </div>
           );
         })()}
