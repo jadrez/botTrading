@@ -36,10 +36,12 @@ CREATE TABLE IF NOT EXISTS trades (
   confidence       INT,
   patterns         JSONB DEFAULT '[]',
   reasons          JSONB DEFAULT '[]',
+  close_reason     TEXT,                    -- 'TP' | 'SL' | 'TRAIL' | 'MANUAL'
   opened_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed_at        TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol, opened_at DESC);
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS close_reason TEXT;
 
 -- Rolling walk-forward folds: params are re-picked on a training window and
 -- then judged ONLY on the immediately-following, never-seen block. This is

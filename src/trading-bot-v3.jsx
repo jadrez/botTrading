@@ -1293,6 +1293,19 @@ export default function TradingBot(){
   useEffect(()=>{ladderBaselineRef.current=ladderBaseline;localStorage.setItem("bot_ladder_baseline",String(ladderBaseline));},[ladderBaseline]);
   useEffect(()=>{localStorage.setItem("bot_initial_capital",String(initialCapital));},[initialCapital]);
 
+  // ── Load learning history from Postgres on mount — this is what makes
+  // "aprendizaje automático" persist across browsers/devices instead of only
+  // this one browser's localStorage. localStorage's calcLearningStats(loadTrades())
+  // above is the instant first paint; this replaces it once the shared,
+  // durable history loads (falls back silently to the local-only view if the
+  // DB is unreachable — see api/trades.js).
+  useEffect(()=>{
+    fetch("/api/trades?limit=500")
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{ if(d?.trades?.length) setLearningStats(calcLearningStats(d.trades)); })
+      .catch(()=>{});
+  },[]);
+
   // ── Single source of truth for TP/SL: re-derive from SYMBOL_STRATEGY every
   // time the symbol, stake or multiplier changes, so the validated price-move
   // percentage is preserved whether you're at $0.05 or the ladder has bumped
@@ -1966,6 +1979,17 @@ export default function TradingBot(){
       setTrades(t=>[closedTrade,...t.slice(0,49)]);
       saveTradeLearning(closedTrade);
       setLearningStats(calcLearningStats(loadTrades()));
+      // Persist to Postgres too (fire-and-forget) — localStorage above is the
+      // instant/offline fallback, this is what makes learning survive a
+      // closed browser or a different device. See api/trades.js.
+      fetch("/api/trades",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          symbol:closedTrade.symbol, type:closedTrade.type,
+          entryPrice:closedTrade.entry, exitPrice:currentPrice, pnl,
+          patterns:closedTrade.activePatterns, closeReason:reason,
+          openedAt:closedTrade.openTime?new Date(closedTrade.openTime).toISOString():undefined,
+        }),
+      }).catch(()=>{});
       saveBalance(balanceRef.current+pnl);
       setClosedCount(c=>c+1);
       setTotalProfit(p=>p+pnl);
