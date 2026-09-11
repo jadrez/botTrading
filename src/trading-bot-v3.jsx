@@ -63,11 +63,67 @@ const ASSETS = {
     yahooTicker:"CL=F",  correlations:{} },
 };
 
+/* ─── VALIDATED STRATEGY CONFIG ─────────────────────────────────────────────
+   Backed by backtest/walkforward.mjs — 365 days of 1h candles, 4 rolling
+   walk-forward folds (params re-picked on train, judged on unseen test data).
+   ROBUSTO   = profit factor > 1 held in ≥3/4 folds → auto-trading enabled
+               with the TP/SL that generalized best.
+   MIXTO     = edge inconsistent across folds → kept enabled but held to a
+               much higher confidence bar (fewer, more selective trades).
+   SIN-EDGE  = 0/4 folds profitable → auto-trading disabled. The symbol stays
+               visible for manual analysis, it just won't self-open trades.
+   Re-run `npm run backtest:wf -- --symbols "..."` periodically — markets
+   drift, so this table is a snapshot, not a permanent verdict. */
+const SYMBOL_STRATEGY = {
+  "ETH/USDT": { tier:"ROBUSTO", tp:8, sl:4, minConf:70 },
+  "XAU/USD":  { tier:"ROBUSTO", tp:8, sl:4, minConf:70 },
+  "USD/CAD":  { tier:"ROBUSTO", tp:6, sl:3, minConf:60 },
+  "AUD/USD":  { tier:"ROBUSTO", tp:6, sl:6, minConf:70 },
+
+  "BTC/USDT": { tier:"MIXTO",   tp:9, sl:3, minConf:80 },
+  "EUR/USD":  { tier:"MIXTO",   tp:8, sl:4, minConf:80 },
+  "GBP/USD":  { tier:"MIXTO",   tp:6, sl:3, minConf:80 },
+  "USD/JPY":  { tier:"MIXTO",   tp:9, sl:3, minConf:80 },
+  "NZD/USD":  { tier:"MIXTO",   tp:8, sl:4, minConf:80 },
+  "USD/CHF":  { tier:"MIXTO",   tp:6, sl:3, minConf:80 },
+
+  "SOL/USDT": { tier:"SIN-EDGE" },
+  "EUR/GBP":  { tier:"SIN-EDGE" },
+  "XAG/USD":  { tier:"SIN-EDGE" },
+  "XTI/USD":  { tier:"SIN-EDGE" },
+};
+
+// The backtest (backtest/*.mjs) always ran at stake=$10, multiplier=100x —
+// SYMBOL_STRATEGY's tp/sl are dollar amounts calibrated to THAT stake, which
+// really encode a validated PRICE-MOVE PERCENTAGE (tp/(stake*mult)). If you
+// trade a different stake (e.g. $0.05) but keep the same dollar tp/sl, the
+// price-move target becomes absurd (thousands of %) and the trade can never
+// realistically hit TP/SL. Scale tp/sl by the actual stake×multiplier so the
+// validated price-move percentage is preserved at any position size.
+const BACKTEST_STAKE=10, BACKTEST_MULT=100;
+function scaledTpSl(sym, stake, multiplier){
+  const strat=SYMBOL_STRATEGY[sym];
+  if(!strat?.tp||!strat?.sl||!stake||!multiplier) return null;
+  const factor=(stake*multiplier)/(BACKTEST_STAKE*BACKTEST_MULT);
+  return{
+    tp:Math.max(0.001,+(strat.tp*factor).toFixed(4)),
+    sl:Math.max(0.001,+(strat.sl*factor).toFixed(4)),
+  };
+}
+
 /* ─── CONSTANTS ─────────────────────────────────────────────────────────── */
 const MAX_POSITIONS         = 3;
-const DEFAULT_STAKE         = 10.00;  // USD stake per trade (Deriv multiplier contracts)
+const DEFAULT_STAKE         = 0.05;   // USD stake per trade (Deriv multiplier contracts) — small-capital start
 const DEFAULT_MULTIPLIER    = 100;    // leverage multiplier
 const ANALYSIS_INTERVAL_MS  = 300000;
+
+// Dynamic stop-loss: once a trade's unrealized profit reaches this fraction
+// of its TP target, the stop moves to breakeven (can't turn into a loss
+// anymore); beyond that it trails the peak profit, allowing it to give back
+// only this fraction before locking in and closing. Symmetric for BUY/SELL —
+// posPnL() already folds direction in, so this just compares dollar PnL.
+const TRAIL_BREAKEVEN_AT = 0.5;  // 50% of TP reached → stop moves to breakeven
+const TRAIL_GIVEBACK     = 0.4;  // once trailing, allow giving back 40% of the peak
 
 // Deriv WebSocket symbol mapping
 const DERIV_SYMBOLS = {
@@ -94,6 +150,20 @@ function posPnL(pos, price, stake=DEFAULT_STAKE){
   const dir  = pos.type==="BUY" ? 1 : -1;
   const mult = pos.multiplier || DEFAULT_MULTIPLIER;
   return dir * (price - pos.entry) / pos.entry * stake * mult;
+}
+
+// Dynamic stop level for a position given its best-ever unrealized profit
+// (peakPnl). Below the breakeven trigger it's just the original fixed stop
+// (-slTarget). Once peakPnl crosses TRAIL_BREAKEVEN_AT×tpTarget, the floor
+// rises to breakeven and then trails the peak, so a reversal from here closes
+// at $0 or better instead of giving the whole move back. Same formula for
+// BUY and SELL since peakPnl/tpTarget/slTarget are already direction-agnostic
+// dollar amounts (posPnL folds the BUY/SELL sign in upstream).
+function trailingStopLevel(peakPnl, tpTarget, slTarget){
+  if(peakPnl>=tpTarget*TRAIL_BREAKEVEN_AT){
+    return Math.max(0, peakPnl*(1-TRAIL_GIVEBACK));
+  }
+  return -slTarget;
 }
 
 function genCandles(base=1.0823, n=200, interval="5m"){
@@ -253,7 +323,16 @@ function saveTradeLearning(trade){
 }
 function loadTrades(){ try{return JSON.parse(localStorage.getItem(LS_TRADES)||"[]");}catch{return [];} }
 function saveBalance(b){ try{localStorage.setItem(LS_BALANCE,String(b));}catch{} }
-function loadBalance(){ try{const v=localStorage.getItem(LS_BALANCE);return v?parseFloat(v):10000;}catch{return 10000;} }
+// Default matches bot_initial_capital (real starting capital) instead of an
+// arbitrary $10,000 paper balance, so the stake ladder's % growth is measured
+// against the capital you actually said you're starting with.
+function loadBalance(){
+  try{
+    const v=localStorage.getItem(LS_BALANCE);
+    if(v) return parseFloat(v);
+    return parseFloat(localStorage.getItem("bot_initial_capital")||"200");
+  }catch{return 200;}
+}
 
 function calcLearningStats(trades){
   if(!trades.length) return null;
@@ -1145,7 +1224,18 @@ export default function TradingBot(){
   const [patterns,setPatterns]   = useState([]);
   const [positions,setPositions] = useState([]);
   const [balance,setBalance]     = useState(()=>loadBalance());
-  const [positionSize,setPositionSize] = useState(()=>parseFloat(localStorage.getItem("bot_stake")||"10.00"));
+  // v2: default stake dropped from $10 to $0.05 for small-capital start (see
+  // DEFAULT_STAKE); key bumped so existing users pick up the new default too.
+  const [positionSize,setPositionSize] = useState(()=>parseFloat(localStorage.getItem("bot_stake_v2")||String(DEFAULT_STAKE)));
+  // ── Capital ladder: step the stake up (or down) as the account grows
+  // (or shrinks) by stakeGrowthTrigger%, so risk stays proportional to
+  // capital instead of fixed at whatever you started with.
+  const [stakeAutoScale,setStakeAutoScale]   = useState(()=>localStorage.getItem("bot_stake_autoscale")!=="false");
+  const [stakeStep,setStakeStep]             = useState(()=>parseFloat(localStorage.getItem("bot_stake_step")||"0.05"));
+  const [stakeGrowthTrigger,setStakeGrowthTrigger] = useState(()=>parseFloat(localStorage.getItem("bot_stake_trigger")||"0.20"));
+  const [minStake,setMinStake]               = useState(()=>parseFloat(localStorage.getItem("bot_stake_min")||String(DEFAULT_STAKE)));
+  const [ladderBaseline,setLadderBaseline]   = useState(()=>parseFloat(localStorage.getItem("bot_ladder_baseline")||String(loadBalance())));
+  const [initialCapital,setInitialCapital]   = useState(()=>parseFloat(localStorage.getItem("bot_initial_capital")||"200"));
   const [trades,setTrades]       = useState([]);
   const [log,setLog]             = useState([]);
   const [news,setNews]           = useState([]);
@@ -1154,6 +1244,8 @@ export default function TradingBot(){
   const [activePrediction,setActivePrediction] = useState(null);
   const activePredRef = useRef(null);
   const [autoMode,setAutoMode]   = useState(false);
+  const [scheduledStart,setScheduledStart] = useState(null); // ms epoch, or null
+  const [scheduleInput,setScheduleInput]   = useState("");   // <input type="datetime-local"> value
   const [analyzing,setAnalyzing] = useState(false);
   const [loadingNews,setLoadingNews] = useState(false);
   const [autoPhase,setAutoPhase] = useState("idle");
@@ -1178,10 +1270,17 @@ export default function TradingBot(){
   const [forexWatch,setForexWatch]        = useState({});
   const [commodityWatch,setCommodityWatch]= useState({});
   const [activeView,setActiveView]        = useState("dashboard");
-  const [tpTarget,setTpTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_tp_v2")||"6.00"));
-  const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl_v2")||"3.00"));
-  const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp_v2")||"6.00"));
-  const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl_v2")||"3.00"));
+  // v3: seeded from SYMBOL_STRATEGY (walk-forward-validated per-symbol TP/SL),
+  // scaled to the initial stake/multiplier — see scaledTpSl() for why this
+  // scaling matters (raw SYMBOL_STRATEGY values assume $10×100x).
+  const initStake=parseFloat(localStorage.getItem("bot_stake_v2")||String(DEFAULT_STAKE));
+  const initMult=parseInt(localStorage.getItem("bot_mult")||String(DEFAULT_MULTIPLIER),10);
+  const initScaled=scaledTpSl("ETH/USDT",initStake,initMult);
+  const initTp=initScaled?.tp||6.00, initSl=initScaled?.sl||3.00;
+  const [tpTarget,setTpTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_tp_v3")||String(initTp)));
+  const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl_v3")||String(initSl)));
+  const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp_v3")||String(initTp)));
+  const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl_v3")||String(initSl)));
   const [derivEnabled,setDerivEnabled]    = useState(()=>localStorage.getItem("derivEnabled")==="true");
   const [derivBalance,setDerivBalance]    = useState(null);
   const [derivLoginId,setDerivLoginId]    = useState(null);
@@ -1215,12 +1314,17 @@ export default function TradingBot(){
   const newsRef   = useRef([]);
   const candlesRef = useRef([]);
   const balanceRef     = useRef(10000);
-  const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_stake")||"10.00"));
+  const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_stake_v2")||String(DEFAULT_STAKE)));
   const multiplierRef  = useRef(parseInt(localStorage.getItem("bot_mult")||"100"));
   const timerRef  = useRef(null);
   const countRef  = useRef(null);
   const pendingAnalysisRef = useRef(false);
   const symbolRef = useRef("ETH/USDT");
+  const stakeAutoScaleRef     = useRef(stakeAutoScale);
+  const stakeStepRef          = useRef(stakeStep);
+  const stakeGrowthTriggerRef = useRef(stakeGrowthTrigger);
+  const minStakeRef           = useRef(minStake);
+  const ladderBaselineRef     = useRef(ladderBaseline);
 
   useEffect(()=>{posRef.current=positions;},[positions]);
   useEffect(()=>{priceRef.current=price;},[price]);
@@ -1235,10 +1339,54 @@ export default function TradingBot(){
   useEffect(()=>{patternsRef.current=patterns;},[patterns]);
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
-  useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_stake",String(positionSize));},[positionSize]);
+  useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_stake_v2",String(positionSize));},[positionSize]);
   useEffect(()=>{multiplierRef.current=multiplier;localStorage.setItem("bot_mult",String(multiplier));},[multiplier]);
-  useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp_v2",String(tpTarget));},[tpTarget]);
-  useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl_v2",String(slTarget));},[slTarget]);
+  useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp_v3",String(tpTarget));},[tpTarget]);
+  useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl_v3",String(slTarget));},[slTarget]);
+  useEffect(()=>{stakeAutoScaleRef.current=stakeAutoScale;localStorage.setItem("bot_stake_autoscale",String(stakeAutoScale));},[stakeAutoScale]);
+  useEffect(()=>{stakeStepRef.current=stakeStep;localStorage.setItem("bot_stake_step",String(stakeStep));},[stakeStep]);
+  useEffect(()=>{stakeGrowthTriggerRef.current=stakeGrowthTrigger;localStorage.setItem("bot_stake_trigger",String(stakeGrowthTrigger));},[stakeGrowthTrigger]);
+  useEffect(()=>{minStakeRef.current=minStake;localStorage.setItem("bot_stake_min",String(minStake));},[minStake]);
+  useEffect(()=>{ladderBaselineRef.current=ladderBaseline;localStorage.setItem("bot_ladder_baseline",String(ladderBaseline));},[ladderBaseline]);
+  useEffect(()=>{localStorage.setItem("bot_initial_capital",String(initialCapital));},[initialCapital]);
+
+  // ── Single source of truth for TP/SL: re-derive from SYMBOL_STRATEGY every
+  // time the symbol, stake or multiplier changes, so the validated price-move
+  // percentage is preserved whether you're at $0.05 or the ladder has bumped
+  // you to $0.50. Symbols with no validated config keep whatever TP/SL the
+  // user has set manually (untouched).
+  useEffect(()=>{
+    const scaled=scaledTpSl(symbol,positionSize,multiplier);
+    if(scaled){
+      setTpTarget(scaled.tp); tpTargetRef.current=scaled.tp;
+      setSlTarget(scaled.sl); slTargetRef.current=scaled.sl;
+    }
+  },[symbol,positionSize,multiplier]);
+
+  // ── Capital ladder: whenever the balance settles after a trade, check if
+  // it crossed a ±stakeGrowthTrigger% band since the last adjustment and
+  // step the stake up (protects gains by risking more only once they're
+  // real) or down (protects capital when it's shrinking) accordingly.
+  useEffect(()=>{
+    if(!stakeAutoScale) return;
+    const baseline=ladderBaselineRef.current;
+    if(!baseline||baseline<=0) return;
+    const growth=(balance-baseline)/baseline;
+    if(growth>=stakeGrowthTrigger){
+      const next=+(positionSizeRef.current+stakeStepRef.current).toFixed(2);
+      setPositionSize(next);
+      setLadderBaseline(balance);
+      addLog(`📈 Capital +${(growth*100).toFixed(0)}% desde el último ajuste → stake sube a $${next.toFixed(2)}`,"buy");
+    } else if(growth<=-stakeGrowthTrigger){
+      const next=Math.max(minStakeRef.current,+(positionSizeRef.current-stakeStepRef.current).toFixed(2));
+      if(next!==positionSizeRef.current){
+        setPositionSize(next);
+        setLadderBaseline(balance);
+        addLog(`📉 Capital ${(growth*100).toFixed(0)}% desde el último ajuste → stake baja a $${next.toFixed(2)}`,"sell");
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[balance,stakeAutoScale,stakeGrowthTrigger]);
   useEffect(()=>{derivEnabledRef.current=derivEnabled;localStorage.setItem("derivEnabled",String(derivEnabled));},[derivEnabled]);
   useEffect(()=>{symbolRef.current=symbol;},[symbol]);
   useEffect(()=>{consLossesRef.current=consecutiveLosses;},[consecutiveLosses]);
@@ -1311,6 +1459,10 @@ export default function TradingBot(){
     setPositions(prev=>prev.map(p=>!p.symbol?{...p,symbol:symbolRef.current}:p));
     setSymbol(newSym);
     // Do NOT turn off autoMode — bot keeps running for the new symbol
+
+    // TP/SL for the new symbol is applied by the [symbol,positionSize,
+    // multiplier] effect below (scaledTpSl) — no need to set it here too.
+
     setAiResult(null);
     setNextAnalysis(null);
     setCorrSignals({}); corrSignalsRef.current={};
@@ -1863,7 +2015,7 @@ export default function TradingBot(){
       const pnl=posPnL(pos,currentPrice,pos.allocatedSize||positionSizeRef.current);
       const posSym=pos.symbol||symbolRef.current;
       const prec=ASSETS[posSym]?.precision||ASSETS[symbolRef.current].precision;
-      const emoji=reason==="TP"?"✅":reason==="SL"?"🛑":"⬜";
+      const emoji=reason==="TP"?"✅":reason==="SL"?"🛑":reason==="TRAIL"?"🔒":"⬜";
       addLog(`${emoji} ${reason} ${pos.type} ${posSym} @ ${fP(currentPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
       setBalance(b=>{const nb=b+pnl;balanceRef.current=nb;return nb;});
       const closedTrade={...pos,exit:currentPrice,pnl,reason,time:now(),tradeTime:Math.floor(Date.now()/1000),
@@ -1898,17 +2050,28 @@ export default function TradingBot(){
   /* ── TP / SL watcher — active symbol ────────────────────────────────── */
   useEffect(()=>{
     if(!priceVerified) return;
+    const peakUpdates=[];
     posRef.current
       .filter(p=>p.symbol===symbol)
       .forEach(pos=>{
         const pnl=posPnL(pos,price,pos.allocatedSize||positionSize);
-        if(pnl>=tpTarget)       closePosition(pos.id,price,"TP");
-        else if(pnl<=-slTarget) closePosition(pos.id,price,"SL");
+        const peakPnl=Math.max(pos.peakPnl||0,pnl);
+        const stopLevel=trailingStopLevel(peakPnl,tpTarget,slTarget);
+        if(pnl>=tpTarget)            closePosition(pos.id,price,"TP");
+        else if(pnl<=stopLevel)      closePosition(pos.id,price,stopLevel>0?"TRAIL":"SL");
+        else if(peakPnl!==(pos.peakPnl||0)) peakUpdates.push({id:pos.id,peakPnl});
       });
+    if(peakUpdates.length){
+      setPositions(prev=>prev.map(p=>{
+        const u=peakUpdates.find(x=>x.id===p.id);
+        return u?{...p,peakPnl:u.peakPnl}:p;
+      }));
+    }
   },[price,symbol,priceVerified,closePosition,tpTarget,slTarget,positionSize]);
 
   /* ── TP / SL watcher — non-active symbols (uses livePrices) ──────────── */
   useEffect(()=>{
+    const peakUpdates=[];
     posRef.current
       .filter(p=>p.symbol&&p.symbol!==symbol)
       .forEach(pos=>{
@@ -1916,9 +2079,18 @@ export default function TradingBot(){
         const cfg=ASSETS[pos.symbol];
         if(!cp||cp===cfg?.basePrice) return;
         const pnl=posPnL(pos,cp,pos.allocatedSize||positionSize);
-        if(pnl>=tpTarget)       closePosition(pos.id,cp,"TP");
-        else if(pnl<=-slTarget) closePosition(pos.id,cp,"SL");
+        const peakPnl=Math.max(pos.peakPnl||0,pnl);
+        const stopLevel=trailingStopLevel(peakPnl,tpTarget,slTarget);
+        if(pnl>=tpTarget)            closePosition(pos.id,cp,"TP");
+        else if(pnl<=stopLevel)      closePosition(pos.id,cp,stopLevel>0?"TRAIL":"SL");
+        else if(peakPnl!==(pos.peakPnl||0)) peakUpdates.push({id:pos.id,peakPnl});
       });
+    if(peakUpdates.length){
+      setPositions(prev=>prev.map(p=>{
+        const u=peakUpdates.find(x=>x.id===p.id);
+        return u?{...p,peakPnl:u.peakPnl}:p;
+      }));
+    }
   },[livePrices,symbol,closePosition,tpTarget,slTarget,positionSize]);
 
   /* ── Core analyze ────────────────────────────────────────────────────── */
@@ -1963,8 +2135,16 @@ export default function TradingBot(){
       else if(recentWR<0.55) minConf=64; // around avg → slightly cautious
       else if(recentWR>=0.65)minConf=60; // winning well → relaxed
     }
+
+    // ── Apply the walk-forward-validated tier for this symbol on top of the
+    // learning-derived threshold: MIXTO/ROBUSTO raise the bar, SIN-EDGE blocks
+    // auto-open outright (see SYMBOL_STRATEGY definition near ASSETS).
+    const stratCfg=SYMBOL_STRATEGY[symbolRef.current];
+    const symbolAutoDisabled=stratCfg?.tier==="SIN-EDGE";
+    if(stratCfg?.minConf) minConf=Math.max(minConf,stratCfg.minConf);
+
     setDynamicMinConf(minConf);
-    addLog(`🔍 Analizando ${symbolRef.current}: ${reason} | umbral dinámico: ${minConf}%`,"info");
+    addLog(`🔍 Analizando ${symbolRef.current}: ${reason} | umbral dinámico: ${minConf}%${symbolAutoDisabled?" | ⛔ auto-trading desactivado (sin edge validado)":""}`,"info");
     try{
       // Build correlation array for AI
       // Compute confirms based on dominant EMA direction (not fixed BUY bias)
@@ -2069,7 +2249,7 @@ export default function TradingBot(){
       if(autoRef.current){
         const activeSym=symbolRef.current;
         const symSlots=MAX_POSITIONS-posRef.current.filter(p=>p.symbol===activeSym).length;
-        if(result.should_open&&result.signal!=="HOLD"&&symSlots>0&&result.confidence>=minConf){
+        if(!symbolAutoDisabled&&result.should_open&&result.signal!=="HOLD"&&symSlots>0&&result.confidence>=minConf){
           const isBuy=result.signal==="BUY";
           const cp=priceRef.current;
           const prec=ASSETS[activeSym].precision;
@@ -2089,7 +2269,7 @@ export default function TradingBot(){
           }
 
           const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
-            symbol:activeSym,openTime:Date.now(),allocatedSize:ps,multiplier:multiplierRef.current,
+            symbol:activeSym,openTime:Date.now(),allocatedSize:ps,multiplier:multiplierRef.current,peakPnl:0,
             ...(derivContractId&&{derivContractId})};
 
           // ── Open correlated positions on all forex pairs with a confirmed correlation
@@ -2119,7 +2299,7 @@ export default function TradingBot(){
               }
               corrPositions.push({
                 type:corrSignal,entry:corrPrice,id:Date.now()+Math.random()+corrPositions.length*0.001,
-                symbol:corrSym,openTime:Date.now(),correlatedWith:activeSym,allocatedSize:ps,multiplier:multiplierRef.current,
+                symbol:corrSym,openTime:Date.now(),correlatedWith:activeSym,allocatedSize:ps,multiplier:multiplierRef.current,peakPnl:0,
                 ...(corrDerivId&&{derivContractId:corrDerivId}),
               });
               addLog(`🔗 ${corrSignal==="BUY"?"🟢":"🔴"} CORR ${corrSignal} ${corrSym} @ ${fP(corrPrice,corrAsset.precision)} (${corrDir>0?"↑↑":"↓↑"} ${activeSym})`,corrSignal==="BUY"?"buy":"sell");
@@ -2130,7 +2310,8 @@ export default function TradingBot(){
           addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} ${activeSym} @ ${fP(cp,prec)} | ${ps.toFixed(2)}L | TP:+${fUSD(tpTargetRef.current)} SL:-${fUSD(slTargetRef.current)}${corrPositions.length?` + ${corrPositions.length} correlacionadas`:""}`,isBuy?"buy":"sell");
           setAutoPhase("monitoring");
         } else {
-          const why=!result.should_open?`IA dice no abrir (${result.signal} ${result.confidence}%)`
+          const why=symbolAutoDisabled?"símbolo sin ventaja validada — auto-trading desactivado"
+            :!result.should_open?`IA dice no abrir (${result.signal} ${result.confidence}%)`
             :result.confidence<minConf?`confianza ${result.confidence}% < umbral mín ${minConf}%`
             :symSlots===0?"slots llenos (3/3)":"señal HOLD";
           addLog(`⏸ Sin abrir — ${why}. Esperando próximo ciclo.`,"info");
@@ -2145,6 +2326,20 @@ export default function TradingBot(){
     setAnalyzing(false);
     pendingAnalysisRef.current=false;
   },[analyzing,addLog]);
+
+  /* ── Scheduled auto-start: turn AUTO on by itself at a chosen date/time ── */
+  useEffect(()=>{
+    if(!scheduledStart) return;
+    const iv=setInterval(()=>{
+      if(autoRef.current){ setScheduledStart(null); return; } // user started manually meanwhile
+      if(Date.now()>=scheduledStart){
+        setAutoMode(true);
+        setScheduledStart(null);
+        addLog(`⏰ Hora programada alcanzada — activando AUTO`,"info");
+      }
+    },1000);
+    return()=>clearInterval(iv);
+  },[scheduledStart,addLog]);
 
   /* ── Auto loop ───────────────────────────────────────────────────────── */
   useEffect(()=>{
@@ -3323,6 +3518,24 @@ export default function TradingBot(){
           </div>
         )}
 
+        {/* STRATEGY TIER BANNER — from backtest/walkforward.mjs validation */}
+        {SYMBOL_STRATEGY[symbol]&&SYMBOL_STRATEGY[symbol].tier!=="ROBUSTO"&&(()=>{
+          const tier=SYMBOL_STRATEGY[symbol].tier;
+          const isDisabled=tier==="SIN-EDGE";
+          const col=isDisabled?T.red:T.yellow;
+          return(
+            <div style={{background:`${col}0e`,border:`1px solid ${col}35`,borderRadius:8,padding:"8px 14px",marginBottom:10,
+              display:"flex",alignItems:"center",gap:8,fontSize:10,color:col}}>
+              <span style={{fontWeight:900}}>{isDisabled?"⛔":"⚠"}</span>
+              <span>
+                {isDisabled
+                  ?`${symbol}: sin ventaja estadística validada (walk-forward 0/4 folds) — auto-trading desactivado. Solo análisis manual.`
+                  :`${symbol}: ventaja inconsistente entre folds de validación — auto-trading activo con umbral de confianza elevado (≥${SYMBOL_STRATEGY[symbol].minConf}%).`}
+              </span>
+            </div>
+          );
+        })()}
+
         {/* CONTROLS */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
           <button onClick={()=>runAnalysis("Análisis manual")} disabled={analyzing}
@@ -3340,6 +3553,93 @@ export default function TradingBot(){
               color:loadingNews?T.muted:T.yellow,borderRadius:8,padding:"11px 8px",cursor:loadingNews?"not-allowed":"pointer",fontSize:12,fontWeight:700}}>
             {loadingNews?"⏳ Cargando...":"📰 Actualizar Noticias"}
           </button>
+        </div>
+
+        {/* PROGRAMAR INICIO AUTOMÁTICO */}
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+          {!scheduledStart?(
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <span style={{fontSize:9,color:T.muted,letterSpacing:1}}>⏰ Programar inicio de AUTO:</span>
+              <input type="datetime-local" value={scheduleInput} onChange={e=>setScheduleInput(e.target.value)}
+                min={new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)}
+                style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11,fontFamily:"inherit"}}/>
+              <button disabled={!scheduleInput||autoMode}
+                onClick={()=>{
+                  const ts=new Date(scheduleInput).getTime();
+                  if(isNaN(ts)||ts<=Date.now()){addLog("⚠️ Elige una fecha/hora futura válida","sell");return;}
+                  setScheduledStart(ts);
+                  addLog(`⏰ AUTO se activará el ${new Date(ts).toLocaleString("es")}`,"info");
+                }}
+                style={{background:!scheduleInput||autoMode?T.dim:`${T.accent}18`,border:`1px solid ${!scheduleInput||autoMode?T.border:T.accent}`,
+                  color:!scheduleInput||autoMode?T.muted:T.accent,borderRadius:6,padding:"5px 12px",fontSize:11,fontWeight:700,
+                  cursor:!scheduleInput||autoMode?"not-allowed":"pointer"}}>
+                Programar
+              </button>
+              {autoMode&&<span style={{fontSize:9,color:T.muted}}>AUTO ya está encendido</span>}
+            </div>
+          ):(
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+              <span style={{fontSize:11,color:T.accent}}>
+                ⏰ AUTO se activará el <b>{new Date(scheduledStart).toLocaleString("es")}</b>
+              </span>
+              <button onClick={()=>{setScheduledStart(null);addLog("⏰ Programación de inicio cancelada","info");}}
+                style={{background:"transparent",border:`1px solid ${T.red}`,color:T.red,borderRadius:6,padding:"4px 10px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+                Cancelar
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* GESTIÓN DE CAPITAL — stake y escalado */}
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+          <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:8}}>GESTIÓN DE CAPITAL</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginBottom:stakeAutoScale?8:0}}>
+            <label style={{display:"flex",flexDirection:"column",gap:3}}>
+              <span style={{fontSize:8,color:T.muted}}>Capital inicial ($)</span>
+              <input type="number" min="1" step="1" value={initialCapital}
+                onChange={e=>setInitialCapital(parseFloat(e.target.value)||0)}
+                className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
+            </label>
+            <label style={{display:"flex",flexDirection:"column",gap:3}}>
+              <span style={{fontSize:8,color:T.muted}}>Stake actual ($)</span>
+              <input type="number" min="0.01" step="0.01" value={positionSize}
+                onChange={e=>setPositionSize(parseFloat(e.target.value)||DEFAULT_STAKE)}
+                className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
+            </label>
+            <label style={{display:"flex",alignItems:"center",gap:6,marginTop:14}}>
+              <input type="checkbox" checked={stakeAutoScale} onChange={e=>setStakeAutoScale(e.target.checked)}/>
+              <span style={{fontSize:9,color:T.muted}}>Escalado automático</span>
+            </label>
+          </div>
+          {stakeAutoScale&&(
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10}}>
+              <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                <span style={{fontSize:8,color:T.muted}}>Incremento ($)</span>
+                <input type="number" min="0.01" step="0.01" value={stakeStep}
+                  onChange={e=>setStakeStep(parseFloat(e.target.value)||0.05)}
+                  className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
+              </label>
+              <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                <span style={{fontSize:8,color:T.muted}}>Umbral de crecimiento (%)</span>
+                <input type="number" min="1" step="1" value={Math.round(stakeGrowthTrigger*100)}
+                  onChange={e=>setStakeGrowthTrigger((parseFloat(e.target.value)||20)/100)}
+                  className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
+              </label>
+              <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                <span style={{fontSize:8,color:T.muted}}>Stake mínimo ($)</span>
+                <input type="number" min="0.01" step="0.01" value={minStake}
+                  onChange={e=>setMinStake(parseFloat(e.target.value)||0.05)}
+                  className="mono" style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11}}/>
+              </label>
+            </div>
+          )}
+          {stakeAutoScale&&(
+            <div style={{fontSize:8,color:T.muted,marginTop:8,lineHeight:1.5}}>
+              Cada vez que el balance suba (o baje) un {Math.round(stakeGrowthTrigger*100)}% desde el último ajuste,
+              el stake sube (o baja) ${stakeStep.toFixed(2)}, sin bajar de ${minStake.toFixed(2)}.
+              TP/SL se re-escalan automáticamente para mantener el mismo % de movimiento de precio validado por backtest.
+            </div>
+          )}
         </div>
 
         {/* SEÑAL DE TRADING — guía para operar manualmente */}

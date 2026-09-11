@@ -4,6 +4,12 @@ const DEFAULT_MULT     = 100;
 const DEFAULT_TP_USD   = 6.00;
 const DEFAULT_SL_USD   = 3.00;
 
+// Server-side safety net mirroring SYMBOL_STRATEGY in src/trading-bot-v3.jsx —
+// backtest/walkforward.mjs found 0/4 walk-forward folds profitable for these
+// (365d/1h, rolling re-validation). Kept here too so a direct call to this
+// endpoint can't bypass the UI's auto-trading gate. Re-check periodically.
+const SIN_EDGE_SYMBOLS = new Set(["SOL/USDT", "EUR/GBP", "XAG/USD", "XTI/USD"]);
+
 const fUSD = (n, sign=true) => {
   const abs=Math.abs(n);
   const dec=abs<0.01?4:abs<0.10?3:2;
@@ -178,6 +184,18 @@ Responde SOLO JSON sin backticks:
     const txt = d.choices?.[0]?.message?.content || "";
     try {
       const parsed = JSON.parse(txt.replace(/```json|```/g, "").trim());
+
+      // Hard override: symbol has no walk-forward-validated edge — never open.
+      if (SIN_EDGE_SYMBOLS.has(symbol) && parsed.should_open) {
+        return res.status(200).json({
+          ...parsed,
+          signal: "HOLD",
+          should_open: false,
+          confidence: Math.min(parsed.confidence, 40),
+          reasoning: `[Bloqueado] ${symbol} sin ventaja validada en walk-forward (0/4 folds rentables). ${parsed.reasoning}`,
+          key_factor: "Símbolo sin edge validado",
+        });
+      }
 
       // Recompute confirmCount based on the AI's actual signal (fixes BUY-only bias)
       // A corr pair CONFIRMS when it moves in the direction expected given its correlation + the signal
