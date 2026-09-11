@@ -3,8 +3,9 @@
 // a 1-year study; anything longer falls back to daily bars.
 
 export async function fetchYahooHistory(yahooSymbol, { days = 365, interval = "1h" } = {}) {
-  const yfInterval = interval === "1d" ? "1d" : "60m";
-  const rangeDays = Math.min(days, yfInterval === "60m" ? 730 : 3650);
+  const yfInterval = interval === "1d" ? "1d" : interval === "5m" ? "5m" : "60m";
+  const maxDays = yfInterval === "5m" ? 60 : yfInterval === "60m" ? 730 : 3650;
+  const rangeDays = Math.min(days, maxDays);
   const range = `${rangeDays}d`;
 
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=${yfInterval}&range=${range}`;

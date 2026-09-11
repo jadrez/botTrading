@@ -1042,6 +1042,35 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
   );
 }
 
+/* ─── SPARKLINE ─────────────────────────────────────────────────────────── */
+function Sparkline({data, color, width=80, height=22}){
+  if(!data||data.length<2) return <svg width={width} height={height}/>;
+  const min=Math.min(...data), max=Math.max(...data), range=(max-min)||1;
+  const pts=data.map((v,i)=>{
+    const x=(i/(data.length-1))*width;
+    const y=height-2-((v-min)/range)*(height-4);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return(
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.4"/>
+    </svg>
+  );
+}
+
+/* ─── SYMBOL TIER BADGE ─────────────────────────────────────────────────── */
+function TierBadge({symbol}){
+  const strat=SYMBOL_STRATEGY[symbol];
+  if(!strat) return null;
+  const col=strat.tier==="ROBUSTO"?T.green:strat.tier==="MIXTO"?T.yellow:T.red;
+  return(
+    <span style={{fontSize:6,fontWeight:700,color:col,background:`${col}18`,
+      padding:"1px 5px",borderRadius:3,letterSpacing:.5,whiteSpace:"nowrap"}}>
+      {strat.tier==="SIN-EDGE"?"🔒 SIN-EDGE":strat.tier}
+    </span>
+  );
+}
+
 /* ─── POSITION ROW ───────────────────────────────────────────────────────── */
 function PosRow({pos, price, precision, onClose, tpTarget=3, slTarget=2}){
   const ps=pos.allocatedSize||DEFAULT_STAKE;
@@ -1195,11 +1224,11 @@ async function getDerivBalance(){
   }catch{return null;}
 }
 
-async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize,tpTarget,slTarget,activePrediction}){
+async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,marketBias,newsSummary,reason,positionSize,tpTarget,slTarget,activePrediction}){
   const r=await fetch("/api/analyze",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,reason,positionSize,tpTarget,slTarget,activePrediction}),
+    body:JSON.stringify({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,marketBias,newsSummary,reason,positionSize,tpTarget,slTarget,activePrediction}),
   });
   if(!r.ok)return{signal:"HOLD",confidence:40,reasoning:"Error al conectar con el servidor.",news_impact:"NEUTRAL",key_factor:"Error conexión",risk:"ALTO",should_open:false};
   return r.json();
@@ -1246,6 +1275,7 @@ export default function TradingBot(){
   const [autoMode,setAutoMode]   = useState(false);
   const [scheduledStart,setScheduledStart] = useState(null); // ms epoch, or null
   const [scheduleInput,setScheduleInput]   = useState("");   // <input type="datetime-local"> value
+  const [scheduleRemainingMs,setScheduleRemainingMs] = useState(null);
   const [analyzing,setAnalyzing] = useState(false);
   const [loadingNews,setLoadingNews] = useState(false);
   const [autoPhase,setAutoPhase] = useState("idle");
@@ -1312,6 +1342,7 @@ export default function TradingBot(){
   const trend1hRef = useRef(0);
   const patternsRef= useRef([]);
   const newsRef   = useRef([]);
+  const newsDataRef = useRef(null);
   const candlesRef = useRef([]);
   const balanceRef     = useRef(10000);
   const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_stake_v2")||String(DEFAULT_STAKE)));
@@ -1338,6 +1369,7 @@ export default function TradingBot(){
   useEffect(()=>{trend1hRef.current=trend1h;},[trend1h]);
   useEffect(()=>{patternsRef.current=patterns;},[patterns]);
   useEffect(()=>{newsRef.current=news;},[news]);
+  useEffect(()=>{newsDataRef.current=newsData;},[newsData]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
   useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_stake_v2",String(positionSize));},[positionSize]);
   useEffect(()=>{multiplierRef.current=multiplier;localStorage.setItem("bot_mult",String(multiplier));},[multiplier]);
@@ -1885,7 +1917,7 @@ export default function TradingBot(){
 
           results[sym]={price:p,signal,color,rsi:Math.round(rsi),pct,samples:closes.length,
             target,stop,rr,targetPips:targetPips.toFixed(1),stopPips:stopPips.toFixed(1),
-            confidence,prec,entry:p};
+            confidence,prec,entry:p,sparkline:closes.slice(-24)};
         }catch{}
       }
       setForexWatch(results);
@@ -1943,7 +1975,7 @@ export default function TradingBot(){
 
           results[sym]={price:p,signal,color,rsi:Math.round(rsi),pct,samples:closes.length,
             target,stop,rr,targetPips:targetPips.toFixed(1),stopPips:stopPips.toFixed(1),
-            confidence,prec,entry:p};
+            confidence,prec,entry:p,sparkline:closes.slice(-24)};
         }catch{}
       }
       setCommodityWatch(results);
@@ -2172,7 +2204,10 @@ export default function TradingBot(){
         patterns:patternsRef.current,
         correlations:corrArray,
         positions:posRef.current, balance:balanceRef.current,
-        news:newsRef.current,    reason,
+        news:newsRef.current,
+        marketBias:newsDataRef.current?.market_bias||"neutral",
+        newsSummary:newsDataRef.current?.summary||"",
+        reason,
         positionSize:positionSizeRef.current,
         tpTarget:tpTargetRef.current, slTarget:slTargetRef.current,
         activePrediction:activePredRef.current,
@@ -2329,13 +2364,16 @@ export default function TradingBot(){
 
   /* ── Scheduled auto-start: turn AUTO on by itself at a chosen date/time ── */
   useEffect(()=>{
-    if(!scheduledStart) return;
+    if(!scheduledStart){ setScheduleRemainingMs(null); return; }
+    setScheduleRemainingMs(Math.max(0,scheduledStart-Date.now()));
     const iv=setInterval(()=>{
       if(autoRef.current){ setScheduledStart(null); return; } // user started manually meanwhile
       if(Date.now()>=scheduledStart){
         setAutoMode(true);
         setScheduledStart(null);
         addLog(`⏰ Hora programada alcanzada — activando AUTO`,"info");
+      } else {
+        setScheduleRemainingMs(scheduledStart-Date.now());
       }
     },1000);
     return()=>clearInterval(iv);
@@ -2960,9 +2998,9 @@ export default function TradingBot(){
               </div>
 
               {/* Table header */}
-              <div style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+              <div style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
                 gap:6,padding:"5px 10px",marginBottom:4,borderBottom:`1px solid ${T.border}40`}}>
-                {["PAR","SEÑAL","CONF.","ENTRADA","OBJETIVO","STOP LOSS","PIPS","R/R"].map(h=>(
+                {["PAR","TENDENCIA","SEÑAL","CONF.","ENTRADA","OBJETIVO","STOP LOSS","PIPS","R/R"].map(h=>(
                   <div key={h} style={{fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>{h}</div>
                 ))}
               </div>
@@ -2971,12 +3009,12 @@ export default function TradingBot(){
               {uniquePairs.map(sym=>{
                 const d=buildActiveData(sym)||forexWatch[sym];
                 if(!d)return(
-                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
                     gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
                     border:`1px solid ${T.border}`,alignItems:"center"}}>
                     <span style={{fontSize:11,fontWeight:700,color:T.accent}}>{sym}</span>
                     <span style={{fontSize:9,color:T.muted}}>Cargando...</span>
-                    <span/><span/><span/><span/><span/><span/>
+                    <span/><span/><span/><span/><span/><span/><span/>
                   </div>
                 );
                 const isBuy=d.signal==="BUY";
@@ -2987,7 +3025,7 @@ export default function TradingBot(){
                 return(
                   <div key={sym} className="fade-up"
                     onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
-                    style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
                       border:`1px solid ${isHold?T.border:col+"35"}`,
@@ -2999,8 +3037,11 @@ export default function TradingBot(){
                         <span style={{fontSize:12,fontWeight:700,color:sym===symbol?T.yellow:T.accent}}>{sym}</span>
                         {sym===symbol&&<span style={{fontSize:6,color:T.yellow,background:`${T.yellow}25`,padding:"1px 4px",borderRadius:3,letterSpacing:1}}>ACTIVO</span>}
                       </div>
-                      <div style={{fontSize:7,color:T.muted,marginTop:1}}>RSI {d.rsi} · {sym===symbol?"velas reales":d.samples+"pts"}</div>
+                      <div style={{marginTop:2}}><TierBadge symbol={sym}/></div>
                     </div>
+
+                    {/* Sparkline */}
+                    <Sparkline data={d.sparkline} color={isHold?T.muted:col}/>
 
                     {/* Señal */}
                     <div style={{background:`${col}20`,border:`1px solid ${col}50`,borderRadius:5,
@@ -3090,12 +3131,12 @@ export default function TradingBot(){
                 const cfg=ASSETS[sym];
                 const d=buildActiveData(sym)||commodityWatch[sym];
                 if(!d)return(
-                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
                     gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
                     border:`1px solid ${T.border}`,alignItems:"center"}}>
                     <span style={{fontSize:11,fontWeight:700,color:T.yellow}}>⬡ {cfg.label}</span>
                     <span style={{fontSize:9,color:T.muted}}>Cargando...</span>
-                    <span/><span/><span/><span/><span/><span/>
+                    <span/><span/><span/><span/><span/><span/><span/>
                   </div>
                 );
                 const isBuy=d.signal==="BUY";
@@ -3106,7 +3147,7 @@ export default function TradingBot(){
                 return(
                   <div key={sym} className="fade-up"
                     onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
-                    style={{display:"grid",gridTemplateColumns:"110px 80px 70px 110px 110px 110px 70px 70px",
+                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 110px 110px 110px 70px 70px",
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
                       border:`1px solid ${isHold?T.border:col+"35"}`,
@@ -3114,8 +3155,9 @@ export default function TradingBot(){
                   >
                     <div>
                       <div style={{fontSize:12,fontWeight:700,color:T.yellow}}>⬡ {cfg.label}</div>
-                      <div style={{fontSize:7,color:T.muted,marginTop:1}}>RSI {d.rsi} · {d.samples}pts</div>
+                      <div style={{marginTop:2}}><TierBadge symbol={sym}/></div>
                     </div>
+                    <Sparkline data={d.sparkline} color={isHold?T.muted:col}/>
                     <div style={{background:`${col}20`,border:`1px solid ${col}50`,borderRadius:5,padding:"4px 8px",textAlign:"center"}}>
                       <div style={{fontSize:11,fontWeight:700,color:col}}>{isHold?"— HOLD":isBuy?"▲ BUY":"▼ SELL"}</div>
                     </div>
@@ -3556,13 +3598,16 @@ export default function TradingBot(){
         </div>
 
         {/* PROGRAMAR INICIO AUTOMÁTICO */}
-        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"14px 16px",marginBottom:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M12 6v6l4 2" stroke={T.accent} strokeWidth="2" strokeLinecap="round"/><circle cx="12" cy="12" r="9" stroke={T.accent} strokeWidth="2"/></svg>
+            <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>INICIO AUTOMÁTICO PROGRAMADO</span>
+          </div>
           {!scheduledStart?(
             <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-              <span style={{fontSize:9,color:T.muted,letterSpacing:1}}>⏰ Programar inicio de AUTO:</span>
               <input type="datetime-local" value={scheduleInput} onChange={e=>setScheduleInput(e.target.value)}
                 min={new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)}
-                style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"5px 8px",fontSize:11,fontFamily:"inherit"}}/>
+                style={{background:T.dim,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"7px 10px",fontSize:11,fontFamily:"inherit"}}/>
               <button disabled={!scheduleInput||autoMode}
                 onClick={()=>{
                   const ts=new Date(scheduleInput).getTime();
@@ -3571,21 +3616,40 @@ export default function TradingBot(){
                   addLog(`⏰ AUTO se activará el ${new Date(ts).toLocaleString("es")}`,"info");
                 }}
                 style={{background:!scheduleInput||autoMode?T.dim:`${T.accent}18`,border:`1px solid ${!scheduleInput||autoMode?T.border:T.accent}`,
-                  color:!scheduleInput||autoMode?T.muted:T.accent,borderRadius:6,padding:"5px 12px",fontSize:11,fontWeight:700,
+                  color:!scheduleInput||autoMode?T.muted:T.accent,borderRadius:6,padding:"7px 14px",fontSize:11,fontWeight:700,
                   cursor:!scheduleInput||autoMode?"not-allowed":"pointer"}}>
                 Programar
               </button>
               {autoMode&&<span style={{fontSize:9,color:T.muted}}>AUTO ya está encendido</span>}
             </div>
           ):(
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-              <span style={{fontSize:11,color:T.accent}}>
-                ⏰ AUTO se activará el <b>{new Date(scheduledStart).toLocaleString("es")}</b>
-              </span>
-              <button onClick={()=>{setScheduledStart(null);addLog("⏰ Programación de inicio cancelada","info");}}
-                style={{background:"transparent",border:`1px solid ${T.red}`,color:T.red,borderRadius:6,padding:"4px 10px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
-                Cancelar
-              </button>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,
+              background:T.dim,border:`1px solid ${T.accent}45`,borderRadius:8,padding:"12px 16px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <div style={{width:34,height:34,borderRadius:8,background:`${T.accent}18`,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="16" rx="2" stroke={T.accent} strokeWidth="1.8"/><path d="M3 10h18M8 3v4M16 3v4" stroke={T.accent} strokeWidth="1.8" strokeLinecap="round"/></svg>
+                </div>
+                <div>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>AUTO SE ACTIVARÁ EL</div>
+                  <div className="mono" style={{fontSize:13,fontWeight:700,color:T.accent}}>{new Date(scheduledStart).toLocaleString("es")}</div>
+                </div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                {scheduleRemainingMs!=null&&(
+                  <div style={{textAlign:"right"}}>
+                    <div className="mono" style={{fontSize:14,fontWeight:700,color:T.text}}>
+                      {String(Math.floor(scheduleRemainingMs/3600000)).padStart(2,"0")}:
+                      {String(Math.floor(scheduleRemainingMs%3600000/60000)).padStart(2,"0")}:
+                      {String(Math.floor(scheduleRemainingMs%60000/1000)).padStart(2,"0")}
+                    </div>
+                    <div style={{fontSize:6,color:T.muted,letterSpacing:1}}>TIEMPO RESTANTE</div>
+                  </div>
+                )}
+                <button onClick={()=>{setScheduledStart(null);addLog("⏰ Programación de inicio cancelada","info");}}
+                  style={{background:"transparent",border:`1px solid ${T.red}`,color:T.red,borderRadius:6,padding:"6px 12px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+                  Cancelar
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -3633,8 +3697,34 @@ export default function TradingBot(){
               </label>
             </div>
           )}
+          {stakeAutoScale&&(()=>{
+            const steps=Array.from({length:5},(_,i)=>+(minStake+stakeStep*i).toFixed(2));
+            const curIdx=steps.reduce((best,s,i)=>Math.abs(s-positionSize)<Math.abs(steps[best]-positionSize)?i:best,0);
+            const maxH=64;
+            return(
+              <>
+                <div style={{fontSize:8,color:T.muted,letterSpacing:1,margin:"14px 0 8px"}}>ESCALERA DE STAKE</div>
+                <div style={{display:"flex",alignItems:"flex-end",gap:10,height:maxH+28,padding:"0 4px"}}>
+                  {steps.map((s,i)=>{
+                    const isCur=i===curIdx;
+                    const h=12+((i+1)/steps.length)*maxH;
+                    return(
+                      <div key={s} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,flex:1}}>
+                        <span className="mono" style={{fontSize:9,fontWeight:isCur?700:400,color:isCur?T.accent:T.muted}}>${s.toFixed(2)}</span>
+                        <div style={{width:"100%",height:h,background:isCur?T.accent:T.border,borderRadius:"4px 4px 0 0",
+                          boxShadow:isCur?`0 0 0 2px ${T.accent}55`:"none"}}/>
+                        <span style={{fontSize:7,color:isCur?T.accent:T.muted,fontWeight:isCur?700:400}}>
+                          {isCur?"ACTUAL":i===0?"mín":`+${Math.round((s/minStake-1)*100)}%`}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            );
+          })()}
           {stakeAutoScale&&(
-            <div style={{fontSize:8,color:T.muted,marginTop:8,lineHeight:1.5}}>
+            <div style={{fontSize:8,color:T.muted,marginTop:10,lineHeight:1.5}}>
               Cada vez que el balance suba (o baje) un {Math.round(stakeGrowthTrigger*100)}% desde el último ajuste,
               el stake sube (o baja) ${stakeStep.toFixed(2)}, sin bajar de ${minStake.toFixed(2)}.
               TP/SL se re-escalan automáticamente para mantener el mismo % de movimiento de precio validado por backtest.

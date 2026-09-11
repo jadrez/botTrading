@@ -38,7 +38,7 @@ export default async function handler(req, res) {
     srLevels = { supports: [], resistances: [] },
     patterns = [],
     correlations = [],
-    positions, balance, news, reason,
+    positions, balance, news, marketBias = "neutral", newsSummary = "", reason,
     activePrediction = null,
     positionSize = DEFAULT_STAKE,
     tpTarget = DEFAULT_TP_USD,
@@ -130,6 +130,9 @@ PATRONES (velas + chartistas): ${patternsStr}
 (EMA:${emaDir} | RSI:${rsiDir} | 1H:${t1hDir} | 5V:${stDir})
 
 ═══ NOTICIAS ═══
+Sesgo agregado (Alpha Vantage, todas las noticias recientes): ${marketBias.toUpperCase()}
+${newsSummary || ""}
+Titulares:
 ${nc}
 
 ═══ CORRELACIÓN FOREX ═══
@@ -156,6 +159,7 @@ ${lossWarning}
 9. Sin confluencia clara → HOLD siempre.
 10. CORRELACIÓN: Si hay datos de correlación forex y 0 pares confirman → should_open=false, HOLD obligatorio.
 11. CORRELACIÓN: Si TODOS los pares correlacionados confirman → suma +8% a la confianza y prioriza la apertura.
+12. NOTICIAS: El sesgo agregado NO es un titular suelto — es el promedio de sentimiento de TODAS las noticias recientes. Si contradice fuertemente tu señal (ej. sesgo BAJISTA y quieres BUY), exige confluencia técnica extra antes de abrir; si confirma tu señal, es una razón válida para subir la confianza.
 
 Responde SOLO JSON sin backticks:
 {"signal":"BUY","confidence":75,"reasoning":"máx 60 palabras en español","news_impact":"BULLISH","key_factor":"5 palabras","risk":"MEDIO","should_open":true}`;
@@ -250,6 +254,29 @@ Responde SOLO JSON sin backticks:
           confidence: Math.min(99, parsed.confidence + 8),
           reasoning: `[Confirmado por correlación ${corrCount}/${corrCount}] ${parsed.reasoning}`,
           key_factor: parsed.key_factor + " · corr✓✓",
+        });
+      }
+
+      // News-bias adjustment: the aggregate sentiment from ALL recent
+      // headlines (not a single stray one) either backs or contradicts the
+      // final signal. Softer than the trend/correlation hard blocks —
+      // sentiment analysis is noisier than price action — so this nudges
+      // confidence rather than forcing HOLD outright.
+      const biasDir = marketBias === "bullish" ? "BUY" : marketBias === "bearish" ? "SELL" : null;
+      if (biasDir && parsed.signal !== "HOLD" && parsed.signal !== biasDir) {
+        return res.status(200).json({
+          ...parsed,
+          confidence: Math.max(0, parsed.confidence - 10),
+          reasoning: `[Noticias en contra: sesgo ${marketBias.toUpperCase()}] ${parsed.reasoning}`,
+          key_factor: parsed.key_factor + " · noticias✗",
+        });
+      }
+      if (biasDir && parsed.signal === biasDir) {
+        return res.status(200).json({
+          ...parsed,
+          confidence: Math.min(99, parsed.confidence + 5),
+          reasoning: `[Confirmado por noticias: sesgo ${marketBias.toUpperCase()}] ${parsed.reasoning}`,
+          key_factor: parsed.key_factor + " · noticias✓",
         });
       }
 

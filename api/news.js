@@ -10,6 +10,14 @@ const TICKER_MAP = {
   "USD/CHF":  "FOREX:USD,FOREX:CHF",
   "USD/CAD":  "FOREX:USD,FOREX:CAD",
   "EUR/GBP":  "FOREX:EUR,FOREX:GBP",
+  // Commodities have no ticker symbol in Alpha Vantage's NEWS_SENTIMENT
+  // taxonomy (crypto/forex/equity only) — they used to silently fall back
+  // to "CRYPTO:ETH" below, meaning gold/silver/oil got Ethereum news. Use
+  // topics instead: safe-haven/macro-driven assets read financial_markets +
+  // economy_macro; oil additionally reads energy_transportation.
+  "XAU/USD":  { topics: "financial_markets,economy_macro" },
+  "XAG/USD":  { topics: "financial_markets,economy_macro" },
+  "XTI/USD":  { topics: "energy_transportation,economy_macro" },
 };
 
 // Pairs that share news (all involve USD — same macro drivers)
@@ -53,15 +61,17 @@ export default async function handler(req, res) {
   if (!apiKey) return res.status(500).json({ error: "ALPHA_VANTAGE_KEY not set" });
 
   const { symbol = "ETH/USDT" } = req.body || {};
-  const tickers = TICKER_MAP[symbol] || "CRYPTO:ETH";
-  const cacheKey = tickers;
+  const mapped = TICKER_MAP[symbol] || "CRYPTO:ETH";
+  const isTopics = typeof mapped === "object";
+  const queryParam = isTopics ? `topics=${mapped.topics}` : `tickers=${mapped}`;
+  const cacheKey = isTopics ? `topics:${mapped.topics}` : mapped;
 
   // ── Serve from cache if fresh
   const cached = getCached(cacheKey);
   if (cached) return res.status(200).json(cached);
 
   try {
-    const url = `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=${tickers}&sort=LATEST&limit=10&apikey=${apiKey}`;
+    const url = `https://www.alphavantage.co/query?function=NEWS_SENTIMENT&${queryParam}&sort=LATEST&limit=10&apikey=${apiKey}`;
     const r = await fetch(url);
     const d = await r.json();
 
