@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS walkforward_folds (
 );
 CREATE INDEX IF NOT EXISTS idx_wf_symbol ON walkforward_folds (symbol, fold_idx);
 
+-- Currently OPEN positions — a live mirror, not history. A row exists here
+-- exactly while the position is open (inserted when it opens, deleted when
+-- it closes into `trades`). Without this, reloading the page or opening the
+-- dashboard from another device loses track of what's actually open.
+CREATE TABLE IF NOT EXISTS open_positions (
+  client_id        TEXT PRIMARY KEY,        -- the position's client-generated id (pos.id)
+  symbol           TEXT NOT NULL,
+  type             TEXT NOT NULL,           -- 'BUY' | 'SELL'
+  entry_price      NUMERIC NOT NULL,
+  allocated_size   NUMERIC,
+  multiplier       INT,
+  confidence       INT,
+  opened_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Server-side bot config (TP/SL/stake/multiplier), the durable replacement
 -- for the bot_tp_v2/bot_sl_v2/bot_stake/bot_mult localStorage keys.
 CREATE TABLE IF NOT EXISTS bot_config (

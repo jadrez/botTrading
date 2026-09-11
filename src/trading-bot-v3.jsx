@@ -250,6 +250,22 @@ function saveTradeLearning(trade){
   }catch{}
 }
 function loadTrades(){ try{return JSON.parse(localStorage.getItem(LS_TRADES)||"[]");}catch{return [];} }
+
+// Mirrors a position into open_positions (see api/positions.js) so it isn't
+// silently forgotten if the browser reloads or the dashboard is opened from
+// another device while it's still open. Fire-and-forget — never blocks or
+// throws into the caller.
+function savePositionOpen(pos, confidence){
+  fetch("/api/positions",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      clientId:pos.id, symbol:pos.symbol, type:pos.type, entryPrice:pos.entry,
+      allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, confidence,
+    }),
+  }).catch(()=>{});
+}
+function deletePositionOpen(clientId){
+  fetch(`/api/positions?clientId=${encodeURIComponent(clientId)}`,{method:"DELETE"}).catch(()=>{});
+}
 function saveBalance(b){ try{localStorage.setItem(LS_BALANCE,String(b));}catch{} }
 // Default matches bot_initial_capital (real starting capital) instead of an
 // arbitrary $10,000 paper balance, so the stake ladder's % growth is measured
@@ -1302,7 +1318,29 @@ export default function TradingBot(){
   useEffect(()=>{
     fetch("/api/trades?limit=500")
       .then(r=>r.ok?r.json():null)
-      .then(d=>{ if(d?.trades?.length) setLearningStats(calcLearningStats(d.trades)); })
+      .then(d=>{
+        if(d?.trades?.length){
+          setLearningStats(calcLearningStats(d.trades));
+          setTrades(d.trades); // seeds the Dashboard's "Historial" panel with real persisted data
+        }
+      })
+      .catch(()=>{});
+  },[]);
+
+  // ── Restore open positions from Postgres on mount — otherwise a reload
+  // while a position is open makes the app "forget" it entirely (it keeps
+  // existing at the broker if derivEnabled, but nothing here would manage
+  // its TP/SL/trailing-stop anymore). Only seeds if nothing is open locally
+  // yet, so it never clobbers a position opened earlier in this session.
+  useEffect(()=>{
+    fetch("/api/positions")
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{
+        if(d?.positions?.length && posRef.current.length===0){
+          setPositions(d.positions.map(p=>({...p,peakPnl:0})));
+          addLog(`🔄 ${d.positions.length} posición(es) abierta(s) restaurada(s) desde la base de datos`,"info");
+        }
+      })
       .catch(()=>{});
   },[]);
 
@@ -1968,6 +2006,7 @@ export default function TradingBot(){
         closeDerivOrder(pos.derivContractId)
           .then(r=>{ if(!r.ok) console.warn("Deriv close error:",r.error); });
       }
+      deletePositionOpen(pos.id);
       const pnl=posPnL(pos,currentPrice,pos.allocatedSize||positionSizeRef.current);
       const posSym=pos.symbol||symbolRef.current;
       const prec=ASSETS[posSym]?.precision||ASSETS[symbolRef.current].precision;
@@ -2277,6 +2316,7 @@ export default function TradingBot(){
           }
 
           setPositions(p=>[...p,mainPos,...corrPositions]);
+          [mainPos,...corrPositions].forEach(p=>savePositionOpen(p,result.confidence));
           addLog(`${isBuy?"🟢 BUY":"🔴 SELL"} ${activeSym} @ ${fP(cp,prec)} | ${ps.toFixed(2)}L | TP:+${fUSD(tpTargetRef.current)} SL:-${fUSD(slTargetRef.current)}${corrPositions.length?` + ${corrPositions.length} correlacionadas`:""}`,isBuy?"buy":"sell");
           setAutoPhase("monitoring");
         } else {
@@ -2851,7 +2891,8 @@ export default function TradingBot(){
         <div style={{display:"flex",gap:0,marginBottom:12,borderBottom:`1px solid ${T.border}`,paddingBottom:0}}>
           {[
             {id:"dashboard", label:"📊 Dashboard"},
-            {id:"operations", label:`💼 Operaciones${positions.length>0?` (${positions.length})`:""}`,
+            {id:"signals", label:"🔍 Señales"},
+            {id:"trading", label:`💼 Operaciones Trading${positions.length>0?` (${positions.length})`:""}`,
               badge:positions.length},
           ].map(tab=>(
             <button key={tab.id} onClick={()=>setActiveView(tab.id)}
@@ -2869,8 +2910,8 @@ export default function TradingBot(){
           ))}
         </div>
 
-        {/* ══════════ VISTA: OPERACIONES — SEÑALES FOREX ══════════ */}
-        {activeView==="operations"&&(()=>{
+        {/* ══════════ VISTA: SEÑALES — SEÑALES FOREX ══════════ */}
+        {activeView==="signals"&&(()=>{
           const FOREX_PAIRS=["EUR/USD","GBP/USD","AUD/USD","NZD/USD","USD/JPY","USD/CHF","USD/CAD","EUR/GBP"];
           const COMMODITY_PAIRS=["XAU/USD","XAG/USD","XTI/USD"];
           const uniquePairs=[...new Set(FOREX_PAIRS)];
@@ -3140,6 +3181,120 @@ export default function TradingBot(){
           );
         })()}
 
+        {/* ══════════ VISTA: OPERACIONES TRADING — abiertas en vivo + histórico ══════════ */}
+        {activeView==="trading"&&(()=>{
+          const closedWins=trades.filter(t=>t.pnl>0).length;
+          const closedLosses=trades.filter(t=>t.pnl<=0).length;
+          const totalClosedPnl=trades.reduce((s,t)=>s+(t.pnl||0),0);
+          return(
+            <div style={{animation:"fadeUp .3s ease"}}>
+
+              {/* Resumen */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:16}}>
+                <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",textAlign:"center"}}>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>ABIERTAS</div>
+                  <div className="mono" style={{fontSize:16,fontWeight:700,color:T.accent}}>{positions.length}</div>
+                </div>
+                <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",textAlign:"center"}}>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>CERRADAS</div>
+                  <div className="mono" style={{fontSize:16,fontWeight:700,color:T.text}}>{trades.length}</div>
+                </div>
+                <div style={{background:T.panel,border:`1px solid ${T.green}30`,borderRadius:8,padding:"10px 14px",textAlign:"center"}}>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>GANADAS</div>
+                  <div className="mono" style={{fontSize:16,fontWeight:700,color:T.green}}>{closedWins}</div>
+                </div>
+                <div style={{background:T.panel,border:`1px solid ${T.red}30`,borderRadius:8,padding:"10px 14px",textAlign:"center"}}>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>PERDIDAS</div>
+                  <div className="mono" style={{fontSize:16,fontWeight:700,color:T.red}}>{closedLosses}</div>
+                </div>
+                <div style={{background:T.panel,border:`1px solid ${totalClosedPnl>=0?T.green:T.red}30`,borderRadius:8,padding:"10px 14px",textAlign:"center"}}>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>P&amp;L CERRADO</div>
+                  <div className="mono" style={{fontSize:16,fontWeight:700,color:totalClosedPnl>=0?T.green:T.red}}>{fUSD(totalClosedPnl)}</div>
+                </div>
+              </div>
+
+              {/* Abiertas en vivo */}
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:14,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:10}}>POSICIONES ABIERTAS EN VIVO</div>
+                {positions.length===0?(
+                  <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"20px",textAlign:"center",fontSize:11,color:T.muted}}>
+                    Sin posiciones abiertas ahora mismo.
+                  </div>
+                ):(
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {positions.map(pos=>{
+                      const posSym=pos.symbol||symbol;
+                      const cfg=ASSETS[posSym];
+                      const livePrice=posSym===symbol?price:(livePrices[posSym]??cfg?.basePrice);
+                      const ps=pos.allocatedSize||positionSize;
+                      const pnl=posPnL(pos,livePrice,ps);
+                      const isBuy=pos.type==="BUY";
+                      const col=pnl>=0?T.green:T.red;
+                      const elapsedMin=Math.floor((Date.now()-(pos.openTime||Date.now()))/60000);
+                      return(
+                        <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 100px 100px 110px 90px 60px",
+                          gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:8,padding:"10px 14px"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <span style={{fontSize:12,fontWeight:700,color:T.text}}>{posSym}</span>
+                            {pos.derivContractId&&<span style={{fontSize:6,color:T.accent,background:`${T.accent}18`,padding:"1px 4px",borderRadius:3}}>DERIV</span>}
+                          </div>
+                          <span style={{fontSize:10,fontWeight:700,color:col}}>{isBuy?"▲ BUY":"▼ SELL"}</span>
+                          <span className="mono" style={{fontSize:11,color:T.muted}}>{fP(pos.entry,cfg?.precision||5)}</span>
+                          <span className="mono" style={{fontSize:11,color:T.text}}>{fP(livePrice,cfg?.precision||5)}</span>
+                          <span className="mono" style={{fontSize:14,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
+                          <span style={{fontSize:9,color:T.muted}}>hace {elapsedMin}m</span>
+                          <button onClick={()=>closePosition(pos.id,livePrice,"MANUAL")}
+                            style={{background:"transparent",border:`1px solid ${T.muted}50`,color:T.muted,borderRadius:5,padding:"5px 10px",cursor:"pointer",fontSize:10,fontWeight:700}}>
+                            Cerrar
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Histórico de cerradas */}
+              <div>
+                <div style={{fontSize:14,fontWeight:700,color:T.text,letterSpacing:1,marginBottom:10}}>HISTÓRICO — GANANCIAS Y PÉRDIDAS</div>
+                {trades.length===0?(
+                  <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"20px",textAlign:"center",fontSize:11,color:T.muted}}>
+                    Sin operaciones cerradas todavía.
+                  </div>
+                ):(
+                  <>
+                    <div style={{display:"grid",gridTemplateColumns:"110px 90px 70px 90px 90px 90px 90px 1fr",gap:10,padding:"0 14px 6px",fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>
+                      <div>FECHA</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>PATRONES</div>
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                      {trades.slice(0,50).map((t,i)=>{
+                        const prec=ASSETS[t.symbol]?.precision||5;
+                        const win=t.pnl>0;
+                        const col=win?T.green:T.red;
+                        return(
+                          <div key={i} style={{display:"grid",gridTemplateColumns:"110px 90px 70px 90px 90px 90px 90px 1fr",
+                            gap:10,alignItems:"center",background:T.card,border:`1px solid ${col}25`,borderRadius:7,padding:"9px 14px"}}>
+                            <span className="mono" style={{fontSize:9,color:T.muted}}>{t.time||"—"}</span>
+                            <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||symbol}</span>
+                            <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:T.red}}>{t.type}</span>
+                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(t.entry,prec)}</span>
+                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(t.exit,prec)}</span>
+                            <span className="mono" style={{fontSize:11,fontWeight:700,color:col}}>{fUSD(t.pnl)}</span>
+                            <span style={{fontSize:8,fontWeight:700,color:col,background:`${col}18`,padding:"2px 7px",borderRadius:4,textAlign:"center"}}>{t.reason||"—"}</span>
+                            <span style={{fontSize:9,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                              {(t.activePatterns||[]).join(", ")||"—"}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
         {/* ══════════ VISTA: DASHBOARD ══════════ */}
         {activeView==="dashboard"&&(<>
 
@@ -3176,8 +3331,10 @@ export default function TradingBot(){
                 </div>
                 {!autoMode&&aiResult.signal!=="HOLD"&&positions.filter(p=>!p.symbol||p.symbol===symbol).length<MAX_POSITIONS&&(
                   <button onClick={()=>{
-                    const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now(),symbol,openTime:Date.now()};
+                    const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now(),symbol,openTime:Date.now(),
+                      allocatedSize:positionSizeRef.current,multiplier:multiplierRef.current,peakPnl:0};
                     setPositions(p=>[...p,pos]);
+                    savePositionOpen(pos,aiResult.confidence);
                     addLog(`${aiResult.signal==="BUY"?"🟢":"🔴"} ${aiResult.signal} manual @ ${fP(priceRef.current,asset.precision)}`,aiResult.signal==="BUY"?"buy":"sell");
                   }} style={{marginTop:10,width:"100%",background:`${sigCol}18`,border:`1px solid ${sigCol}`,
                     color:sigCol,borderRadius:7,padding:"9px",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1}}>

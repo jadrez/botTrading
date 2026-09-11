@@ -12,7 +12,7 @@ const sql = readFileSync(fileURLToPath(new URL("./schema.sql", import.meta.url))
 
 try {
   await pool.query(sql);
-  console.log("Esquema aplicado: sweep_results, trades, bot_config.");
+  console.log("Esquema aplicado: sweep_results, trades, open_positions, walkforward_folds, bot_config.");
 } catch (err) {
   console.error("Error aplicando el esquema:", err.message);
   process.exit(1);
