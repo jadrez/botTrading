@@ -259,6 +259,22 @@ function detectCandlePatterns(candles){
   return results;
 }
 
+// ── Background-symbol pattern/S-R support: the multi-asset scanner only
+// ever polls a raw price (no OHLC candles) for symbols you aren't actively
+// charting, so detectCandlePatterns()/calcSR() have nothing to work with
+// there. Bucket the rolling price history into coarse OHLC groups — not a
+// substitute for real candles, but enough signal for the same pattern/S-R
+// logic that already gates the active symbol to also inform symbols you
+// aren't looking at, instead of those relying on EMA+RSI alone.
+function buildPseudoCandles(closes, groupSize=3){
+  const candles=[];
+  for(let i=0;i+groupSize<=closes.length;i+=groupSize){
+    const chunk=closes.slice(i,i+groupSize);
+    candles.push({o:chunk[0], c:chunk[chunk.length-1], h:Math.max(...chunk), l:Math.min(...chunk)});
+  }
+  return candles;
+}
+
 /* ─── LEARNING STATS (localStorage) ─────────────────────────────────────── */
 const LS_TRADES = "bot_trades_v2";
 const LS_BALANCE= "bot_balance_v2";
@@ -271,6 +287,36 @@ function saveTradeLearning(trade){
   }catch{}
 }
 function loadTrades(){ try{return JSON.parse(localStorage.getItem(LS_TRADES)||"[]");}catch{return [];} }
+
+// ── Per-symbol dynamic confidence: same idea as the global recent-20 win
+// rate threshold, but scoped to one symbol's own history instead of every
+// symbol's blended together — ETH/USDT's threshold now reacts to ETH/USDT's
+// own recent record, not diluted by how forex has been doing.
+function getSymbolMinConf(trades, symbol, fallback){
+  const symTrades=trades.filter(t=>t.symbol===symbol);
+  if(symTrades.length<8) return fallback; // too little symbol-specific data yet — use the global figure
+  const recent=symTrades.slice(0,20);
+  const recentWR=recent.filter(t=>t.pnl>0).length/recent.length;
+  if(recentWR<0.35)      return 73;
+  if(recentWR<0.45)      return 68;
+  if(recentWR<0.55)      return 64;
+  if(recentWR>=0.65)     return 60;
+  return fallback;
+}
+
+// ── Pattern feedback: byPattern (from calcLearningStats) already tracks each
+// pattern's historical win rate — this is the first place that actually acts
+// on it instead of just displaying it. Requires a decent sample (t>=5) before
+// trusting a pattern's win rate enough to move confidence.
+function getPatternAdjustment(patternNames, byPatternStats){
+  if(!patternNames?.length || !byPatternStats?.length) return {delta:0, note:null};
+  const matches=byPatternStats.filter(p=>patternNames.includes(p.name) && p.t>=5);
+  if(!matches.length) return {delta:0, note:null};
+  const avgWr=matches.reduce((s,p)=>s+p.wr,0)/matches.length;
+  if(avgWr>=65) return {delta:6, note:`patrón históricamente fuerte (${Math.round(avgWr)}% WR)`};
+  if(avgWr<=35) return {delta:-10, note:`patrón históricamente débil (${Math.round(avgWr)}% WR)`};
+  return {delta:0, note:null};
+}
 
 // Mirrors a position into open_positions (see api/positions.js) so it isn't
 // silently forgotten if the browser reloads or the dashboard is opened from
@@ -1869,9 +1915,25 @@ export default function TradingBot(){
           const pipSz=Math.pow(10,-prec);
           const emaSpreadPips=Math.abs(e9-e21)/pipSz;
           const rsiDiv=isBuy?Math.max(0,60-rsi):Math.max(0,rsi-40);
-          const confidence=signal==="HOLD"?0:Math.min(88,Math.max(45,Math.round(50+emaSpreadPips*0.3+rsiDiv*0.5)));
 
-          results[sym]={price,signal,color,rsi:rsi.toFixed(0),pct,confidence,target,stop,prec,entry:price};
+          // Pattern + S/R confluence bonus — same confluence idea api/analyze.js
+          // and backtest/lib/strategy.mjs already use for the validated symbols,
+          // now also informing symbols you aren't actively charting.
+          const pseudoCandles=buildPseudoCandles(closes,3);
+          const bgPatterns=pseudoCandles.length>=3?detectCandlePatterns(pseudoCandles):[];
+          const wantDir=isBuy?"BULLISH":"BEARISH";
+          const dirPatterns=bgPatterns.filter(p=>p.signal===wantDir);
+          const bgSr=pseudoCandles.length>=20?calcSR(pseudoCandles):{supports:[],resistances:[]};
+          const nearSupport=bgSr.supports?.[0]&&Math.abs(price-bgSr.supports[0].price)/price<0.0015;
+          const nearResistance=bgSr.resistances?.[0]&&Math.abs(price-bgSr.resistances[0].price)/price<0.0015;
+          const srBonus=(isBuy&&nearSupport)||(!isBuy&&nearResistance)?8:0;
+          const patternBonus=dirPatterns.length?8:0;
+
+          const confidence=signal==="HOLD"?0:Math.min(88,Math.max(45,
+            Math.round(50+emaSpreadPips*0.3+rsiDiv*0.5+patternBonus+srBonus)));
+
+          results[sym]={price,signal,color,rsi:rsi.toFixed(0),pct,confidence,target,stop,prec,entry:price,
+            patterns:dirPatterns.map(p=>p.name)};
         }catch{}
       }
       setAssetSignals(results);
@@ -2204,6 +2266,10 @@ export default function TradingBot(){
       else if(recentWR<0.55) minConf=64; // around avg → slightly cautious
       else if(recentWR>=0.65)minConf=60; // winning well → relaxed
     }
+    // Prefer THIS symbol's own recent record over the blended global one,
+    // once it has enough trades of its own to be meaningful.
+    minConf=getSymbolMinConf(trades,symbolRef.current,minConf);
+    const byPatternStats=calcLearningStats(trades)?.byPattern||[];
 
     // ── Apply the walk-forward-validated tier for this symbol on top of the
     // learning-derived threshold: MIXTO/ROBUSTO raise the bar, SIN-EDGE blocks
@@ -2249,6 +2315,19 @@ export default function TradingBot(){
         tpTarget:tpTargetRef.current, slTarget:slTargetRef.current,
         activePrediction:activePredRef.current,
       });
+
+      // ── Pattern feedback: nudge confidence using how THESE exact patterns
+      // have actually performed historically (byPatternStats), instead of
+      // only showing that stat on a panel nobody's decision ever reads.
+      if(result.signal!=="HOLD"){
+        const activePatNames=patternsRef.current.map(p=>p.name);
+        const {delta,note}=getPatternAdjustment(activePatNames,byPatternStats);
+        if(delta!==0){
+          result.confidence=Math.max(0,Math.min(99,result.confidence+delta));
+          result.reasoning=`[Aprendizaje: ${note}, ${delta>0?"+":""}${delta}%] ${result.reasoning}`;
+        }
+      }
+
       setAiResult(result);
       addLog(`📡 ${result.signal} (${result.confidence}%) — ${result.key_factor}`,
         result.signal==="BUY"?"buy":result.signal==="SELL"?"sell":"info");
@@ -2433,6 +2512,8 @@ export default function TradingBot(){
   const runAutoScan=useCallback(()=>{
     if(!autoRef.current) return;
     if(posRef.current.length>=MAX_TOTAL_POSITIONS) return;
+    const allTrades=loadTrades();
+    const byPatternStats=calcLearningStats(allTrades)?.byPattern||[];
     for(const [sym,strat] of Object.entries(SYMBOL_STRATEGY)){
       if(strat.tier==="SIN-EDGE") continue;
       if(sym===symbolRef.current) continue; // ya lo cubre el análisis principal
@@ -2442,8 +2523,15 @@ export default function TradingBot(){
       if(symSlots<=0) continue;
       const data=assetSignalsRef.current[sym];
       if(!data||data.signal==="HOLD"||!data.confidence) continue;
-      const minConf=consLossesRef.current>=2?Math.min(90,strat.minConf+10):strat.minConf;
-      if(data.confidence<minConf) continue;
+
+      // Same two learning feedback loops as the active symbol: this symbol's
+      // own recent record (not the global blend) and how its detected
+      // patterns have historically performed.
+      const baseMinConf=consLossesRef.current>=2?Math.min(90,strat.minConf+10):strat.minConf;
+      const minConf=getSymbolMinConf(allTrades,sym,baseMinConf);
+      const {delta,note}=getPatternAdjustment(data.patterns,byPatternStats);
+      const adjConfidence=Math.max(0,Math.min(99,data.confidence+delta));
+      if(adjConfidence<minConf) continue;
 
       const ps=positionSizeRef.current;
       const scaled=scaledTpSl(sym,ps,multiplierRef.current);
@@ -2453,8 +2541,8 @@ export default function TradingBot(){
         tp:scaled?.tp??tpTargetRef.current, sl:scaled?.sl??slTargetRef.current,
       };
       setPositions(p=>[...p,pos]);
-      savePositionOpen(pos,data.confidence);
-      addLog(`🌐 ${data.signal==="BUY"?"🟢":"🔴"} ${data.signal} ${sym} @ ${fP(data.price,data.prec||5)} (auto multi-símbolo, ${strat.tier}, conf ${data.confidence}%)`,data.signal==="BUY"?"buy":"sell");
+      savePositionOpen(pos,adjConfidence);
+      addLog(`🌐 ${data.signal==="BUY"?"🟢":"🔴"} ${data.signal} ${sym} @ ${fP(data.price,data.prec||5)} (auto multi-símbolo, ${strat.tier}, conf ${adjConfidence}%${note?` · ${note}`:""})`,data.signal==="BUY"?"buy":"sell");
     }
   },[addLog]);
 
