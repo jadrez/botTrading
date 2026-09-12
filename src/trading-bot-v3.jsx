@@ -68,7 +68,11 @@ const fP   = (n, p) => Number(n).toFixed(p);
 const fUSD = (n, sign=true) => {
   const abs=Math.abs(n);
   const dec=abs<0.01?4:abs<0.10?3:2;
-  return (sign&&n>=0?"+":"")+`$${abs.toFixed(dec)}`;
+  // Was only ever prepending "+" for positives and NOTHING for negatives —
+  // a loss of -$0.0025 rendered as literally "$0.0025", indistinguishable
+  // from a gain by its text, relying purely on color to tell them apart.
+  const prefix=n<0?"-":(sign&&n>=0?"+":"");
+  return prefix+`$${abs.toFixed(dec)}`;
 };
 const fPct = n => (n>=0?"+":"")+n.toFixed(3)+"%";
 const now  = () => new Date().toLocaleTimeString("es");
@@ -1012,11 +1016,12 @@ function PosRow({pos, price, precision, onClose, tpTarget=3, slTarget=2}){
   const pct=Math.min(100,Math.max(0,(pnl/tpTarget)*100));
   const pctChange=(price-pos.entry)/pos.entry*100;
   const isBuy=pos.type==="BUY";
+  const dirCol=isBuy?T.green:T.red; // direction is fixed — never confuse this with the win/loss color (col)
   return(
     <div className="fade-up" style={{background:T.card,border:`1px solid ${col}30`,borderRadius:6,padding:"8px 12px"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:6}}>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <span style={{fontSize:10,fontWeight:700,color:col,background:`${col}18`,padding:"2px 8px",borderRadius:4,letterSpacing:1}}>
+          <span style={{fontSize:10,fontWeight:700,color:dirCol,background:`${dirCol}18`,padding:"2px 8px",borderRadius:4,letterSpacing:1}}>
             {isBuy?"▲ BUY":"▼ SELL"}
           </span>
           <span className="mono" style={{fontSize:10,color:T.muted}}>@ {fP(pos.entry,precision)}</span>
@@ -3355,6 +3360,7 @@ export default function TradingBot(){
                       const isBuy=pos.type==="BUY";
                       const dir=isBuy?1:-1;
                       const col=pnl>=0?T.green:T.red;
+                      const dirCol=isBuy?T.green:T.red; // fixed by direction — never confuse with col (win/loss)
                       const pctChange=dir*(livePrice-pos.entry)/pos.entry*100;
                       const elapsedMin=Math.floor((Date.now()-(pos.openTime||Date.now()))/60000);
                       const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
@@ -3373,7 +3379,7 @@ export default function TradingBot(){
                             <span style={{fontSize:12,fontWeight:700,color:T.text}}>{posSym}</span>
                             {pos.derivContractId&&<span style={{fontSize:6,color:T.accent,background:`${T.accent}18`,padding:"1px 4px",borderRadius:3}}>DERIV</span>}
                           </div>
-                          <span style={{fontSize:10,fontWeight:700,color:col}}>{isBuy?"▲ BUY":"▼ SELL"}</span>
+                          <span style={{fontSize:10,fontWeight:700,color:dirCol}}>{isBuy?"▲ BUY":"▼ SELL"}</span>
                           <span className="mono" style={{fontSize:11,color:T.muted}}>{fP(pos.entry,prec)}</span>
                           <span className="mono" style={{fontSize:11,color:T.text}}>{fP(livePrice,prec)}</span>
                           <span className="mono" style={{fontSize:11,fontWeight:700,color:col}}>{fPct(pctChange)}</span>
