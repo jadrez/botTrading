@@ -94,6 +94,23 @@ function trailingStopLevel(peakPnl, tpTarget, slTarget){
   return -slTarget;
 }
 
+// Standard forex week: opens Sunday 22:00 UTC, closes Friday 22:00 UTC.
+// Deriv's commodities (Gold/Silver/Oil) follow essentially the same weekend
+// closure, so they use this too. Crypto never closes — callers should check
+// asset type first and skip this entirely for crypto.
+function isForexMarketOpen(date=new Date()){
+  const day=date.getUTCDay();   // 0=Sun ... 6=Sat
+  const hour=date.getUTCHours();
+  if(day===6) return false;             // all Saturday: closed
+  if(day===0 && hour<22) return false;  // Sunday before 22:00 UTC: closed
+  if(day===5 && hour>=22) return false; // Friday from 22:00 UTC: closed
+  return true;
+}
+function isMarketOpen(assetType){
+  if(assetType==="crypto") return true;
+  return isForexMarketOpen();
+}
+
 function genCandles(base=1.0823, n=200, interval="5m"){
   const arr=[]; let p=base;
   // Scale volatility by timeframe multiplier and price magnitude
@@ -2141,9 +2158,19 @@ export default function TradingBot(){
       setAutoPhase("waiting_conditions");
       return;
     }
+    // ── Market-closed hard stop (weekend) — forex/commodities fully close
+    // Fri 22:00 UTC → Sun 22:00 UTC. This is separate from (and checked
+    // before) the intraday low-liquidity filter below: a Saturday afternoon
+    // has plenty of "hour of day" but the market simply isn't open at all.
+    const curAsset=ASSETS[symbolRef.current];
+    if((curAsset?.type==="forex"||curAsset?.type==="commodity") && !isForexMarketOpen()){
+      addLog(`🔒 Mercado cerrado (fin de semana) — ${symbolRef.current} reabre el domingo 22:00 UTC.`,"info");
+      setAutoPhase("waiting_conditions");
+      setAnalyzing(false);
+      return;
+    }
     // ── Trading session filter for forex (don't trade during Asian dead hours)
     // Commodities (Gold, Silver, Oil) trade nearly 24/5 — skip this filter
-    const curAsset=ASSETS[symbolRef.current];
     if(curAsset?.type==="forex"){
       const utcHour=new Date().getUTCHours();
       // London session: 07:00-17:00 UTC | NY session: 12:00-21:00 UTC
@@ -2405,6 +2432,7 @@ export default function TradingBot(){
       if(strat.tier==="SIN-EDGE") continue;
       if(sym===symbolRef.current) continue; // ya lo cubre el análisis principal
       if(posRef.current.length>=MAX_TOTAL_POSITIONS) break;
+      if(!isMarketOpen(ASSETS[sym]?.type)) continue; // forex/materias cerrados el fin de semana
       const symSlots=MAX_POSITIONS-posRef.current.filter(p=>p.symbol===sym).length;
       if(symSlots<=0) continue;
       const data=assetSignalsRef.current[sym];
@@ -2507,6 +2535,7 @@ export default function TradingBot(){
   const winCount=trades.filter(t=>t.pnl>0).length;
   const winRate=trades.length?Math.round(winCount/trades.length*100):0;
   const sigCol=aiResult?.signal==="BUY"?T.green:aiResult?.signal==="SELL"?T.red:T.yellow;
+  const forexMarketOpen=isForexMarketOpen(); // forex/materias — crypto siempre abierto
   const nextSec=nextAnalysis?Math.max(0,Math.round(nextAnalysis/1000)):null;
 
   const phaseInfo={
@@ -2671,7 +2700,10 @@ export default function TradingBot(){
             <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,
               padding:"8px 14px",marginBottom:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}>
-                <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>FOREX WATCHLIST · {FOREX_SYMS.length} pares · actualiza cada 30s · señales EMA+RSI</span>
+                <span style={{fontSize:8,color:T.muted,letterSpacing:2,display:"flex",alignItems:"center",gap:8}}>
+                  FOREX WATCHLIST · {FOREX_SYMS.length} pares · actualiza cada 30s · señales EMA+RSI
+                  {!forexMarketOpen&&<span style={{color:T.orange,fontWeight:700,background:`${T.orange}18`,padding:"1px 7px",borderRadius:4,letterSpacing:1}}>🔒 MERCADO CERRADO — reabre domingo 22:00 UTC</span>}
+                </span>
                 <span style={{fontSize:8,color:T.muted}}>haz clic para abrir · correlaciones respecto al par activo</span>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
@@ -2767,7 +2799,10 @@ export default function TradingBot(){
             <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,
               padding:"8px 14px",marginBottom:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}>
-                <span style={{fontSize:8,color:T.muted,letterSpacing:2}}>MATERIAS PRIMAS · ORO · PLATA · PETRÓLEO · Deriv en vivo · actualiza cada 20s</span>
+                <span style={{fontSize:8,color:T.muted,letterSpacing:2,display:"flex",alignItems:"center",gap:8}}>
+                  MATERIAS PRIMAS · ORO · PLATA · PETRÓLEO · Deriv en vivo · actualiza cada 20s
+                  {!forexMarketOpen&&<span style={{color:T.orange,fontWeight:700,background:`${T.orange}18`,padding:"1px 7px",borderRadius:4,letterSpacing:1}}>🔒 MERCADO CERRADO — reabre domingo 22:00 UTC</span>}
+                </span>
                 <span style={{fontSize:8,color:T.muted}}>haz clic para abrir gráfica</span>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
@@ -3466,6 +3501,15 @@ export default function TradingBot(){
             </div>
           );
         })()}
+
+        {/* MARKET CLOSED BANNER — active symbol is forex/commodity and it's the weekend */}
+        {(asset.type==="forex"||asset.type==="commodity")&&!forexMarketOpen&&(
+          <div style={{background:`${T.orange}0e`,border:`1px solid ${T.orange}35`,borderRadius:8,padding:"8px 14px",marginBottom:10,
+            display:"flex",alignItems:"center",gap:8,fontSize:10,color:T.orange}}>
+            <span style={{fontWeight:900}}>🔒</span>
+            <span>{symbol}: mercado cerrado (fin de semana) — no se abrirán operaciones aquí hasta que reabra el domingo 22:00 UTC. El bot sigue operando cripto normalmente.</span>
+          </div>
+        )}
 
         {/* STATS ROW */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:10}}>
