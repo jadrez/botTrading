@@ -8,13 +8,14 @@
 //
 // Usage: node backtest/walkforward.mjs --symbols "EUR/USD,ETH/USDT" --days 365 --folds 4
 
+import { pathToFileURL } from "url";
 import { fetchYahooHistory } from "./lib/yahoo.mjs";
 import { fetchBinanceHistory } from "./lib/binance.mjs";
 import { runBacktest } from "./lib/engine.mjs";
 import { computeMetrics } from "./lib/metrics.mjs";
 import { getPool } from "./lib/db.mjs";
 
-const SYMBOLS = {
+export const SYMBOLS = {
   "ETH/USDT": { kind: "binance", ticker: "ETHUSDT" },
   "BTC/USDT": { kind: "binance", ticker: "BTCUSDT" },
   "SOL/USDT": { kind: "binance", ticker: "SOLUSDT" },
@@ -77,7 +78,7 @@ async function insertFold(pool, row) {
   );
 }
 
-async function walkforwardSymbol(symbol, days, interval, folds, pool) {
+export async function walkforwardSymbol(symbol, days, interval, folds, pool) {
   const cfg = SYMBOLS[symbol];
   if (!cfg) { console.error(`Símbolo desconocido: ${symbol}`); return null; }
 
@@ -154,4 +155,8 @@ async function main() {
   if (pool) await pool.end();
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+// Only auto-run the CLI when executed directly — update-strategy.mjs imports
+// walkforwardSymbol()/SYMBOLS without wanting this file's own main() to fire.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(err => { console.error(err); process.exit(1); });
+}

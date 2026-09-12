@@ -92,3 +92,20 @@ CREATE TABLE IF NOT EXISTS bot_config (
   value            TEXT NOT NULL,
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Live copy of SYMBOL_STRATEGY (src/lib/symbolStrategy.js), refreshed by
+-- backtest/update-strategy.mjs on a schedule (see .github/workflows) so
+-- tiers/TP/SL drift with the market instead of needing a manual code edit +
+-- redeploy every time someone re-runs the walk-forward validation by hand.
+-- The frontend's hardcoded SYMBOL_STRATEGY stays as the fallback when this
+-- table is empty or unreachable.
+CREATE TABLE IF NOT EXISTS symbol_strategy (
+  symbol           TEXT PRIMARY KEY,
+  tier             TEXT NOT NULL,           -- 'ROBUSTO' | 'MIXTO' | 'SIN-EDGE'
+  tp               NUMERIC,                 -- NULL for SIN-EDGE
+  sl               NUMERIC,
+  min_conf         INT,
+  profitable_folds INT,
+  total_folds      INT,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);

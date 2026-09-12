@@ -1417,6 +1417,31 @@ export default function TradingBot(){
       .catch(()=>{});
   },[]);
 
+  // ── Pull the latest walk-forward re-validation (backtest/update-strategy.mjs,
+  // run periodically via GitHub Actions — see .github/workflows) and overlay
+  // it onto SYMBOL_STRATEGY. Mutates the existing object's properties IN PLACE
+  // (never replaces the module binding) so every consumer that already holds
+  // a reference to it (TierBadge, scaledTpSl, runAutoScan, TierLegend, the
+  // strategy banners) picks up fresh tiers/TP/SL without any code changes.
+  // If the table is empty or unreachable, the hardcoded fallback values stand.
+  useEffect(()=>{
+    fetch("/api/symbol-strategy")
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{
+        if(!d?.strategies?.length) return;
+        let updated=0;
+        for(const s of d.strategies){
+          if(!s.symbol) continue;
+          SYMBOL_STRATEGY[s.symbol]=s.tier==="SIN-EDGE"
+            ? {tier:"SIN-EDGE"}
+            : {tier:s.tier, tp:s.tp, sl:s.sl, minConf:s.minConf};
+          updated++;
+        }
+        if(updated) addLog(`📊 Estrategia por símbolo actualizada desde re-validación automática (${updated} símbolos)`,"info");
+      })
+      .catch(()=>{});
+  },[]);
+
   // ── Single source of truth for TP/SL: re-derive from SYMBOL_STRATEGY every
   // time the symbol, stake or multiplier changes, so the validated price-move
   // percentage is preserved whether you're at $0.05 or the ladder has bumped

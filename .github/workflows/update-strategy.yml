@@ -1,0 +1,31 @@
+name: Re-validate symbol strategy (walk-forward)
+
+# Runs the same walk-forward validation as `npm run backtest:wf`, but writes
+# the verdict into Postgres (table `symbol_strategy`) instead of only
+# printing it. The app fetches that table on load and overlays it onto
+# SYMBOL_STRATEGY, so tiers/TP/SL drift with the market without anyone
+# hand-editing src/lib/symbolStrategy.js + api/analyze.js and redeploying.
+#
+# Runs here (GitHub Actions) rather than as a Vercel cron function because
+# a full multi-symbol walk-forward run takes several minutes — well past
+# what a Vercel serverless function is allowed to run for.
+on:
+  schedule:
+    # Monday 12:00 UTC — after forex reopens Sunday 22:00 UTC, so the week's
+    # freshest candles are already available.
+    - cron: "0 12 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  update-strategy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run backtest:update-strategy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

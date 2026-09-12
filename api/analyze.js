@@ -5,10 +5,33 @@ const DEFAULT_TP_USD   = 6.00;
 const DEFAULT_SL_USD   = 3.00;
 
 // Server-side safety net mirroring SYMBOL_STRATEGY in src/trading-bot-v3.jsx —
-// backtest/walkforward.mjs found 0/4 walk-forward folds profitable for these
-// (365d/1h, rolling re-validation). Kept here too so a direct call to this
-// endpoint can't bypass the UI's auto-trading gate. Re-check periodically.
-const SIN_EDGE_SYMBOLS = new Set(["SOL/USDT", "EUR/GBP", "XAG/USD", "XTI/USD"]);
+// so a direct call to this endpoint can't bypass the UI's auto-trading gate.
+// This hardcoded set is only the FALLBACK: getSinEdgeSymbols() below prefers
+// the live `symbol_strategy` table (kept fresh by backtest/update-strategy.mjs
+// on a schedule) so tier changes don't need a code edit + redeploy here too.
+const FALLBACK_SIN_EDGE_SYMBOLS = new Set(["SOL/USDT", "EUR/GBP", "XAG/USD", "XTI/USD"]);
+
+let sinEdgeCache = { set: null, fetchedAt: 0 };
+const SIN_EDGE_CACHE_TTL_MS = 10 * 60 * 1000; // serverless instances stay warm for minutes, not hours
+
+async function getSinEdgeSymbols() {
+  if (sinEdgeCache.set && Date.now() - sinEdgeCache.fetchedAt < SIN_EDGE_CACHE_TTL_MS) {
+    return sinEdgeCache.set;
+  }
+  if (!process.env.DATABASE_URL) return FALLBACK_SIN_EDGE_SYMBOLS;
+  try {
+    const { default: pg } = await import("pg");
+    const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+    const r = await pool.query(`SELECT symbol FROM symbol_strategy WHERE tier = 'SIN-EDGE'`);
+    await pool.end();
+    if (r.rows.length === 0) return FALLBACK_SIN_EDGE_SYMBOLS; // table not populated yet — don't wipe the safety net
+    const set = new Set(r.rows.map(row => row.symbol));
+    sinEdgeCache = { set, fetchedAt: Date.now() };
+    return set;
+  } catch {
+    return FALLBACK_SIN_EDGE_SYMBOLS; // DB hiccup — fail safe to the hardcoded list, never fail open
+  }
+}
 
 const fUSD = (n, sign=true) => {
   const abs=Math.abs(n);
@@ -210,7 +233,8 @@ Responde SOLO JSON sin backticks:
       }
 
       // Hard override: symbol has no walk-forward-validated edge — never open.
-      if (SIN_EDGE_SYMBOLS.has(symbol) && parsed.should_open) {
+      const sinEdgeSymbols = await getSinEdgeSymbols();
+      if (sinEdgeSymbols.has(symbol) && parsed.should_open) {
         return res.status(200).json({
           ...parsed,
           signal: "HOLD",
