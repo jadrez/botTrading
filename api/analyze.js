@@ -191,7 +191,23 @@ Responde SOLO JSON sin backticks:
 
     const txt = d.choices?.[0]?.message?.content || "";
     try {
-      const parsed = JSON.parse(txt.replace(/```json|```/g, "").trim());
+      // openai/gpt-oss-120b is a reasoning model — it can prepend visible
+      // chain-of-thought (often wrapped in <think>...</think> or similar)
+      // before the actual JSON despite the "respond ONLY JSON" instruction.
+      // Strip that, then fall back to pulling out the first {...} block if
+      // the response still isn't valid JSON on its own.
+      let cleaned = txt.replace(/```json|```/g, "")
+        .replace(/<think>[\s\S]*?<\/think>/gi, "")
+        .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, "")
+        .trim();
+      let parsed;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch {
+        const match = cleaned.match(/\{[\s\S]*\}/);
+        if (!match) throw new Error("No JSON object found in model response");
+        parsed = JSON.parse(match[0]);
+      }
 
       // Hard override: symbol has no walk-forward-validated edge — never open.
       if (SIN_EDGE_SYMBOLS.has(symbol) && parsed.should_open) {
@@ -285,10 +301,13 @@ Responde SOLO JSON sin backticks:
       }
 
       return res.status(200).json(parsed);
-    } catch {
+    } catch (parseErr) {
+      // Logged (not returned to the client) so a repeat of this is
+      // diagnosable from Vercel's function logs instead of guessing blind.
+      console.error("analyze.js: could not parse model response as JSON:", parseErr.message, "raw:", txt.slice(0, 500));
       return res.status(200).json({
         signal: "HOLD", confidence: 40,
-        reasoning: "Error al parsear respuesta.",
+        reasoning: "El modelo de IA no devolvió una respuesta interpretable esta vez — HOLD por seguridad. Si se repite seguido, contacta soporte con esto en mente: puede requerir ajustar el prompt para el modelo actual.",
         news_impact: "NEUTRAL", key_factor: "Error análisis",
         risk: "ALTO", should_open: false,
       });
