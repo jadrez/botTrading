@@ -55,10 +55,16 @@ async function main() {
     // Use the LAST fold's chosen params — trained on the most data, closest
     // to "current" market behavior. SIN-EDGE symbols get no tp/sl/minConf,
     // matching the existing SYMBOL_STRATEGY convention (auto-trading disabled).
+    // MIXTO symbols get the same +10 confidence-bar safety margin the
+    // hand-curated table used (an inconsistent edge across folds means the
+    // grid-searched-for-max-profit-factor threshold isn't cautious enough on
+    // its own — see the "much higher confidence bar" note in symbolStrategy.js).
     const lastFold = r.foldResults[r.foldResults.length - 1];
     const row = r.verdict === "SIN-EDGE"
       ? { symbol, tier: "SIN-EDGE", tp: null, sl: null, minConf: null, profitableFolds: r.profitableFolds, totalFolds: r.totalFolds }
-      : { symbol, tier: r.verdict, tp: lastFold.tpUsd, sl: lastFold.slUsd, minConf: lastFold.minConfBase, profitableFolds: r.profitableFolds, totalFolds: r.totalFolds };
+      : { symbol, tier: r.verdict, tp: lastFold.tpUsd, sl: lastFold.slUsd,
+          minConf: r.verdict === "MIXTO" ? Math.min(90, lastFold.minConfBase + 10) : lastFold.minConfBase,
+          profitableFolds: r.profitableFolds, totalFolds: r.totalFolds };
 
     await upsertStrategy(pool, row);
     rows.push(row);
