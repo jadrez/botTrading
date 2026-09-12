@@ -1200,7 +1200,10 @@ export default function TradingBot(){
   const [aiResult,setAiResult]   = useState(null);
   const [activePrediction,setActivePrediction] = useState(null);
   const activePredRef = useRef(null);
-  const [autoMode,setAutoMode]   = useState(false);
+  // Persisted so AUTO survives a page reload — previously it always started
+  // OFF, meaning "autonomous" in name only if you had to re-arm it by hand
+  // every time the tab reloaded.
+  const [autoMode,setAutoMode]   = useState(()=>localStorage.getItem("bot_auto_mode")==="true");
   const [scheduledStart,setScheduledStart] = useState(null); // ms epoch, or null
   const [scheduleInput,setScheduleInput]   = useState("");   // <input type="datetime-local"> value
   const [scheduleRemainingMs,setScheduleRemainingMs] = useState(null);
@@ -1288,7 +1291,7 @@ export default function TradingBot(){
 
   useEffect(()=>{posRef.current=positions;},[positions]);
   useEffect(()=>{priceRef.current=price;},[price]);
-  useEffect(()=>{autoRef.current=autoMode;},[autoMode]);
+  useEffect(()=>{autoRef.current=autoMode;localStorage.setItem("bot_auto_mode",String(autoMode));},[autoMode]);
   useEffect(()=>{rsiRef.current=rsi;},[rsi]);
   useEffect(()=>{macdRef.current=macd;},[macd]);
   useEffect(()=>{bbRef.current=bb;},[bb]);
@@ -2648,6 +2651,15 @@ export default function TradingBot(){
             </div>
             <div className="mono" style={{fontSize:26,fontWeight:700,color:T.accent}}>{fP(price,asset.precision)}</div>
             <div style={{fontSize:10,color:T.muted,marginTop:1}}>{symbol} · Paper Trading</div>
+            {/* Live floating PnL across EVERY open position, visible from any tab —
+                so "¿voy ganando o perdiendo ahora mismo?" doesn't require switching
+                to Operaciones Trading to find out. */}
+            {positions.length>0&&(
+              <div className="mono" style={{fontSize:14,fontWeight:700,marginTop:4,
+                color:totalUnrealized>=0?T.green:T.red}}>
+                {fUSD(totalUnrealized)} <span style={{fontSize:9,color:T.muted,fontWeight:400}}>flotante · {positions.length} abierta{positions.length!==1?"s":""}</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -3300,9 +3312,10 @@ export default function TradingBot(){
                       const pnl=posPnL(pos,livePrice,ps);
                       const isBuy=pos.type==="BUY";
                       const col=pnl>=0?T.green:T.red;
+                      const pctChange=(isBuy?1:-1)*(livePrice-pos.entry)/pos.entry*100;
                       const elapsedMin=Math.floor((Date.now()-(pos.openTime||Date.now()))/60000);
                       return(
-                        <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 100px 100px 110px 90px 60px",
+                        <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 100px 100px 80px 110px 90px 60px",
                           gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:8,padding:"10px 14px"}}>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
                             <span style={{fontSize:12,fontWeight:700,color:T.text}}>{posSym}</span>
@@ -3311,6 +3324,7 @@ export default function TradingBot(){
                           <span style={{fontSize:10,fontWeight:700,color:col}}>{isBuy?"▲ BUY":"▼ SELL"}</span>
                           <span className="mono" style={{fontSize:11,color:T.muted}}>{fP(pos.entry,cfg?.precision||5)}</span>
                           <span className="mono" style={{fontSize:11,color:T.text}}>{fP(livePrice,cfg?.precision||5)}</span>
+                          <span className="mono" style={{fontSize:11,fontWeight:700,color:col}}>{fPct(pctChange)}</span>
                           <span className="mono" style={{fontSize:14,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
                           <span style={{fontSize:9,color:T.muted}}>hace {elapsedMin}m</span>
                           <button onClick={()=>closePosition(pos.id,livePrice,"MANUAL")}
