@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createChart, LineStyle, CrosshairMode } from "lightweight-charts";
 import { T, STYLES } from "./theme.js";
 import { SYMBOL_STRATEGY, scaledTpSl } from "./lib/symbolStrategy.js";
-import { MAX_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK } from "./lib/constants.js";
+import { MAX_POSITIONS, MAX_TOTAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK } from "./lib/constants.js";
 import Sparkline from "./components/Sparkline.jsx";
 import TierBadge from "./components/TierBadge.jsx";
 import TechnicalPanel from "./components/TechnicalPanel.jsx";
@@ -260,6 +260,7 @@ function savePositionOpen(pos, confidence){
     body:JSON.stringify({
       clientId:pos.id, symbol:pos.symbol, type:pos.type, entryPrice:pos.entry,
       allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, confidence,
+      tp:pos.tp, sl:pos.sl,
     }),
   }).catch(()=>{});
 }
@@ -1249,6 +1250,7 @@ export default function TradingBot(){
   const chartIntervalRef = useRef("1m");
   const bgPricesRef   = useRef({});
   const corrSignalsRef= useRef({});
+  const assetSignalsRef= useRef({});
   const livePricesRef = useRef({});
   const newsCacheRef  = useRef({}); // {symbol: {data, ts}} — 30 min frontend cache
   const consLossesRef  = useRef(0);
@@ -1390,6 +1392,7 @@ export default function TradingBot(){
   useEffect(()=>{srRef.current=srLevels;},[srLevels]);
   useEffect(()=>{chartIntervalRef.current=chartInterval;},[chartInterval]);
   useEffect(()=>{corrSignalsRef.current=corrSignals;},[corrSignals]);
+  useEffect(()=>{assetSignalsRef.current=assetSignals;},[assetSignals]);
   useEffect(()=>{ candlesRef.current=candles; },[candles]);
   // Keep livePrices in sync with the active symbol's real-time price
   useEffect(()=>{
@@ -1791,7 +1794,10 @@ export default function TradingBot(){
 
   /* ── Multi-asset scanner ─────────────────────────────────────────────── */
   useEffect(()=>{
-    if(!multiMonitor){setAssetSignals({});return;}
+    // Keeps running in AUTO even if the user never opened the visual scanner
+    // panel — this is the data source runAutoScan() below trades off of for
+    // every symbol that isn't the one currently on-screen.
+    if(!multiMonitor && !autoMode){setAssetSignals({});return;}
 
     const scan=async()=>{
       const results={};
@@ -1824,7 +1830,23 @@ export default function TradingBot(){
           const pct=(closes.at(-1)-closes.at(-Math.min(closes.length,30)))/closes.at(-Math.min(closes.length,30))*100;
           const signal=e9>e21&&rsi<70?"BUY":e9<e21&&rsi>30?"SELL":"HOLD";
           const color=signal==="BUY"?T.green:signal==="SELL"?T.red:T.muted;
-          results[sym]={price,signal,color,rsi:rsi.toFixed(0),pct};
+
+          // Same confidence/target/stop heuristic as the forex/commodity
+          // watchlists (below) so every asset class can feed runAutoScan().
+          const recent=closes.slice(-40);
+          const maxP=Math.max(...recent), minP=Math.min(...recent);
+          const range=maxP-minP||price*0.001;
+          const atrEst=range*0.55;
+          const prec=cfg.precision;
+          const isBuy=signal==="BUY";
+          const target=isBuy?price+atrEst*2:price-atrEst*2;
+          const stop=isBuy?price-atrEst*1.3:price+atrEst*1.3;
+          const pipSz=Math.pow(10,-prec);
+          const emaSpreadPips=Math.abs(e9-e21)/pipSz;
+          const rsiDiv=isBuy?Math.max(0,60-rsi):Math.max(0,rsi-40);
+          const confidence=signal==="HOLD"?0:Math.min(88,Math.max(45,Math.round(50+emaSpreadPips*0.3+rsiDiv*0.5)));
+
+          results[sym]={price,signal,color,rsi:rsi.toFixed(0),pct,confidence,target,stop,prec,entry:price};
         }catch{}
       }
       setAssetSignals(results);
@@ -1832,7 +1854,7 @@ export default function TradingBot(){
     scan();
     const iv=setInterval(scan,10000);
     return()=>clearInterval(iv);
-  },[multiMonitor]);
+  },[multiMonitor,autoMode]);
 
   /* ── Forex watchlist — always running, all forex pairs ──────────────── */
   useEffect(()=>{
@@ -2060,10 +2082,15 @@ export default function TradingBot(){
     posRef.current
       .filter(p=>p.symbol===symbol)
       .forEach(pos=>{
+        // Each position carries its own tp/sl (scaled for ITS symbol) since
+        // multiple symbols can be open at once — falls back to the active
+        // symbol's current tpTarget/slTarget only for older positions that
+        // predate that field.
+        const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
         const pnl=posPnL(pos,price,pos.allocatedSize||positionSize);
         const peakPnl=Math.max(pos.peakPnl||0,pnl);
-        const stopLevel=trailingStopLevel(peakPnl,tpTarget,slTarget);
-        if(pnl>=tpTarget)            closePosition(pos.id,price,"TP");
+        const stopLevel=trailingStopLevel(peakPnl,posTp,posSl);
+        if(pnl>=posTp)               closePosition(pos.id,price,"TP");
         else if(pnl<=stopLevel)      closePosition(pos.id,price,stopLevel>0?"TRAIL":"SL");
         else if(peakPnl!==(pos.peakPnl||0)) peakUpdates.push({id:pos.id,peakPnl});
       });
@@ -2084,10 +2111,11 @@ export default function TradingBot(){
         const cp=livePrices[pos.symbol];
         const cfg=ASSETS[pos.symbol];
         if(!cp||cp===cfg?.basePrice) return;
+        const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
         const pnl=posPnL(pos,cp,pos.allocatedSize||positionSize);
         const peakPnl=Math.max(pos.peakPnl||0,pnl);
-        const stopLevel=trailingStopLevel(peakPnl,tpTarget,slTarget);
-        if(pnl>=tpTarget)            closePosition(pos.id,cp,"TP");
+        const stopLevel=trailingStopLevel(peakPnl,posTp,posSl);
+        if(pnl>=posTp)               closePosition(pos.id,cp,"TP");
         else if(pnl<=stopLevel)      closePosition(pos.id,cp,stopLevel>0?"TRAIL":"SL");
         else if(peakPnl!==(pos.peakPnl||0)) peakUpdates.push({id:pos.id,peakPnl});
       });
@@ -2277,8 +2305,10 @@ export default function TradingBot(){
             }
           }
 
+          const mainScaled=scaledTpSl(activeSym,ps,multiplierRef.current);
           const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
             symbol:activeSym,openTime:Date.now(),allocatedSize:ps,multiplier:multiplierRef.current,peakPnl:0,
+            tp:mainScaled?.tp??tpTargetRef.current, sl:mainScaled?.sl??slTargetRef.current,
             ...(derivContractId&&{derivContractId})};
 
           // ── Open correlated positions on all forex pairs with a confirmed correlation
@@ -2306,9 +2336,11 @@ export default function TradingBot(){
                 const dCorr=await openDerivOrder(corrSym,corrSignal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
                 if(dCorr.ok) corrDerivId=dCorr.contractId;
               }
+              const corrScaled=scaledTpSl(corrSym,ps,multiplierRef.current);
               corrPositions.push({
                 type:corrSignal,entry:corrPrice,id:Date.now()+Math.random()+corrPositions.length*0.001,
                 symbol:corrSym,openTime:Date.now(),correlatedWith:activeSym,allocatedSize:ps,multiplier:multiplierRef.current,peakPnl:0,
+                tp:corrScaled?.tp??tpTargetRef.current, sl:corrScaled?.sl??slTargetRef.current,
                 ...(corrDerivId&&{derivContractId:corrDerivId}),
               });
               addLog(`🔗 ${corrSignal==="BUY"?"🟢":"🔴"} CORR ${corrSignal} ${corrSym} @ ${fP(corrPrice,corrAsset.precision)} (${corrDir>0?"↑↑":"↓↑"} ${activeSym})`,corrSignal==="BUY"?"buy":"sell");
@@ -2354,14 +2386,51 @@ export default function TradingBot(){
     return()=>clearInterval(iv);
   },[scheduledStart,addLog]);
 
+  /* ── Multi-symbol auto-scan ───────────────────────────────────────────
+     AUTO no se limita al símbolo que tienes en pantalla: cada ciclo también
+     revisa todos los demás símbolos ROBUSTO/MIXTO (el activo ya recibe el
+     análisis completo con IA arriba) usando la señal técnica determinista
+     de assetSignals — la misma clase de regla que valida el walk-forward,
+     sin gastar una llamada a Groq por símbolo. Solo simulado (paper): nunca
+     manda órdenes a Deriv, sin importar derivEnabled, porque son símbolos
+     que no estás mirando activamente. Respeta el cupo por símbolo
+     (MAX_POSITIONS) y el cupo global (MAX_TOTAL_POSITIONS). */
+  const runAutoScan=useCallback(()=>{
+    if(!autoRef.current) return;
+    if(posRef.current.length>=MAX_TOTAL_POSITIONS) return;
+    for(const [sym,strat] of Object.entries(SYMBOL_STRATEGY)){
+      if(strat.tier==="SIN-EDGE") continue;
+      if(sym===symbolRef.current) continue; // ya lo cubre el análisis principal
+      if(posRef.current.length>=MAX_TOTAL_POSITIONS) break;
+      const symSlots=MAX_POSITIONS-posRef.current.filter(p=>p.symbol===sym).length;
+      if(symSlots<=0) continue;
+      const data=assetSignalsRef.current[sym];
+      if(!data||data.signal==="HOLD"||!data.confidence) continue;
+      const minConf=consLossesRef.current>=2?Math.min(90,strat.minConf+10):strat.minConf;
+      if(data.confidence<minConf) continue;
+
+      const ps=positionSizeRef.current;
+      const scaled=scaledTpSl(sym,ps,multiplierRef.current);
+      const pos={
+        type:data.signal, entry:data.price, id:Date.now()+Math.random(),
+        symbol:sym, openTime:Date.now(), allocatedSize:ps, multiplier:multiplierRef.current, peakPnl:0,
+        tp:scaled?.tp??tpTargetRef.current, sl:scaled?.sl??slTargetRef.current,
+      };
+      setPositions(p=>[...p,pos]);
+      savePositionOpen(pos,data.confidence);
+      addLog(`🌐 ${data.signal==="BUY"?"🟢":"🔴"} ${data.signal} ${sym} @ ${fP(data.price,data.prec||5)} (auto multi-símbolo, ${strat.tier}, conf ${data.confidence}%)`,data.signal==="BUY"?"buy":"sell");
+    }
+  },[addLog]);
+
   /* ── Auto loop ───────────────────────────────────────────────────────── */
   useEffect(()=>{
     clearInterval(timerRef.current);
     clearInterval(countRef.current);
     if(!autoMode){setAutoPhase("idle");setNextAnalysis(null);return;}
 
-    addLog(`🤖 AUTO ACTIVADO — TP:+${fUSD(tpTargetRef.current)} | SL:-${fUSD(slTargetRef.current)} | Máx ${MAX_POSITIONS} pos`,"info");
+    addLog(`🤖 AUTO ACTIVADO — TP:+${fUSD(tpTargetRef.current)} | SL:-${fUSD(slTargetRef.current)} | Máx ${MAX_POSITIONS} pos/símbolo, ${MAX_TOTAL_POSITIONS} en total | escaneando todos los símbolos validados`,"info");
     runAnalysis("Inicio modo automático");
+    runAutoScan();
 
     let remaining=ANALYSIS_INTERVAL_MS;
     countRef.current=setInterval(()=>{
@@ -2376,15 +2445,16 @@ export default function TradingBot(){
       const symCount=posRef.current.filter(p=>p.symbol===symbolRef.current).length;
       if(symCount<MAX_POSITIONS) runAnalysis("Ciclo automático regular");
       else setAutoPhase("monitoring");
+      runAutoScan();
     },ANALYSIS_INTERVAL_MS);
 
     return()=>{clearInterval(timerRef.current);clearInterval(countRef.current);};
-  },[autoMode]);
+  },[autoMode,runAutoScan]);
 
   /* ── React to TP hit → re-analyze ───────────────────────────────────── */
   useEffect(()=>{
     if(!pendingAnalysisRef.current||analyzing)return;
-    if(autoRef.current&&posRef.current.length<MAX_POSITIONS){
+    if(autoRef.current&&posRef.current.length<MAX_TOTAL_POSITIONS){
       setTimeout(()=>{
         if(autoRef.current) runAnalysis("Re-análisis post TP — evaluando nueva entrada");
       },1500);
@@ -3331,8 +3401,10 @@ export default function TradingBot(){
                 </div>
                 {!autoMode&&aiResult.signal!=="HOLD"&&positions.filter(p=>!p.symbol||p.symbol===symbol).length<MAX_POSITIONS&&(
                   <button onClick={()=>{
+                    const manualScaled=scaledTpSl(symbol,positionSizeRef.current,multiplierRef.current);
                     const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now(),symbol,openTime:Date.now(),
-                      allocatedSize:positionSizeRef.current,multiplier:multiplierRef.current,peakPnl:0};
+                      allocatedSize:positionSizeRef.current,multiplier:multiplierRef.current,peakPnl:0,
+                      tp:manualScaled?.tp??tpTargetRef.current, sl:manualScaled?.sl??slTargetRef.current};
                     setPositions(p=>[...p,pos]);
                     savePositionOpen(pos,aiResult.confidence);
                     addLog(`${aiResult.signal==="BUY"?"🟢":"🔴"} ${aiResult.signal} manual @ ${fP(priceRef.current,asset.precision)}`,aiResult.signal==="BUY"?"buy":"sell");

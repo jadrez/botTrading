@@ -1,4 +1,6 @@
-export const MAX_POSITIONS        = 3;
+export const MAX_POSITIONS        = 3;    // per-symbol cap
+export const MAX_TOTAL_POSITIONS  = 6;    // global cap across every symbol combined —
+                                            // matters once AUTO can open on more than the active symbol
 export const DEFAULT_STAKE        = 0.05;   // USD stake per trade (Deriv multiplier contracts) — small-capital start
 export const DEFAULT_MULTIPLIER   = 100;    // leverage multiplier
 export const ANALYSIS_INTERVAL_MS = 300000;

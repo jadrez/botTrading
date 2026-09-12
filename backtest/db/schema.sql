@@ -78,8 +78,12 @@ CREATE TABLE IF NOT EXISTS open_positions (
   allocated_size   NUMERIC,
   multiplier       INT,
   confidence       INT,
+  tp               NUMERIC,                -- this position's own TP in USD (scaledTpSl) —
+  sl               NUMERIC,                -- NOT the active symbol's current tpTarget/slTarget
   opened_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS tp NUMERIC;
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS sl NUMERIC;
 
 -- Server-side bot config (TP/SL/stake/multiplier), the durable replacement
 -- for the bot_tp_v2/bot_sl_v2/bot_stake/bot_mult localStorage keys.
