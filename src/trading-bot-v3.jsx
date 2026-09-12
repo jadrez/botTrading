@@ -98,6 +98,22 @@ function trailingStopLevel(peakPnl, tpTarget, slTarget){
   return -slTarget;
 }
 
+// Once the position's peak profit actually REACHES the validated TP, don't
+// hard-cap it there — keep the floor rising instead, so a strong trend can
+// close well above the original target instead of every winner capping out
+// at the same fixed number. The floor starts exactly at tpTarget (never
+// worse than the old fixed-TP close) and then gives back only
+// TRAIL_GIVEBACK (40%) of whatever profit comes in beyond that, same
+// giveback philosophy as the pre-TP trailing stop above. Below tpTarget,
+// behavior is unchanged (trailingStopLevel's breakeven/early-trail logic).
+function extendedStopLevel(peakPnl, tpTarget, slTarget){
+  if(peakPnl>=tpTarget){
+    const extra=peakPnl-tpTarget;
+    return tpTarget + extra*(1-TRAIL_GIVEBACK);
+  }
+  return trailingStopLevel(peakPnl, tpTarget, slTarget);
+}
+
 // Standard forex week: opens Sunday 22:00 UTC, closes Friday 22:00 UTC.
 // Deriv's commodities (Gold/Silver/Oil) follow essentially the same weekend
 // closure, so they use this too. Crypto never closes — callers should check
@@ -2148,7 +2164,7 @@ export default function TradingBot(){
       const pnl=posPnL(pos,currentPrice,pos.allocatedSize||positionSizeRef.current);
       const posSym=pos.symbol||symbolRef.current;
       const prec=ASSETS[posSym]?.precision||ASSETS[symbolRef.current].precision;
-      const emoji=reason==="TP"?"✅":reason==="SL"?"🛑":reason==="TRAIL"?"🔒":"⬜";
+      const emoji=reason==="TP+"?"🚀":reason==="TP"?"✅":reason==="SL"?"🛑":reason==="TRAIL"?"🔒":"⬜";
       addLog(`${emoji} ${reason} ${pos.type} ${posSym} @ ${fP(currentPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
       setBalance(b=>{const nb=b+pnl;balanceRef.current=nb;return nb;});
       const closedTrade={...pos,exit:currentPrice,pnl,reason,time:now(),tradeTime:Math.floor(Date.now()/1000),
@@ -2183,7 +2199,7 @@ export default function TradingBot(){
       } else if(pnl>0){
         consLossesRef.current=0; setConsLosses(0);
       }
-      if(reason==="TP"&&autoRef.current){
+      if((reason==="TP"||reason==="TP+")&&autoRef.current){
         pendingAnalysisRef.current=true;
         setAutoPhase("tp_hit_analyzing");
       }
@@ -2205,10 +2221,14 @@ export default function TradingBot(){
         const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
         const pnl=posPnL(pos,price,pos.allocatedSize||positionSize);
         const peakPnl=Math.max(pos.peakPnl||0,pnl);
-        const stopLevel=trailingStopLevel(peakPnl,posTp,posSl);
-        if(pnl>=posTp)               closePosition(pos.id,price,"TP");
-        else if(pnl<=stopLevel)      closePosition(pos.id,price,stopLevel>0?"TRAIL":"SL");
-        else if(peakPnl!==(pos.peakPnl||0)) peakUpdates.push({id:pos.id,peakPnl});
+        // extendedStopLevel: TP is no longer a hard ceiling — once peak
+        // profit reaches it, the floor keeps rising (giving back only 40%
+        // of anything gained beyond TP) so a strong trend can close well
+        // above the original target instead of every winner capping there.
+        const stopLevel=extendedStopLevel(peakPnl,posTp,posSl);
+        if(pnl<=stopLevel){
+          closePosition(pos.id,price,stopLevel<0?"SL":peakPnl>=posTp?"TP+":"TRAIL");
+        } else if(peakPnl!==(pos.peakPnl||0)) peakUpdates.push({id:pos.id,peakPnl});
       });
     if(peakUpdates.length){
       setPositions(prev=>prev.map(p=>{
@@ -2230,10 +2250,10 @@ export default function TradingBot(){
         const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
         const pnl=posPnL(pos,cp,pos.allocatedSize||positionSize);
         const peakPnl=Math.max(pos.peakPnl||0,pnl);
-        const stopLevel=trailingStopLevel(peakPnl,posTp,posSl);
-        if(pnl>=posTp)               closePosition(pos.id,cp,"TP");
-        else if(pnl<=stopLevel)      closePosition(pos.id,cp,stopLevel>0?"TRAIL":"SL");
-        else if(peakPnl!==(pos.peakPnl||0)) peakUpdates.push({id:pos.id,peakPnl});
+        const stopLevel=extendedStopLevel(peakPnl,posTp,posSl);
+        if(pnl<=stopLevel){
+          closePosition(pos.id,cp,stopLevel<0?"SL":peakPnl>=posTp?"TP+":"TRAIL");
+        } else if(peakPnl!==(pos.peakPnl||0)) peakUpdates.push({id:pos.id,peakPnl});
       });
     if(peakUpdates.length){
       setPositions(prev=>prev.map(p=>{
@@ -3483,7 +3503,8 @@ export default function TradingBot(){
                       const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
                       const peakPnl=Math.max(pos.peakPnl||0,pnl);
                       const isProtected=peakPnl>=posTp*TRAIL_BREAKEVEN_AT;
-                      const floorUsd=isProtected?Math.max(0,peakPnl*(1-TRAIL_GIVEBACK)):null;
+                      const isExtending=peakPnl>=posTp; // past the original target — no longer a hard cap, floor keeps rising
+                      const floorUsd=isProtected?extendedStopLevel(peakPnl,posTp,posSl):null;
                       // Convert the $ TP/SL (or the locked-in floor) into the actual
                       // price this symbol needs to reach — inverse of posPnL().
                       const priceFor=usd=>pos.entry*(1+dir*usd/(ps*mult));
@@ -3501,8 +3522,8 @@ export default function TradingBot(){
                           <span className="mono" style={{fontSize:11,color:T.text}}>{fP(livePrice,prec)}</span>
                           <span className="mono" style={{fontSize:11,fontWeight:700,color:col}}>{fPct(pctChange)}</span>
                           <div>
-                            <div className="mono" style={{fontSize:12,fontWeight:700,color:T.green}}>{fP(tpPrice,prec)}</div>
-                            <div style={{fontSize:7,color:T.green,opacity:.75}}>+{fUSD(posTp,false)}</div>
+                            <div className="mono" style={{fontSize:12,fontWeight:700,color:T.green}}>{isExtending?fP(livePrice,prec):fP(tpPrice,prec)}</div>
+                            <div style={{fontSize:7,color:T.green,opacity:.75}}>{isExtending?`🚀 extendiendo (base +${fUSD(posTp,false)})`:`+${fUSD(posTp,false)}`}</div>
                           </div>
                           <div>
                             <div className="mono" style={{fontSize:12,fontWeight:700,color:isProtected?T.green:T.red}}>{fP(stopPrice,prec)}</div>
@@ -4211,8 +4232,8 @@ export default function TradingBot(){
                     <span style={{color:t.symbol?T.accent:T.muted,fontSize:8,minWidth:55}}>{t.symbol||symbol}</span>
                     <span style={{color:t.type==="BUY"?T.green:T.red,minWidth:28,fontWeight:700}}>{t.type}</span>
                     <span className="mono" style={{color:T.muted}}>{fP(t.entry,prec)}→{fP(t.exit,prec)}</span>
-                    <span style={{fontSize:8,color:t.reason==="TP"?T.green:t.reason==="SL"?T.red:T.muted,
-                      background:`${t.reason==="TP"?T.green:t.reason==="SL"?T.red:T.muted}15`,
+                    <span style={{fontSize:8,color:(t.reason==="TP"||t.reason==="TP+")?T.green:t.reason==="SL"?T.red:T.muted,
+                      background:`${(t.reason==="TP"||t.reason==="TP+")?T.green:t.reason==="SL"?T.red:T.muted}15`,
                       padding:"1px 5px",borderRadius:3}}>{t.reason}</span>
                     <span className="mono" style={{color:t.pnl>=0?T.green:T.red,marginLeft:"auto",fontWeight:700}}>{fUSD(t.pnl)}</span>
                   </div>

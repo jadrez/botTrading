@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS trades (
   confidence       INT,
   patterns         JSONB DEFAULT '[]',
   reasons          JSONB DEFAULT '[]',
-  close_reason     TEXT,                    -- 'TP' | 'SL' | 'TRAIL' | 'MANUAL'
+  close_reason     TEXT,                    -- 'TP' | 'TP+' | 'SL' | 'TRAIL' | 'MANUAL'
+                                              -- 'TP+' = closed above the original validated
+                                              -- target once extendedStopLevel() let it run further
   opened_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed_at        TIMESTAMPTZ
 );
