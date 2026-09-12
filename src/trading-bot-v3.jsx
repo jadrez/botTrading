@@ -3339,43 +3339,55 @@ export default function TradingBot(){
                   </div>
                 ):(
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    <div style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 70px 70px 100px 80px 70px",
-                      gap:10,padding:"0 14px 4px",fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700}}>
+                    <div style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 90px 70px",
+                      gap:10,padding:"0 14px 6px",fontSize:10,color:T.text,letterSpacing:1.5,fontWeight:700}}>
                       <div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div>
-                      <div>TP</div><div>SL</div><div>PNL</div><div>ESTADO</div><div></div>
+                      <div>OBJETIVO</div><div>STOP</div><div>PNL</div><div>ESTADO</div><div></div>
                     </div>
                     {positions.map(pos=>{
                       const posSym=pos.symbol||symbol;
                       const cfg=ASSETS[posSym];
+                      const prec=cfg?.precision||5;
                       const livePrice=posSym===symbol?price:(livePrices[posSym]??cfg?.basePrice);
                       const ps=pos.allocatedSize||positionSize;
+                      const mult=pos.multiplier||multiplier;
                       const pnl=posPnL(pos,livePrice,ps);
                       const isBuy=pos.type==="BUY";
+                      const dir=isBuy?1:-1;
                       const col=pnl>=0?T.green:T.red;
-                      const pctChange=(isBuy?1:-1)*(livePrice-pos.entry)/pos.entry*100;
+                      const pctChange=dir*(livePrice-pos.entry)/pos.entry*100;
                       const elapsedMin=Math.floor((Date.now()-(pos.openTime||Date.now()))/60000);
                       const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
                       const peakPnl=Math.max(pos.peakPnl||0,pnl);
                       const isProtected=peakPnl>=posTp*TRAIL_BREAKEVEN_AT;
-                      const floor=isProtected?Math.max(0,peakPnl*(1-TRAIL_GIVEBACK)):null;
+                      const floorUsd=isProtected?Math.max(0,peakPnl*(1-TRAIL_GIVEBACK)):null;
+                      // Convert the $ TP/SL (or the locked-in floor) into the actual
+                      // price this symbol needs to reach — inverse of posPnL().
+                      const priceFor=usd=>pos.entry*(1+dir*usd/(ps*mult));
+                      const tpPrice=priceFor(posTp);
+                      const stopPrice=isProtected?priceFor(floorUsd):priceFor(-posSl);
                       return(
-                        <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 70px 70px 100px 80px 70px",
+                        <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 90px 70px",
                           gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:8,padding:"10px 14px"}}>
                           <div style={{display:"flex",alignItems:"center",gap:6}}>
                             <span style={{fontSize:12,fontWeight:700,color:T.text}}>{posSym}</span>
                             {pos.derivContractId&&<span style={{fontSize:6,color:T.accent,background:`${T.accent}18`,padding:"1px 4px",borderRadius:3}}>DERIV</span>}
                           </div>
                           <span style={{fontSize:10,fontWeight:700,color:col}}>{isBuy?"▲ BUY":"▼ SELL"}</span>
-                          <span className="mono" style={{fontSize:11,color:T.muted}}>{fP(pos.entry,cfg?.precision||5)}</span>
-                          <span className="mono" style={{fontSize:11,color:T.text}}>{fP(livePrice,cfg?.precision||5)}</span>
+                          <span className="mono" style={{fontSize:11,color:T.muted}}>{fP(pos.entry,prec)}</span>
+                          <span className="mono" style={{fontSize:11,color:T.text}}>{fP(livePrice,prec)}</span>
                           <span className="mono" style={{fontSize:11,fontWeight:700,color:col}}>{fPct(pctChange)}</span>
-                          <span className="mono" style={{fontSize:10,fontWeight:700,color:T.green}}>+{fUSD(posTp,false)}</span>
-                          <span className="mono" style={{fontSize:10,fontWeight:700,color:T.red}}>
-                            {isProtected?`≥${fUSD(floor,false)}`:`-${fUSD(posSl,false)}`}
-                          </span>
+                          <div>
+                            <div className="mono" style={{fontSize:12,fontWeight:700,color:T.green}}>{fP(tpPrice,prec)}</div>
+                            <div style={{fontSize:7,color:T.green,opacity:.75}}>+{fUSD(posTp,false)}</div>
+                          </div>
+                          <div>
+                            <div className="mono" style={{fontSize:12,fontWeight:700,color:isProtected?T.green:T.red}}>{fP(stopPrice,prec)}</div>
+                            <div style={{fontSize:7,color:isProtected?T.green:T.red,opacity:.75}}>{isProtected?`≥${fUSD(floorUsd,false)}`:`-${fUSD(posSl,false)}`}</div>
+                          </div>
                           <span className="mono" style={{fontSize:14,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
-                          <span style={{fontSize:8,fontWeight:700,color:isProtected?T.green:T.muted,
-                            background:isProtected?`${T.green}18`:"transparent",padding:isProtected?"2px 6px":0,borderRadius:4}}>
+                          <span style={{fontSize:9,fontWeight:700,color:isProtected?T.green:T.muted,
+                            background:isProtected?`${T.green}18`:"transparent",padding:isProtected?"3px 7px":0,borderRadius:4}}>
                             {isProtected?"🔒 protegida":`hace ${elapsedMin}m`}
                           </span>
                           <button onClick={()=>closePosition(pos.id,livePrice,"MANUAL")}
