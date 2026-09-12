@@ -1249,16 +1249,20 @@ export default function TradingBot(){
   const [patterns,setPatterns]   = useState([]);
   const [positions,setPositions] = useState([]);
   const [balance,setBalance]     = useState(()=>loadBalance());
-  // v2: default stake dropped from $10 to $0.05 for small-capital start (see
-  // DEFAULT_STAKE); key bumped so existing users pick up the new default too.
-  const [positionSize,setPositionSize] = useState(()=>parseFloat(localStorage.getItem("bot_stake_v2")||String(DEFAULT_STAKE)));
+  // v3: default stake raised from $0.05 to $3 — Deriv's real commission floor
+  // ($0.10/trade minimum) was bigger than the whole TP at $0.05 stake, a
+  // guaranteed loss on real money (see DEFAULT_STAKE). Key bumped so
+  // existing users pick up the new default too.
+  const [positionSize,setPositionSize] = useState(()=>parseFloat(localStorage.getItem("bot_stake_v3")||String(DEFAULT_STAKE)));
   // ── Capital ladder: step the stake up (or down) as the account grows
   // (or shrinks) by stakeGrowthTrigger%, so risk stays proportional to
-  // capital instead of fixed at whatever you started with.
+  // capital instead of fixed at whatever you started with. Step default
+  // scaled up alongside the $3 base stake (was $0.05, matched the old
+  // $0.05 base — kept proportional here, ~10% of the new base per step).
   const [stakeAutoScale,setStakeAutoScale]   = useState(()=>localStorage.getItem("bot_stake_autoscale")!=="false");
-  const [stakeStep,setStakeStep]             = useState(()=>parseFloat(localStorage.getItem("bot_stake_step")||"0.05"));
+  const [stakeStep,setStakeStep]             = useState(()=>parseFloat(localStorage.getItem("bot_stake_step_v2")||"0.3"));
   const [stakeGrowthTrigger,setStakeGrowthTrigger] = useState(()=>parseFloat(localStorage.getItem("bot_stake_trigger")||"0.20"));
-  const [minStake,setMinStake]               = useState(()=>parseFloat(localStorage.getItem("bot_stake_min")||String(DEFAULT_STAKE)));
+  const [minStake,setMinStake]               = useState(()=>parseFloat(localStorage.getItem("bot_stake_min_v2")||String(DEFAULT_STAKE)));
   const [ladderBaseline,setLadderBaseline]   = useState(()=>parseFloat(localStorage.getItem("bot_ladder_baseline")||String(loadBalance())));
   const [initialCapital,setInitialCapital]   = useState(()=>parseFloat(localStorage.getItem("bot_initial_capital")||"200"));
   const [trades,setTrades]       = useState([]);
@@ -1302,7 +1306,7 @@ export default function TradingBot(){
   // v3: seeded from SYMBOL_STRATEGY (walk-forward-validated per-symbol TP/SL),
   // scaled to the initial stake/multiplier — see scaledTpSl() for why this
   // scaling matters (raw SYMBOL_STRATEGY values assume $10×100x).
-  const initStake=parseFloat(localStorage.getItem("bot_stake_v2")||String(DEFAULT_STAKE));
+  const initStake=parseFloat(localStorage.getItem("bot_stake_v3")||String(DEFAULT_STAKE));
   const initMult=parseInt(localStorage.getItem("bot_mult")||String(DEFAULT_MULTIPLIER),10);
   const initScaled=scaledTpSl("ETH/USDT",initStake,initMult);
   const initTp=initScaled?.tp||6.00, initSl=initScaled?.sl||3.00;
@@ -1345,7 +1349,7 @@ export default function TradingBot(){
   const newsDataRef = useRef(null);
   const candlesRef = useRef([]);
   const balanceRef     = useRef(10000);
-  const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_stake_v2")||String(DEFAULT_STAKE)));
+  const positionSizeRef= useRef(parseFloat(localStorage.getItem("bot_stake_v3")||String(DEFAULT_STAKE)));
   const multiplierRef  = useRef(parseInt(localStorage.getItem("bot_mult")||"100"));
   const timerRef  = useRef(null);
   const countRef  = useRef(null);
@@ -1371,14 +1375,14 @@ export default function TradingBot(){
   useEffect(()=>{newsRef.current=news;},[news]);
   useEffect(()=>{newsDataRef.current=newsData;},[newsData]);
   useEffect(()=>{balanceRef.current=balance;},[balance]);
-  useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_stake_v2",String(positionSize));},[positionSize]);
+  useEffect(()=>{positionSizeRef.current=positionSize;localStorage.setItem("bot_stake_v3",String(positionSize));},[positionSize]);
   useEffect(()=>{multiplierRef.current=multiplier;localStorage.setItem("bot_mult",String(multiplier));},[multiplier]);
   useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp_v3",String(tpTarget));},[tpTarget]);
   useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl_v3",String(slTarget));},[slTarget]);
   useEffect(()=>{stakeAutoScaleRef.current=stakeAutoScale;localStorage.setItem("bot_stake_autoscale",String(stakeAutoScale));},[stakeAutoScale]);
-  useEffect(()=>{stakeStepRef.current=stakeStep;localStorage.setItem("bot_stake_step",String(stakeStep));},[stakeStep]);
+  useEffect(()=>{stakeStepRef.current=stakeStep;localStorage.setItem("bot_stake_step_v2",String(stakeStep));},[stakeStep]);
   useEffect(()=>{stakeGrowthTriggerRef.current=stakeGrowthTrigger;localStorage.setItem("bot_stake_trigger",String(stakeGrowthTrigger));},[stakeGrowthTrigger]);
-  useEffect(()=>{minStakeRef.current=minStake;localStorage.setItem("bot_stake_min",String(minStake));},[minStake]);
+  useEffect(()=>{minStakeRef.current=minStake;localStorage.setItem("bot_stake_min_v2",String(minStake));},[minStake]);
   useEffect(()=>{ladderBaselineRef.current=ladderBaseline;localStorage.setItem("bot_ladder_baseline",String(ladderBaseline));},[ladderBaseline]);
   useEffect(()=>{localStorage.setItem("bot_initial_capital",String(initialCapital));},[initialCapital]);
 

@@ -29,7 +29,9 @@ const FOREX_SYMBOLS = {
   "NZD/USD": "NZDUSD=X", "USD/CHF": "USDCHF=X", "USD/CAD": "USDCAD=X", "EUR/GBP": "EURGBP=X",
 };
 
-const STAKE = 0.05, MULT = 100;   // matches the app's current live defaults
+const STAKE = 3, MULT = 100;   // matches the app's current live defaults (raised from
+                                // $0.05 — Deriv's $0.10/trade commission floor made every
+                                // validated TP a guaranteed net loss at the old stake)
 const STARTING_CAPITAL = 200;
 const POLL_MS = 60_000;
 const TRAIL_BREAKEVEN_AT = 0.5, TRAIL_GIVEBACK = 0.4;
