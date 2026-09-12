@@ -1,5 +1,11 @@
-export const MAX_POSITIONS        = 3;    // per-symbol cap
-export const MAX_TOTAL_POSITIONS  = 6;    // global cap across every symbol combined —
+// Raised from 3/6 — the per-symbol cap of 3 kept blocking new opens on a
+// single active symbol (e.g. BTC/USDT sitting at 3/3 while other validated
+// symbols had zero) well before the global cap ever mattered. At $3 stake,
+// worst-case total loss across all 10 (Deriv multipliers cap loss at stake)
+// is $30 — 15% of a $200 starting balance, a sane ceiling for more parallel
+// opportunities without materially changing per-trade risk.
+export const MAX_POSITIONS        = 10;   // per-symbol cap
+export const MAX_TOTAL_POSITIONS  = 10;   // global cap across every symbol combined —
                                             // matters once AUTO can open on more than the active symbol
 // v3: raised from $0.05 — Deriv's own Key Information Documents for
 // Multipliers (forex + crypto, same product/regulator likely applies to
