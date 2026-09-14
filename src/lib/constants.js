@@ -7,19 +7,22 @@
 export const MAX_POSITIONS        = 10;   // per-symbol cap
 export const MAX_TOTAL_POSITIONS  = 10;   // global cap across every symbol combined —
                                             // matters once AUTO can open on more than the active symbol
-// v3: raised from $0.05 — Deriv's own Key Information Documents for
-// Multipliers (forex + crypto, same product/regulator likely applies to
-// commodities too) disclose a commission floor of $0.10 PER TRADE (min of
-// 10 cents, or up to 0.5% of notional, whichever is greater) regardless of
-// asset class. At $0.05 stake × 100x, notional is only $5, so every trade's
-// validated TP (~$0.03-0.09) was SMALLER than the mandatory commission floor
-// alone — a guaranteed net loss on real money even on a perfectly-timed
-// winning trade. At $3 stake × 100x (notional $300), the same validated
-// price-move % (0.6-0.9%) scales to a ~$1.8-2.7 TP — 18-27x the $0.10 floor,
-// and lands the per-trade dollar target in the $2-3 range without inventing
-// a new fixed-dollar exit rule (which would need unrealistic 20-30% price
-// moves to hit at a tiny stake, and so would rarely close at all).
-export const DEFAULT_STAKE        = 3;      // USD stake per trade (Deriv multiplier contracts)
+// v4: raised $3 -> $5. At $5 stake × 100x (notional $500), the validated
+// price-move % (0.6-0.9%) scales to a ~$3-4.50 TP — lands the per-trade
+// dollar target where it was asked to land ($3+ before the trailing
+// extension takes over). SL stays whatever the walk-forward validated for
+// each symbol (~$1.50-2 at this stake) — NOT widened to chase a bigger
+// "room to recover" on losers: loosening a validated stop to let losers run
+// longer is the classic mistake (cut winners short, let losers run) and
+// isn't something the backtest found actually helps. The real cap on any
+// single loss is still Deriv's own stop-out (= stake, so $5 here) — see the
+// note in trading-bot-v3.jsx above extendedStopLevel() for the winner side.
+// v3 (superseded): raised from $0.05 — Deriv's Key Information Documents
+// for Multipliers disclose a commission floor of $0.10/trade (min of 10
+// cents, or up to 0.5% of notional) regardless of asset class; at $0.05
+// stake the validated TP (~$0.03-0.09) was smaller than the floor alone —
+// a guaranteed loss on real money even on a perfectly-timed winning trade.
+export const DEFAULT_STAKE        = 5;      // USD stake per trade (Deriv multiplier contracts)
 export const DEFAULT_MULTIPLIER   = 100;    // leverage multiplier
 export const ANALYSIS_INTERVAL_MS = 300000;
 
