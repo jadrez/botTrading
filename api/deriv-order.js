@@ -29,6 +29,7 @@ const SYMBOL_MAP = {
   "AUD/USD": "frxAUDUSD", "NZD/USD": "frxNZDUSD", "USD/CHF": "frxUSDCHF",
   "USD/CAD": "frxUSDCAD", "EUR/GBP": "frxEURGBP",
 };
+const REVERSE_SYMBOL_MAP = Object.fromEntries(Object.entries(SYMBOL_MAP).map(([k, v]) => [v, k]));
 
 function authHeaders(token, appId) {
   return { "Authorization": `Bearer ${token}`, "Deriv-App-ID": String(appId), "Content-Type": "application/json" };
@@ -85,6 +86,38 @@ function derivWsCall(wsUrl, request, timeoutMs = 15000) {
   });
 }
 
+// {"proposal_open_contract":1} with no contract_id sends ONE message PER
+// currently-open contract (no array, no end-of-stream marker) — verified
+// live: 0 open -> one empty {} message, 2 open -> two separate messages, in
+// no particular order. Collect until `quietMs` passes with nothing new,
+// bounded by `maxMs` as a hard cap.
+function derivWsCollect(wsUrl, request, { quietMs = 800, maxMs = 6000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    const results = [];
+    let settled = false, quietTimer = null;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(maxTimer); clearTimeout(quietTimer);
+      try { ws.close(); } catch {}
+      fn(arg);
+    };
+    const maxTimer = setTimeout(() => finish(resolve, results), maxMs);
+    ws.on("open", () => ws.send(JSON.stringify(request)));
+    ws.on("message", (raw) => {
+      let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (msg.error) { finish(reject, new Error(`${msg.error.code || "deriv_error"}: ${msg.error.message}`)); return; }
+      if (msg.msg_type) {
+        results.push(msg);
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(() => finish(resolve, results), quietMs);
+      }
+    });
+    ws.on("error", (e) => finish(reject, e));
+  });
+}
+
 async function derivAction(token, appId, accountType, request) {
   const account = await pickAccount(token, appId, accountType);
   const wsUrl = await getOtpWsUrl(token, appId, account.account_id);
@@ -111,6 +144,34 @@ export default async function handler(req, res) {
         balance: msg.balance?.balance, currency: msg.balance?.currency, loginid: msg.balance?.loginid,
         accountType: account.account_type,
       });
+    }
+
+    // ── PORTFOLIO — every currently open real contract on the account, with
+    // live spot/profit/commission/limit_order detail (used to sync Deriv's
+    // own view of reality into the app, including positions opened manually
+    // in DTrader that the app never knew about).
+    if (action === "portfolio") {
+      const account = await pickAccount(token, appId, accountType);
+      const wsUrl = await getOtpWsUrl(token, appId, account.account_id);
+      const msgs = await derivWsCollect(wsUrl, { proposal_open_contract: 1 });
+      const positions = msgs
+        .map(m => m.proposal_open_contract)
+        .filter(c => c && c.contract_id) // the zero-open-contracts case is one empty {}
+        .map(c => ({
+          contractId: c.contract_id,
+          symbol: REVERSE_SYMBOL_MAP[c.underlying_symbol] || c.underlying_symbol,
+          type: c.contract_type === "MULTUP" ? "BUY" : "SELL",
+          entry: parseFloat(c.entry_spot),
+          currentSpot: parseFloat(c.current_spot),
+          buyPrice: parseFloat(c.buy_price),
+          multiplier: c.multiplier,
+          profit: parseFloat(c.profit),
+          commission: c.commission != null ? parseFloat(c.commission) : undefined,
+          tp: c.limit_order?.take_profit ? Math.abs(c.limit_order.take_profit.order_amount) : undefined,
+          sl: c.limit_order?.stop_loss ? Math.abs(c.limit_order.stop_loss.order_amount) : undefined,
+          openTime: c.purchase_time ? c.purchase_time * 1000 : undefined,
+        }));
+      return res.status(200).json({ positions });
     }
 
     // ── OPEN (buy)

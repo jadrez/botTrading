@@ -353,7 +353,7 @@ function savePositionOpen(pos, confidence){
     body:JSON.stringify({
       clientId:pos.id, symbol:pos.symbol, type:pos.type, entryPrice:pos.entry,
       allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, confidence,
-      tp:pos.tp, sl:pos.sl, derivContractId:pos.derivContractId,
+      tp:pos.tp, sl:pos.sl, derivContractId:pos.derivContractId, commission:pos.commission,
     }),
   }).catch(()=>{});
 }
@@ -1234,6 +1234,18 @@ async function getDerivBalance(){
   }catch{return null;}
 }
 
+// Every currently open real contract on the connected Deriv account — used
+// to sync Deriv's own view of reality into the app (including positions
+// opened manually in DTrader that the bot never knew about).
+async function getDerivPortfolio(){
+  try{
+    const r=await fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"portfolio"})});
+    const d=await r.json();
+    return r.ok&&d.positions?d.positions:null;
+  }catch{return null;}
+}
+
 async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,marketBias,newsSummary,reason,positionSize,tpTarget,slTarget,activePrediction}){
   const r=await fetch("/api/analyze",{
     method:"POST",
@@ -1571,6 +1583,48 @@ export default function TradingBot(){
     const iv=setInterval(load,30000);
     return()=>clearInterval(iv);
   },[derivEnabled]);
+
+  /* ── Deriv portfolio sync ──────────────────────────────────────────────
+     Pulls every currently-open real contract straight from Deriv and merges
+     it into `positions`: a contract Deriv reports that we don't already
+     track (opened manually in DTrader, or a position the app lost track of
+     after a reload) gets ADDED with its real tp/sl/commission; a
+     Deriv-tracked position that no longer appears there (closed on Deriv's
+     side — hit its own stop-out, or closed manually) gets REMOVED from our
+     list. This is what actually lets the bot's own TP/SL/learning logic
+     react to what Deriv is really doing, not just what the bot itself
+     opened. Note: a Deriv-side closure removed this way doesn't get a
+     matching `trades` history row (we don't have its exit price/reason from
+     a simple portfolio diff) — only closes the bot itself initiates do. */
+  useEffect(()=>{
+    if(!derivEnabled) return;
+    const sync=async()=>{
+      const derivPositions=await getDerivPortfolio();
+      if(!derivPositions) return;
+      const derivIds=new Set(derivPositions.map(p=>String(p.contractId)));
+      setPositions(prev=>{
+        const known=new Set(prev.filter(p=>p.derivContractId).map(p=>String(p.derivContractId)));
+        const newOnes=derivPositions.filter(p=>!known.has(String(p.contractId))).map(p=>({
+          id:`deriv-${p.contractId}`, symbol:p.symbol, type:p.type, entry:p.entry,
+          allocatedSize:p.buyPrice, multiplier:p.multiplier, peakPnl:0,
+          tp:p.tp, sl:p.sl, derivContractId:p.contractId, commission:p.commission,
+          openTime:p.openTime||Date.now(),
+        }));
+        newOnes.forEach(p=>savePositionOpen(p,null));
+        if(newOnes.length) addLog(`🔴 ${newOnes.length} posición(es) real(es) detectada(s) en Deriv y sincronizada(s) (abiertas fuera del bot o recuperadas)`,"info");
+        const stillTracked=prev.filter(p=>!p.derivContractId||derivIds.has(String(p.derivContractId)));
+        const refreshed=stillTracked.map(p=>{
+          if(!p.derivContractId) return p;
+          const match=derivPositions.find(dp=>String(dp.contractId)===String(p.derivContractId));
+          return match&&p.commission==null?{...p,commission:match.commission}:p;
+        });
+        return[...refreshed,...newOnes];
+      });
+    };
+    sync();
+    const iv=setInterval(sync,20000);
+    return()=>clearInterval(iv);
+  },[derivEnabled,addLog]);
 
   /* ── Symbol change ───────────────────────────────────────────────────── */
   const handleSymbolChange=useCallback((newSym)=>{
@@ -2190,7 +2244,8 @@ export default function TradingBot(){
           symbol:closedTrade.symbol, type:closedTrade.type,
           entryPrice:closedTrade.entry, exitPrice:currentPrice, pnl,
           patterns:closedTrade.activePatterns, closeReason:reason,
-          derivContractId:pos.derivContractId,
+          derivContractId:pos.derivContractId, commission:pos.commission,
+          allocatedSize:pos.allocatedSize||positionSizeRef.current, multiplier:pos.multiplier||multiplierRef.current,
           openedAt:closedTrade.openTime?new Date(closedTrade.openTime).toISOString():undefined,
         }),
       }).catch(()=>{});
@@ -3589,10 +3644,10 @@ export default function TradingBot(){
                   </div>
                 ):(
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    <div style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 65px 90px 70px",
+                    <div style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 85px 65px 90px 70px",
                       gap:10,padding:"0 14px 6px",fontSize:10,color:T.text,letterSpacing:1.5,fontWeight:700}}>
                       <div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div>
-                      <div>OBJETIVO</div><div>STOP</div><div>PNL</div><div>ORIGEN</div><div>ESTADO</div><div></div>
+                      <div>OBJETIVO</div><div>STOP</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div><div></div>
                     </div>
                     {viewPositions.map(pos=>{
                       const posSym=pos.symbol||symbol;
@@ -3618,8 +3673,9 @@ export default function TradingBot(){
                       const priceFor=usd=>pos.entry*(1+dir*usd/(ps*mult));
                       const tpPrice=priceFor(posTp);
                       const stopPrice=isProtected?priceFor(floorUsd):priceFor(-posSl);
+                      const volumen=ps*mult; // notional exposure — stake × multiplier
                       return(
-                        <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 65px 90px 70px",
+                        <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 85px 65px 90px 70px",
                           gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:8,padding:"10px 14px"}}>
                           <div>
                             <span style={{fontSize:12,fontWeight:700,color:T.text}}>{posSym}</span>
@@ -3638,6 +3694,12 @@ export default function TradingBot(){
                             <div style={{fontSize:7,color:isProtected?T.green:T.red,opacity:.75}}>{isProtected?`≥${fUSD(floorUsd,false)}`:`-${fUSD(posSl,false)}`}</div>
                           </div>
                           <span className="mono" style={{fontSize:14,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
+                          <div>
+                            <div className="mono" style={{fontSize:11,fontWeight:700,color:T.text}}>${volumen.toFixed(0)}</div>
+                            <div style={{fontSize:7,color:pos.commission!=null?T.red:T.muted,opacity:.85}}>
+                              {pos.commission!=null?`com. $${pos.commission.toFixed(2)}`:"sin comisión"}
+                            </div>
+                          </div>
                           <span style={{fontSize:8,fontWeight:700,color:T.bg,
                             background:pos.derivContractId?T.red:T.accent,padding:"2px 7px",borderRadius:4,
                             textAlign:"center",width:"fit-content"}}>
@@ -3667,16 +3729,17 @@ export default function TradingBot(){
                   </div>
                 ):(
                   <>
-                    <div style={{display:"grid",gridTemplateColumns:"95px 95px 90px 70px 90px 90px 90px 90px 60px 1fr",gap:10,padding:"0 14px 6px",fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>
-                      <div>APERTURA</div><div>CIERRE</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>ORIGEN</div><div>PATRONES</div>
+                    <div style={{display:"grid",gridTemplateColumns:"95px 95px 90px 70px 90px 90px 90px 90px 85px 60px 1fr",gap:10,padding:"0 14px 6px",fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>
+                      <div>APERTURA</div><div>CIERRE</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>PATRONES</div>
                     </div>
                     <div style={{display:"flex",flexDirection:"column",gap:5}}>
                       {viewTrades.slice(0,50).map((t,i)=>{
                         const prec=ASSETS[t.symbol]?.precision||5;
                         const win=t.pnl>0;
                         const col=win?T.green:T.red;
+                        const volumen=(t.allocatedSize||0)*(t.multiplier||0);
                         return(
-                          <div key={i} style={{display:"grid",gridTemplateColumns:"95px 95px 90px 70px 90px 90px 90px 90px 60px 1fr",
+                          <div key={i} style={{display:"grid",gridTemplateColumns:"95px 95px 90px 70px 90px 90px 90px 90px 85px 60px 1fr",
                             gap:10,alignItems:"center",background:T.card,border:`1px solid ${col}25`,borderRadius:7,padding:"9px 14px"}}>
                             <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.openTime)}</span>
                             <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime||(t.tradeTime?t.tradeTime*1000:null))}</span>
@@ -3686,6 +3749,12 @@ export default function TradingBot(){
                             <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(t.exit,prec)}</span>
                             <span className="mono" style={{fontSize:11,fontWeight:700,color:col}}>{fUSD(t.pnl)}</span>
                             <span style={{fontSize:8,fontWeight:700,color:col,background:`${col}18`,padding:"2px 7px",borderRadius:4,textAlign:"center"}}>{t.reason||"—"}</span>
+                            <div>
+                              <div className="mono" style={{fontSize:10,fontWeight:700,color:T.text}}>{volumen?`$${volumen.toFixed(0)}`:"—"}</div>
+                              <div style={{fontSize:7,color:t.commission!=null?T.red:T.muted}}>
+                                {t.commission!=null?`com. $${t.commission.toFixed(2)}`:"sin comisión"}
+                              </div>
+                            </div>
                             <span style={{fontSize:8,fontWeight:700,color:T.bg,
                               background:t.derivContractId?T.red:T.accent,padding:"2px 7px",borderRadius:4,textAlign:"center",width:"fit-content"}}>
                               {t.derivContractId?"DERIV":"SIM"}
