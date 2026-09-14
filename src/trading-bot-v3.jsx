@@ -1246,6 +1246,19 @@ async function getDerivPortfolio(){
   }catch{return null;}
 }
 
+// Final detail for one specific contract — works even after it's sold/closed
+// (Deriv keeps exit_spot/sell_price/profit queryable). Used to find out HOW
+// a position closed when Deriv closed it (TP/SL/stop-out) or someone closed
+// it manually in DTrader, without the bot itself calling closeDerivOrder.
+async function getDerivContract(contractId){
+  try{
+    const r=await fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"contract",contractId})});
+    const d=await r.json();
+    return r.ok&&d.isSold!=null?d:null;
+  }catch{return null;}
+}
+
 async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,trend1h,patterns,correlations,positions,balance,news,marketBias,newsSummary,reason,positionSize,tpTarget,slTarget,activePrediction}){
   const r=await fetch("/api/analyze",{
     method:"POST",
@@ -1588,20 +1601,61 @@ export default function TradingBot(){
      Pulls every currently-open real contract straight from Deriv and merges
      it into `positions`: a contract Deriv reports that we don't already
      track (opened manually in DTrader, or a position the app lost track of
-     after a reload) gets ADDED with its real tp/sl/commission; a
+     after a reload) gets ADDED with its real tp/sl/commission. A
      Deriv-tracked position that no longer appears there (closed on Deriv's
-     side — hit its own stop-out, or closed manually) gets REMOVED from our
-     list. This is what actually lets the bot's own TP/SL/learning logic
-     react to what Deriv is really doing, not just what the bot itself
-     opened. Note: a Deriv-side closure removed this way doesn't get a
-     matching `trades` history row (we don't have its exit price/reason from
-     a simple portfolio diff) — only closes the bot itself initiates do. */
+     own side — hit its own stop-out, our static TP/SL, or was closed
+     manually in DTrader) is RECONCILED: getDerivContract() fetches its
+     settled exit_spot/profit (still queryable after being sold — verified
+     live) and it's recorded into `trades` exactly like a bot-initiated
+     close, instead of silently vanishing with no history row. This is what
+     lets the bot's own learning react to everything Deriv actually did, not
+     just what the bot itself closed. */
   useEffect(()=>{
     if(!derivEnabled) return;
     const sync=async()=>{
       const derivPositions=await getDerivPortfolio();
       if(!derivPositions) return;
       const derivIds=new Set(derivPositions.map(p=>String(p.contractId)));
+      const tracked=posRef.current.filter(p=>p.derivContractId);
+      const missing=tracked.filter(p=>!derivIds.has(String(p.derivContractId)));
+
+      // Reconcile every position Deriv no longer reports as open, BEFORE
+      // touching state — each needs an async lookup for its real exit detail.
+      const reconciled=[];
+      for(const pos of missing){
+        const detail=await getDerivContract(pos.derivContractId);
+        if(!detail){ continue; } // lookup failed — leave it tracked, retry next sync
+        if(!detail.isSold){ continue; } // transient gap in the portfolio stream, still actually open
+        const pnl=detail.profit??0;
+        const posTp=pos.tp??detail.tp, posSl=pos.sl??detail.sl;
+        const reason=posTp!=null&&pnl>=posTp*0.95?"TP":posSl!=null&&pnl<=-posSl*0.95?"SL":"MANUAL";
+        reconciled.push({pos,detail,pnl,reason});
+      }
+
+      if(reconciled.length){
+        reconciled.forEach(({pos,detail,pnl,reason})=>{
+          deletePositionOpen(pos.id);
+          fetch("/api/trades",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({
+              symbol:pos.symbol, type:pos.type, entryPrice:pos.entry, exitPrice:detail.exitSpot??pos.entry,
+              pnl, closeReason:reason, derivContractId:pos.derivContractId, commission:pos.commission??detail.commission,
+              allocatedSize:pos.allocatedSize, multiplier:pos.multiplier,
+              openedAt:pos.openTime?new Date(pos.openTime).toISOString():undefined,
+              closedAt:detail.closeTime?new Date(detail.closeTime).toISOString():undefined,
+            }),
+          }).catch(()=>{});
+          addLog(`🔴 ${reason} ${pos.type} ${pos.symbol} cerrada en Deriv (fuera del bot) → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
+        });
+        setTrades(t=>[...reconciled.map(({pos,detail,pnl,reason})=>({
+          symbol:pos.symbol, type:pos.type, entry:pos.entry, exit:detail.exitSpot??pos.entry, pnl,
+          reason, derivContractId:pos.derivContractId, commission:pos.commission??detail.commission,
+          allocatedSize:pos.allocatedSize, multiplier:pos.multiplier,
+          time:now(), tradeTime:Math.floor(Date.now()/1000),
+          openTime:pos.openTime, closeTime:detail.closeTime||Date.now(),
+          activePatterns:[],
+        })),...t.slice(0,49)]);
+      }
+
       setPositions(prev=>{
         const known=new Set(prev.filter(p=>p.derivContractId).map(p=>String(p.derivContractId)));
         const newOnes=derivPositions.filter(p=>!known.has(String(p.contractId))).map(p=>({
@@ -1612,7 +1666,12 @@ export default function TradingBot(){
         }));
         newOnes.forEach(p=>savePositionOpen(p,null));
         if(newOnes.length) addLog(`🔴 ${newOnes.length} posición(es) real(es) detectada(s) en Deriv y sincronizada(s) (abiertas fuera del bot o recuperadas)`,"info");
-        const stillTracked=prev.filter(p=>!p.derivContractId||derivIds.has(String(p.derivContractId)));
+        // Drop exactly the positions just reconciled above (recorded into
+        // `trades`); everything else stays — including a derivContractId
+        // position missing from Deriv's list whose lookup failed or hadn't
+        // settled yet, so a transient gap never silently loses a position.
+        const reconciledIds=new Set(reconciled.map(r=>String(r.pos.derivContractId)));
+        const stillTracked=prev.filter(p=>!p.derivContractId||!reconciledIds.has(String(p.derivContractId)));
         const refreshed=stillTracked.map(p=>{
           if(!p.derivContractId) return p;
           const match=derivPositions.find(dp=>String(dp.contractId)===String(p.derivContractId));

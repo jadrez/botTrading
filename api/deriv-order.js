@@ -174,6 +174,36 @@ export default async function handler(req, res) {
       return res.status(200).json({ positions });
     }
 
+    // ── CONTRACT — final/current detail for ONE specific contract_id. Unlike
+    // "portfolio" (no contract_id -> a stream, one message per open contract),
+    // passing a contract_id here returns exactly one message — and it still
+    // works after the contract is sold/closed (is_sold, exit_spot, sell_price,
+    // profit, sell_time populated), verified live. This is what lets the app
+    // find out how a contract closed when it wasn't the one who closed it
+    // (hit Deriv's own TP/SL/stop-out, or was closed manually in DTrader).
+    if (action === "contract") {
+      if (!contractId) return res.status(400).json({ error: "contractId required" });
+      const { msg } = await derivAction(token, appId, accountType, { proposal_open_contract: 1, contract_id: Number(contractId) });
+      const c = msg.proposal_open_contract;
+      if (!c || !c.contract_id) return res.status(404).json({ error: "Contract not found" });
+      return res.status(200).json({
+        contractId: c.contract_id,
+        symbol: REVERSE_SYMBOL_MAP[c.underlying_symbol] || c.underlying_symbol,
+        type: c.contract_type === "MULTUP" ? "BUY" : "SELL",
+        isSold: !!c.is_sold,
+        entry: parseFloat(c.entry_spot),
+        exitSpot: c.exit_spot != null ? parseFloat(c.exit_spot) : undefined,
+        sellPrice: c.sell_price != null ? parseFloat(c.sell_price) : undefined,
+        profit: c.profit != null ? parseFloat(c.profit) : undefined,
+        commission: c.commission != null ? parseFloat(c.commission) : undefined,
+        multiplier: c.multiplier,
+        tp: c.limit_order?.take_profit ? Math.abs(c.limit_order.take_profit.order_amount) : undefined,
+        sl: c.limit_order?.stop_loss ? Math.abs(c.limit_order.stop_loss.order_amount) : undefined,
+        openTime: c.purchase_time ? c.purchase_time * 1000 : undefined,
+        closeTime: c.sell_time ? c.sell_time * 1000 : undefined,
+      });
+    }
+
     // ── OPEN (buy)
     if (action === "open") {
       const derivSymbol = SYMBOL_MAP[symbol];
