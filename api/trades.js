@@ -14,18 +14,19 @@ export default async function handler(req, res) {
   if (req.method === "POST") {
     const {
       symbol, type, entryPrice, exitPrice, pnl, confidence = null,
-      patterns = [], reasons = [], closeReason, openedAt, closedAt,
+      patterns = [], reasons = [], closeReason, openedAt, closedAt, derivContractId,
     } = req.body || {};
     if (!symbol || !type || entryPrice == null || exitPrice == null || pnl == null) {
       return res.status(400).json({ error: "symbol, type, entryPrice, exitPrice, pnl are required" });
     }
     try {
       const r = await db.query(
-        `INSERT INTO trades (symbol, type, entry_price, exit_price, pnl, confidence, patterns, reasons, close_reason, opened_at, closed_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        `INSERT INTO trades (symbol, type, entry_price, exit_price, pnl, confidence, patterns, reasons, close_reason, deriv_contract_id, opened_at, closed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          RETURNING id`,
         [symbol, type, entryPrice, exitPrice, pnl, confidence,
          JSON.stringify(patterns), JSON.stringify(reasons), closeReason || null,
+         derivContractId ? String(derivContractId) : null,
          openedAt ? new Date(openedAt) : new Date(), closedAt ? new Date(closedAt) : new Date()]
       );
       return res.status(200).json({ ok: true, id: r.rows[0].id });
@@ -38,7 +39,7 @@ export default async function handler(req, res) {
     const limit = Math.min(500, parseInt(req.query?.limit, 10) || 200);
     try {
       const r = await db.query(
-        `SELECT symbol, type, entry_price, exit_price, pnl, confidence, patterns, reasons, close_reason, opened_at, closed_at
+        `SELECT symbol, type, entry_price, exit_price, pnl, confidence, patterns, reasons, close_reason, deriv_contract_id, opened_at, closed_at
          FROM trades ORDER BY closed_at DESC NULLS LAST, opened_at DESC LIMIT $1`,
         [limit]
       );
@@ -53,6 +54,7 @@ export default async function handler(req, res) {
         confidence: row.confidence,
         activePatterns: row.patterns || [],
         reason: row.close_reason,
+        derivContractId: row.deriv_contract_id ?? undefined,
         time: row.closed_at ? new Date(row.closed_at).toLocaleTimeString("es") : "",
         tradeTime: row.closed_at ? Math.floor(new Date(row.closed_at).getTime() / 1000) : null,
       }));

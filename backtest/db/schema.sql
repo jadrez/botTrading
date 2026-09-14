@@ -39,11 +39,15 @@ CREATE TABLE IF NOT EXISTS trades (
   close_reason     TEXT,                    -- 'TP' | 'TP+' | 'SL' | 'TRAIL' | 'MANUAL'
                                               -- 'TP+' = closed above the original validated
                                               -- target once extendedStopLevel() let it run further
+  deriv_contract_id TEXT,                    -- set only for trades actually executed on Deriv —
+                                              -- presence of this IS the sim-vs-real signal, no
+                                              -- separate source/mode column needed
   opened_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed_at        TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol, opened_at DESC);
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS close_reason TEXT;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS deriv_contract_id TEXT;
 
 -- Rolling walk-forward folds: params are re-picked on a training window and
 -- then judged ONLY on the immediately-following, never-seen block. This is
@@ -82,10 +86,12 @@ CREATE TABLE IF NOT EXISTS open_positions (
   confidence       INT,
   tp               NUMERIC,                -- this position's own TP in USD (scaledTpSl) —
   sl               NUMERIC,                -- NOT the active symbol's current tpTarget/slTarget
+  deriv_contract_id TEXT,                  -- set only when actually executed on Deriv (real money)
   opened_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS tp NUMERIC;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS sl NUMERIC;
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS deriv_contract_id TEXT;
 
 -- Server-side bot config (TP/SL/stake/multiplier), the durable replacement
 -- for the bot_tp_v2/bot_sl_v2/bot_stake/bot_mult localStorage keys.

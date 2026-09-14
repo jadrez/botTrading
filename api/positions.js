@@ -23,6 +23,7 @@ export default async function handler(req, res) {
         multiplier: row.multiplier ?? undefined,
         tp: row.tp != null ? parseFloat(row.tp) : undefined,
         sl: row.sl != null ? parseFloat(row.sl) : undefined,
+        derivContractId: row.deriv_contract_id ?? undefined,
         openTime: new Date(row.opened_at).getTime(),
       }));
       return res.status(200).json({ positions });
@@ -32,16 +33,16 @@ export default async function handler(req, res) {
   }
 
   if (req.method === "POST") {
-    const { clientId, symbol, type, entryPrice, allocatedSize, multiplier, confidence, tp, sl } = req.body || {};
+    const { clientId, symbol, type, entryPrice, allocatedSize, multiplier, confidence, tp, sl, derivContractId } = req.body || {};
     if (!clientId || !symbol || !type || entryPrice == null) {
       return res.status(400).json({ error: "clientId, symbol, type, entryPrice are required" });
     }
     try {
       await db.query(
-        `INSERT INTO open_positions (client_id, symbol, type, entry_price, allocated_size, multiplier, confidence, tp, sl)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        `INSERT INTO open_positions (client_id, symbol, type, entry_price, allocated_size, multiplier, confidence, tp, sl, deriv_contract_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          ON CONFLICT (client_id) DO NOTHING`,
-        [String(clientId), symbol, type, entryPrice, allocatedSize ?? null, multiplier ?? null, confidence ?? null, tp ?? null, sl ?? null]
+        [String(clientId), symbol, type, entryPrice, allocatedSize ?? null, multiplier ?? null, confidence ?? null, tp ?? null, sl ?? null, derivContractId ? String(derivContractId) : null]
       );
       return res.status(200).json({ ok: true });
     } catch (e) {

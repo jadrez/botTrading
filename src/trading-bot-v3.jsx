@@ -343,7 +343,7 @@ function savePositionOpen(pos, confidence){
     body:JSON.stringify({
       clientId:pos.id, symbol:pos.symbol, type:pos.type, entryPrice:pos.entry,
       allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, confidence,
-      tp:pos.tp, sl:pos.sl,
+      tp:pos.tp, sl:pos.sl, derivContractId:pos.derivContractId,
     }),
   }).catch(()=>{});
 }
@@ -2180,6 +2180,7 @@ export default function TradingBot(){
           symbol:closedTrade.symbol, type:closedTrade.type,
           entryPrice:closedTrade.entry, exitPrice:currentPrice, pnl,
           patterns:closedTrade.activePatterns, closeReason:reason,
+          derivContractId:pos.derivContractId,
           openedAt:closedTrade.openTime?new Date(closedTrade.openTime).toISOString():undefined,
         }),
       }).catch(()=>{});
@@ -2456,15 +2457,26 @@ export default function TradingBot(){
           const activeAssetCheck=ASSETS[activeSym];
           const ps=positionSizeRef.current;
 
-          // ── Deriv order for forex pairs
+          // ── Deriv order for forex pairs — conservative mode while real money is
+          // new here: only the ACTIVE symbol (never correlated pairs), only when
+          // its walk-forward tier is ROBUSTO (not MIXTO), and only when there's no
+          // other real position open right now (one real trade at a time).
           let derivContractId=null;
+          const activeTier=SYMBOL_STRATEGY[activeSym]?.tier;
+          const hasOpenRealPosition=posRef.current.some(p=>p.derivContractId);
           if(derivEnabledRef.current && activeAssetCheck?.type==="forex"){
-            const dResult=await openDerivOrder(activeSym,result.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
-            if(dResult.ok){
-              derivContractId=dResult.contractId;
-              addLog(`🔵 Deriv orden ${result.signal} abierta | ContractID:${derivContractId} | Stake:$${ps} × ${multiplierRef.current}x @ ${dResult.buyPrice}`,"info");
+            if(activeTier!=="ROBUSTO"){
+              addLog(`🔴 Deriv: ${activeSym} es tier ${activeTier} (no ROBUSTO) — posición registrada en simulación, no en Deriv`,"sell");
+            } else if(hasOpenRealPosition){
+              addLog(`🔴 Deriv: ya hay una posición real abierta — posición registrada en simulación (modo conservador: 1 a la vez)`,"sell");
             } else {
-              addLog(`⚠️ Deriv: ${dResult.error} — posición registrada en simulación`,"sell");
+              const dResult=await openDerivOrder(activeSym,result.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
+              if(dResult.ok){
+                derivContractId=dResult.contractId;
+                addLog(`🔴 Deriv orden REAL ${result.signal} abierta | ContractID:${derivContractId} | Stake:$${ps} × ${multiplierRef.current}x @ ${dResult.buyPrice}`,"info");
+              } else {
+                addLog(`⚠️ Deriv: ${dResult.error} — posición registrada en simulación`,"sell");
+              }
             }
           }
 
@@ -2493,12 +2505,11 @@ export default function TradingBot(){
               // Skip if the correlated pair's own signal actively contradicts the expected direction
               const corrInfo=corrSignalsRef.current[corrSym];
               if(corrInfo?.signal&&corrInfo.signal!=="HOLD"&&corrInfo.signal!==corrSignal) continue;
-              // Deriv correlated order
-              let corrDerivId=null;
-              if(derivEnabledRef.current){
-                const dCorr=await openDerivOrder(corrSym,corrSignal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
-                if(dCorr.ok) corrDerivId=dCorr.contractId;
-              }
+              // Correlated pairs never go to Deriv — conservative mode only ever
+              // sends the ONE active symbol's trade real (see mainPos above),
+              // so a signal firing on several correlated pairs at once can't
+              // multiply real-money exposure.
+              const corrDerivId=null;
               const corrScaled=scaledTpSl(corrSym,ps,multiplierRef.current);
               corrPositions.push({
                 type:corrSignal,entry:corrPrice,id:Date.now()+Math.random()+corrPositions.length*0.001,
@@ -2833,6 +2844,54 @@ export default function TradingBot(){
             )}
           </div>
         </div>
+
+        {/* MODE SELECTOR — Simulado (paper, learning) vs Deriv Real (real money).
+            Both feed the SAME learning (calcLearningStats reads every closed
+            trade regardless of source) — this only changes who executes the
+            active symbol's forex trade (see the ROBUSTO + 1-at-a-time gate in
+            runAnalysis) and what the stats row displays. */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+          <button onClick={()=>setDerivEnabled(false)}
+            style={{background:!derivEnabled?`${T.accent}14`:"transparent",
+              border:`2px solid ${!derivEnabled?T.accent:T.border}`,borderRadius:8,
+              padding:"12px 16px",cursor:"pointer",textAlign:"left",
+              display:"flex",alignItems:"center",justifyContent:"space-between",
+              opacity:!derivEnabled?1:.55}}>
+            <div>
+              <div style={{fontSize:13,fontWeight:700,color:!derivEnabled?T.accent:T.muted,letterSpacing:.5}}>🧪 SIMULADO</div>
+              <div style={{fontSize:9,color:!derivEnabled?"#7891b8":T.muted,marginTop:2}}>Paper trading · el bot sigue entrenando su aprendizaje</div>
+            </div>
+            {!derivEnabled&&<span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.accent,padding:"3px 8px",borderRadius:4,letterSpacing:.5}}>ACTIVO</span>}
+          </button>
+          <button onClick={()=>setDerivEnabled(true)}
+            style={{background:derivEnabled?`${T.red}14`:"transparent",
+              border:`2px solid ${derivEnabled?T.red:T.border}`,borderRadius:8,
+              padding:"12px 16px",cursor:"pointer",textAlign:"left",
+              display:"flex",alignItems:"center",justifyContent:"space-between",
+              opacity:derivEnabled?1:.55}}>
+            <div>
+              <div style={{fontSize:13,fontWeight:700,color:derivEnabled?T.red:T.muted,letterSpacing:.5}}>🔴 DERIV (REAL)</div>
+              <div style={{fontSize:9,color:derivEnabled?"#ff8a9a":T.muted,marginTop:2}}>Dinero real vía tu cuenta Deriv conectada</div>
+            </div>
+            {derivEnabled&&<span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.red,padding:"3px 8px",borderRadius:4,letterSpacing:.5}}>ACTIVO</span>}
+          </button>
+        </div>
+
+        {derivEnabled&&(
+          <div style={{background:`${T.red}12`,border:`1px solid ${T.red}50`,borderRadius:8,
+            padding:"10px 16px",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:16}}>🔴</span>
+              <div>
+                <div style={{fontSize:11,fontWeight:700,color:T.red,letterSpacing:.5}}>DINERO REAL — las operaciones aquí se ejecutan en tu cuenta Deriv</div>
+                <div style={{fontSize:9,color:"#ff8a9a",marginTop:1}}>
+                  {derivLoginId?`Cuenta ${derivLoginId} · conectada`:"Conectando con Deriv..."}
+                </div>
+              </div>
+            </div>
+            <div style={{fontSize:9,color:"#ff8a9a",textAlign:"right"}}>⚠️ Modo conservador<br/>solo símbolos ROBUSTO · 1 posición real a la vez</div>
+          </div>
+        )}
 
         {/* FOREX WATCHLIST — always visible, 8 pairs */}
         {(()=>{
@@ -3481,10 +3540,10 @@ export default function TradingBot(){
                   </div>
                 ):(
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    <div style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 90px 70px",
+                    <div style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 65px 90px 70px",
                       gap:10,padding:"0 14px 6px",fontSize:10,color:T.text,letterSpacing:1.5,fontWeight:700}}>
                       <div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div>
-                      <div>OBJETIVO</div><div>STOP</div><div>PNL</div><div>ESTADO</div><div></div>
+                      <div>OBJETIVO</div><div>STOP</div><div>PNL</div><div>ORIGEN</div><div>ESTADO</div><div></div>
                     </div>
                     {positions.map(pos=>{
                       const posSym=pos.symbol||symbol;
@@ -3511,11 +3570,11 @@ export default function TradingBot(){
                       const tpPrice=priceFor(posTp);
                       const stopPrice=isProtected?priceFor(floorUsd):priceFor(-posSl);
                       return(
-                        <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 90px 70px",
+                        <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 65px 90px 70px",
                           gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:8,padding:"10px 14px"}}>
-                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                          <div>
                             <span style={{fontSize:12,fontWeight:700,color:T.text}}>{posSym}</span>
-                            {pos.derivContractId&&<span style={{fontSize:6,color:T.accent,background:`${T.accent}18`,padding:"1px 4px",borderRadius:3}}>DERIV</span>}
+                            {pos.derivContractId&&<div style={{fontSize:7,color:T.red,marginTop:1}}>#{String(pos.derivContractId)}</div>}
                           </div>
                           <span style={{fontSize:10,fontWeight:700,color:dirCol}}>{isBuy?"▲ BUY":"▼ SELL"}</span>
                           <span className="mono" style={{fontSize:11,color:T.muted}}>{fP(pos.entry,prec)}</span>
@@ -3530,6 +3589,11 @@ export default function TradingBot(){
                             <div style={{fontSize:7,color:isProtected?T.green:T.red,opacity:.75}}>{isProtected?`≥${fUSD(floorUsd,false)}`:`-${fUSD(posSl,false)}`}</div>
                           </div>
                           <span className="mono" style={{fontSize:14,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
+                          <span style={{fontSize:8,fontWeight:700,color:T.bg,
+                            background:pos.derivContractId?T.red:T.accent,padding:"2px 7px",borderRadius:4,
+                            textAlign:"center",width:"fit-content"}}>
+                            {pos.derivContractId?"DERIV":"SIM"}
+                          </span>
                           <span style={{fontSize:9,fontWeight:700,color:isProtected?T.green:T.muted,
                             background:isProtected?`${T.green}18`:"transparent",padding:isProtected?"3px 7px":0,borderRadius:4}}>
                             {isProtected?"🔒 protegida":`hace ${elapsedMin}m`}
@@ -3554,8 +3618,8 @@ export default function TradingBot(){
                   </div>
                 ):(
                   <>
-                    <div style={{display:"grid",gridTemplateColumns:"110px 90px 70px 90px 90px 90px 90px 1fr",gap:10,padding:"0 14px 6px",fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>
-                      <div>FECHA</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>PATRONES</div>
+                    <div style={{display:"grid",gridTemplateColumns:"110px 90px 70px 90px 90px 90px 90px 60px 1fr",gap:10,padding:"0 14px 6px",fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>
+                      <div>FECHA</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>ORIGEN</div><div>PATRONES</div>
                     </div>
                     <div style={{display:"flex",flexDirection:"column",gap:5}}>
                       {trades.slice(0,50).map((t,i)=>{
@@ -3563,7 +3627,7 @@ export default function TradingBot(){
                         const win=t.pnl>0;
                         const col=win?T.green:T.red;
                         return(
-                          <div key={i} style={{display:"grid",gridTemplateColumns:"110px 90px 70px 90px 90px 90px 90px 1fr",
+                          <div key={i} style={{display:"grid",gridTemplateColumns:"110px 90px 70px 90px 90px 90px 90px 60px 1fr",
                             gap:10,alignItems:"center",background:T.card,border:`1px solid ${col}25`,borderRadius:7,padding:"9px 14px"}}>
                             <span className="mono" style={{fontSize:9,color:T.muted}}>{t.time||"—"}</span>
                             <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||symbol}</span>
@@ -3572,6 +3636,10 @@ export default function TradingBot(){
                             <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(t.exit,prec)}</span>
                             <span className="mono" style={{fontSize:11,fontWeight:700,color:col}}>{fUSD(t.pnl)}</span>
                             <span style={{fontSize:8,fontWeight:700,color:col,background:`${col}18`,padding:"2px 7px",borderRadius:4,textAlign:"center"}}>{t.reason||"—"}</span>
+                            <span style={{fontSize:8,fontWeight:700,color:T.bg,
+                              background:t.derivContractId?T.red:T.accent,padding:"2px 7px",borderRadius:4,textAlign:"center",width:"fit-content"}}>
+                              {t.derivContractId?"DERIV":"SIM"}
+                            </span>
                             <span style={{fontSize:9,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                               {(t.activePatterns||[]).join(", ")||"—"}
                             </span>
@@ -3684,20 +3752,25 @@ export default function TradingBot(){
         )}
 
         {/* STATS ROW */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:10}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:4}}>
           {[
-            {l:"BALANCE",    v:`$${balance.toFixed(0)}`,  c:T.accent},
+            derivEnabled
+              ?{l:"BALANCE DERIV", v:derivBalance!=null?`$${derivBalance.toFixed(2)}`:"…", c:T.red}
+              :{l:"BALANCE",       v:`$${balance.toFixed(0)}`,  c:T.accent},
             {l:"NO REALIZ",  v:fUSD(unrealized),           c:unrealized>=0?T.green:T.red},
             {l:"P&L ACUM",   v:fUSD(totalProfit),          c:totalProfit>=0?T.green:T.red},
             {l:"CERRADAS",   v:closedCount,                c:T.yellow},
             {l:"WIN RATE",   v:`${winRate}%`,              c:winRate>=50?T.green:T.red},
             {l:"POSICIONES", v:`${symPositions.length}/${MAX_POSITIONS}`, c:T.text},
           ].map(({l,v,c})=>(
-            <div key={l} style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:6,padding:"7px 10px",textAlign:"center"}}>
+            <div key={l} style={{background:T.card,border:`1px solid ${derivEnabled?`${T.red}30`:T.border}`,borderRadius:6,padding:"7px 10px",textAlign:"center"}}>
               <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:2}}>{l}</div>
               <div className="mono" style={{fontSize:13,fontWeight:700,color:c}}>{v}</div>
             </div>
           ))}
+        </div>
+        <div style={{fontSize:9,color:derivEnabled?"#ff8a9a":T.muted,marginBottom:10}}>
+          {derivEnabled?"🔴 Balance leído en vivo desde la API de Deriv — no simulado":"📊 Cifras simuladas — sin dinero real involucrado"}
         </div>
 
         {/* INDICATORS */}
