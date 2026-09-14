@@ -3228,12 +3228,19 @@ export default function TradingBot(){
         )}
 
         {/* ── NAVIGATION ── */}
+        {(()=>{
+          // Tab badge counts only the ACTIVE mode's positions — matches the
+          // filtered view inside the tab itself (see viewPositions above);
+          // showing the total across both modes here was confusing once the
+          // inner table stopped doing that.
+          const modePositions=positions.filter(p=>derivEnabled?!!p.derivContractId:!p.derivContractId);
+          return(
         <div style={{display:"flex",gap:0,marginBottom:12,borderBottom:`1px solid ${T.border}`,paddingBottom:0}}>
           {[
             {id:"dashboard", label:"📊 Dashboard"},
             {id:"signals", label:"🔍 Señales"},
-            {id:"trading", label:`💼 Operaciones Trading${positions.length>0?` (${positions.length})`:""}`,
-              badge:positions.length},
+            {id:"trading", label:`💼 Operaciones Trading${modePositions.length>0?` (${modePositions.length})`:""}`,
+              badge:modePositions.length},
           ].map(tab=>(
             <button key={tab.id} onClick={()=>setActiveView(tab.id)}
               style={{
@@ -3249,6 +3256,8 @@ export default function TradingBot(){
             </button>
           ))}
         </div>
+          );
+        })()}
 
         {/* ══════════ VISTA: SEÑALES — SEÑALES FOREX ══════════ */}
         {activeView==="signals"&&(()=>{

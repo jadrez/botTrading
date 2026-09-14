@@ -73,7 +73,11 @@ function derivWsCall(wsUrl, request, timeoutMs = 15000) {
     ws.on("open", () => ws.send(JSON.stringify(request)));
     ws.on("message", (raw) => {
       let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
-      if (msg.error) { finish(reject, new Error(`${msg.error.code || "deriv_error"}: ${msg.error.message}`)); return; }
+      if (msg.error) {
+        const detail = msg.error.details ? ` ${JSON.stringify(msg.error.details)}` : "";
+        finish(reject, new Error(`${msg.error.code || "deriv_error"}: ${msg.error.message}${detail}`));
+        return;
+      }
       if (msg.msg_type) finish(resolve, msg);
     });
     ws.on("error", (e) => finish(reject, e));
@@ -119,7 +123,7 @@ export default async function handler(req, res) {
         price: stake, // max acceptable price — for basis:"stake" this equals the stake itself
         parameters: {
           contract_type: side === "BUY" ? "MULTUP" : "MULTDOWN",
-          symbol: derivSymbol,
+          underlying_symbol: derivSymbol, // NOT "symbol" — this REST/OTP product rejects that key
           currency: "USD",
           amount: stake,
           basis: "stake",
