@@ -3501,9 +3501,17 @@ export default function TradingBot(){
 
         {/* ══════════ VISTA: OPERACIONES TRADING — abiertas en vivo + histórico ══════════ */}
         {activeView==="trading"&&(()=>{
-          const closedWins=trades.filter(t=>t.pnl>0).length;
-          const closedLosses=trades.filter(t=>t.pnl<=0).length;
-          const totalClosedPnl=trades.reduce((s,t)=>s+(t.pnl||0),0);
+          // Scope this whole view to the active mode — Simulado shows only
+          // paper trades, Deriv Real shows only trades that actually hit
+          // Deriv (derivContractId present). Switching modes shouldn't leave
+          // the other mode's activity visible here; the ORIGEN badge still
+          // exists for when both ever mix (e.g. right after switching mode
+          // mid-session with older positions still open).
+          const viewPositions=positions.filter(p=>derivEnabled?!!p.derivContractId:!p.derivContractId);
+          const viewTrades=trades.filter(t=>derivEnabled?!!t.derivContractId:!t.derivContractId);
+          const closedWins=viewTrades.filter(t=>t.pnl>0).length;
+          const closedLosses=viewTrades.filter(t=>t.pnl<=0).length;
+          const totalClosedPnl=viewTrades.reduce((s,t)=>s+(t.pnl||0),0);
           return(
             <div style={{animation:"fadeUp .3s ease"}}>
 
@@ -3511,11 +3519,11 @@ export default function TradingBot(){
               <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:16}}>
                 <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",textAlign:"center"}}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>ABIERTAS</div>
-                  <div className="mono" style={{fontSize:16,fontWeight:700,color:T.accent}}>{positions.length}</div>
+                  <div className="mono" style={{fontSize:16,fontWeight:700,color:T.accent}}>{viewPositions.length}</div>
                 </div>
                 <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",textAlign:"center"}}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>CERRADAS</div>
-                  <div className="mono" style={{fontSize:16,fontWeight:700,color:T.text}}>{trades.length}</div>
+                  <div className="mono" style={{fontSize:16,fontWeight:700,color:T.text}}>{viewTrades.length}</div>
                 </div>
                 <div style={{background:T.panel,border:`1px solid ${T.green}30`,borderRadius:8,padding:"10px 14px",textAlign:"center"}}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>GANADAS</div>
@@ -3534,9 +3542,9 @@ export default function TradingBot(){
               {/* Abiertas en vivo */}
               <div style={{marginBottom:20}}>
                 <div style={{fontSize:14,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:10}}>POSICIONES ABIERTAS EN VIVO</div>
-                {positions.length===0?(
+                {viewPositions.length===0?(
                   <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"20px",textAlign:"center",fontSize:11,color:T.muted}}>
-                    Sin posiciones abiertas ahora mismo.
+                    {derivEnabled?"Sin posiciones reales abiertas en Deriv ahora mismo.":"Sin posiciones abiertas ahora mismo."}
                   </div>
                 ):(
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -3545,7 +3553,7 @@ export default function TradingBot(){
                       <div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div>
                       <div>OBJETIVO</div><div>STOP</div><div>PNL</div><div>ORIGEN</div><div>ESTADO</div><div></div>
                     </div>
-                    {positions.map(pos=>{
+                    {viewPositions.map(pos=>{
                       const posSym=pos.symbol||symbol;
                       const cfg=ASSETS[posSym];
                       const prec=cfg?.precision||5;
@@ -3612,9 +3620,9 @@ export default function TradingBot(){
               {/* Histórico de cerradas */}
               <div>
                 <div style={{fontSize:14,fontWeight:700,color:T.text,letterSpacing:1,marginBottom:10}}>HISTÓRICO — GANANCIAS Y PÉRDIDAS</div>
-                {trades.length===0?(
+                {viewTrades.length===0?(
                   <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"20px",textAlign:"center",fontSize:11,color:T.muted}}>
-                    Sin operaciones cerradas todavía.
+                    {derivEnabled?"Sin operaciones reales cerradas en Deriv todavía.":"Sin operaciones cerradas todavía."}
                   </div>
                 ):(
                   <>
@@ -3622,7 +3630,7 @@ export default function TradingBot(){
                       <div>FECHA</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>ORIGEN</div><div>PATRONES</div>
                     </div>
                     <div style={{display:"flex",flexDirection:"column",gap:5}}>
-                      {trades.slice(0,50).map((t,i)=>{
+                      {viewTrades.slice(0,50).map((t,i)=>{
                         const prec=ASSETS[t.symbol]?.precision||5;
                         const win=t.pnl>0;
                         const col=win?T.green:T.red;
