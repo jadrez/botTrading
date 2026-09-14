@@ -57,6 +57,8 @@ export default async function handler(req, res) {
         derivContractId: row.deriv_contract_id ?? undefined,
         time: row.closed_at ? new Date(row.closed_at).toLocaleTimeString("es") : "",
         tradeTime: row.closed_at ? Math.floor(new Date(row.closed_at).getTime() / 1000) : null,
+        openTime: row.opened_at ? new Date(row.opened_at).getTime() : null,
+        closeTime: row.closed_at ? new Date(row.closed_at).getTime() : null,
       }));
       return res.status(200).json({ trades });
     } catch (e) {

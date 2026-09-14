@@ -76,6 +76,12 @@ const fUSD = (n, sign=true) => {
 };
 const fPct = n => (n>=0?"+":"")+n.toFixed(3)+"%";
 const now  = () => new Date().toLocaleTimeString("es");
+// Compact date+time for the Histórico table — trades can span multiple days,
+// so a bare time-of-day (the old "FECHA" column) wasn't enough to tell them
+// apart. "12/09 14:32" fits the same narrow column width.
+const fDateTime = ms => ms
+  ? new Date(ms).toLocaleString("es",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})
+  : "—";
 
 // Deriv multiplier P&L: stake × multiplier × (Δprice / entry)
 function posPnL(pos, price, stake=DEFAULT_STAKE){
@@ -293,7 +299,11 @@ function buildPseudoCandles(closes, groupSize=3){
 
 /* ─── LEARNING STATS (localStorage) ─────────────────────────────────────── */
 const LS_TRADES = "bot_trades_v2";
-const LS_BALANCE= "bot_balance_v2";
+// v3: default capital raised $200 -> $10,000 to match the real Deriv demo
+// account balance (verified live: $9,999 before, $9,998 after a $1 test
+// trade) instead of an arbitrary paper figure. Key bumped so an existing
+// balance already drifted from the old $200 baseline resets to the new one.
+const LS_BALANCE= "bot_balance_v3";
 
 function saveTradeLearning(trade){
   try{
@@ -351,15 +361,15 @@ function deletePositionOpen(clientId){
   fetch(`/api/positions?clientId=${encodeURIComponent(clientId)}`,{method:"DELETE"}).catch(()=>{});
 }
 function saveBalance(b){ try{localStorage.setItem(LS_BALANCE,String(b));}catch{} }
-// Default matches bot_initial_capital (real starting capital) instead of an
-// arbitrary $10,000 paper balance, so the stake ladder's % growth is measured
-// against the capital you actually said you're starting with.
+// Default matches bot_initial_capital_v2 (real starting capital) so the
+// stake ladder's % growth is measured against the capital you actually
+// said you're starting with.
 function loadBalance(){
   try{
     const v=localStorage.getItem(LS_BALANCE);
     if(v) return parseFloat(v);
-    return parseFloat(localStorage.getItem("bot_initial_capital")||"200");
-  }catch{return 200;}
+    return parseFloat(localStorage.getItem("bot_initial_capital_v2")||"10000");
+  }catch{return 10000;}
 }
 
 function calcLearningStats(trades){
@@ -1279,8 +1289,8 @@ export default function TradingBot(){
   const [stakeStep,setStakeStep]             = useState(()=>parseFloat(localStorage.getItem("bot_stake_step_v2")||"0.3"));
   const [stakeGrowthTrigger,setStakeGrowthTrigger] = useState(()=>parseFloat(localStorage.getItem("bot_stake_trigger")||"0.20"));
   const [minStake,setMinStake]               = useState(()=>parseFloat(localStorage.getItem("bot_stake_min_v2")||String(DEFAULT_STAKE)));
-  const [ladderBaseline,setLadderBaseline]   = useState(()=>parseFloat(localStorage.getItem("bot_ladder_baseline")||String(loadBalance())));
-  const [initialCapital,setInitialCapital]   = useState(()=>parseFloat(localStorage.getItem("bot_initial_capital")||"200"));
+  const [ladderBaseline,setLadderBaseline]   = useState(()=>parseFloat(localStorage.getItem("bot_ladder_baseline_v2")||String(loadBalance())));
+  const [initialCapital,setInitialCapital]   = useState(()=>parseFloat(localStorage.getItem("bot_initial_capital_v2")||"10000"));
   const [trades,setTrades]       = useState([]);
   const [log,setLog]             = useState([]);
   const [news,setNews]           = useState([]);
@@ -1399,8 +1409,8 @@ export default function TradingBot(){
   useEffect(()=>{stakeStepRef.current=stakeStep;localStorage.setItem("bot_stake_step_v2",String(stakeStep));},[stakeStep]);
   useEffect(()=>{stakeGrowthTriggerRef.current=stakeGrowthTrigger;localStorage.setItem("bot_stake_trigger",String(stakeGrowthTrigger));},[stakeGrowthTrigger]);
   useEffect(()=>{minStakeRef.current=minStake;localStorage.setItem("bot_stake_min_v2",String(minStake));},[minStake]);
-  useEffect(()=>{ladderBaselineRef.current=ladderBaseline;localStorage.setItem("bot_ladder_baseline",String(ladderBaseline));},[ladderBaseline]);
-  useEffect(()=>{localStorage.setItem("bot_initial_capital",String(initialCapital));},[initialCapital]);
+  useEffect(()=>{ladderBaselineRef.current=ladderBaseline;localStorage.setItem("bot_ladder_baseline_v2",String(ladderBaseline));},[ladderBaseline]);
+  useEffect(()=>{localStorage.setItem("bot_initial_capital_v2",String(initialCapital));},[initialCapital]);
 
   // ── Load learning history from Postgres on mount — this is what makes
   // "aprendizaje automático" persist across browsers/devices instead of only
@@ -2168,7 +2178,7 @@ export default function TradingBot(){
       addLog(`${emoji} ${reason} ${pos.type} ${posSym} @ ${fP(currentPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
       setBalance(b=>{const nb=b+pnl;balanceRef.current=nb;return nb;});
       const closedTrade={...pos,exit:currentPrice,pnl,reason,time:now(),tradeTime:Math.floor(Date.now()/1000),
-        symbol:posSym, activePatterns:patternsRef.current.map(p=>p.name)};
+        closeTime:Date.now(), symbol:posSym, activePatterns:patternsRef.current.map(p=>p.name)};
       setTrades(t=>[closedTrade,...t.slice(0,49)]);
       saveTradeLearning(closedTrade);
       setLearningStats(calcLearningStats(loadTrades()));
@@ -3657,8 +3667,8 @@ export default function TradingBot(){
                   </div>
                 ):(
                   <>
-                    <div style={{display:"grid",gridTemplateColumns:"110px 90px 70px 90px 90px 90px 90px 60px 1fr",gap:10,padding:"0 14px 6px",fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>
-                      <div>FECHA</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>ORIGEN</div><div>PATRONES</div>
+                    <div style={{display:"grid",gridTemplateColumns:"95px 95px 90px 70px 90px 90px 90px 90px 60px 1fr",gap:10,padding:"0 14px 6px",fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>
+                      <div>APERTURA</div><div>CIERRE</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>ORIGEN</div><div>PATRONES</div>
                     </div>
                     <div style={{display:"flex",flexDirection:"column",gap:5}}>
                       {viewTrades.slice(0,50).map((t,i)=>{
@@ -3666,9 +3676,10 @@ export default function TradingBot(){
                         const win=t.pnl>0;
                         const col=win?T.green:T.red;
                         return(
-                          <div key={i} style={{display:"grid",gridTemplateColumns:"110px 90px 70px 90px 90px 90px 90px 60px 1fr",
+                          <div key={i} style={{display:"grid",gridTemplateColumns:"95px 95px 90px 70px 90px 90px 90px 90px 60px 1fr",
                             gap:10,alignItems:"center",background:T.card,border:`1px solid ${col}25`,borderRadius:7,padding:"9px 14px"}}>
-                            <span className="mono" style={{fontSize:9,color:T.muted}}>{t.time||"—"}</span>
+                            <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.openTime)}</span>
+                            <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime||(t.tradeTime?t.tradeTime*1000:null))}</span>
                             <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||symbol}</span>
                             <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:T.red}}>{t.type}</span>
                             <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(t.entry,prec)}</span>
