@@ -2565,15 +2565,20 @@ export default function TradingBot(){
      revisa todos los demás símbolos ROBUSTO/MIXTO (el activo ya recibe el
      análisis completo con IA arriba) usando la señal técnica determinista
      de assetSignals — la misma clase de regla que valida el walk-forward,
-     sin gastar una llamada a Groq por símbolo. Solo simulado (paper): nunca
-     manda órdenes a Deriv, sin importar derivEnabled, porque son símbolos
-     que no estás mirando activamente. Respeta el cupo por símbolo
-     (MAX_POSITIONS) y el cupo global (MAX_TOTAL_POSITIONS). */
-  const runAutoScan=useCallback(()=>{
+     sin gastar una llamada a Groq por símbolo. Mayormente simulado (paper) —
+     la EXCEPCIÓN es cuando derivEnabled está activo y el símbolo en turno
+     es forex + tier ROBUSTO + no hay ya otra posición real abierta, mismo
+     gate conservador que el análisis del símbolo activo (ver runAnalysis).
+     Respeta el cupo por símbolo (MAX_POSITIONS) y el cupo global
+     (MAX_TOTAL_POSITIONS). */
+  const runAutoScan=useCallback(async()=>{
     if(!autoRef.current) return;
     if(posRef.current.length>=MAX_TOTAL_POSITIONS) return;
     const allTrades=loadTrades();
     const byPatternStats=calcLearningStats(allTrades)?.byPattern||[];
+    // Tracked locally (not just posRef) so two qualifying symbols in the
+    // SAME scan pass can't both go real before posRef re-syncs on render.
+    let hasOpenRealPosition=posRef.current.some(p=>p.derivContractId);
     for(const [sym,strat] of Object.entries(SYMBOL_STRATEGY)){
       if(strat.tier==="SIN-EDGE") continue;
       if(sym===symbolRef.current) continue; // ya lo cubre el análisis principal
@@ -2594,11 +2599,28 @@ export default function TradingBot(){
       if(adjConfidence<minConf) continue;
 
       const ps=positionSizeRef.current;
+
+      // Real-money gate — identical conservatism to the active symbol's own
+      // analysis path: only forex, only ROBUSTO tier, only one real
+      // position open at a time, regardless of which symbol qualifies first.
+      let derivContractId=null;
+      if(derivEnabledRef.current && ASSETS[sym]?.type==="forex" && strat.tier==="ROBUSTO" && !hasOpenRealPosition){
+        const dResult=await openDerivOrder(sym,data.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
+        if(dResult.ok){
+          derivContractId=dResult.contractId;
+          hasOpenRealPosition=true;
+          addLog(`🔴 Deriv orden REAL ${data.signal} abierta (auto multi-símbolo) | ContractID:${derivContractId} | ${sym} · Stake:$${ps} × ${multiplierRef.current}x`,"info");
+        } else {
+          addLog(`⚠️ Deriv: ${dResult.error} — ${sym} registrado en simulación`,"sell");
+        }
+      }
+
       const scaled=scaledTpSl(sym,ps,multiplierRef.current);
       const pos={
         type:data.signal, entry:data.price, id:Date.now()+Math.random(),
         symbol:sym, openTime:Date.now(), allocatedSize:ps, multiplier:multiplierRef.current, peakPnl:0,
         tp:scaled?.tp??tpTargetRef.current, sl:scaled?.sl??slTargetRef.current,
+        ...(derivContractId&&{derivContractId}),
       };
       setPositions(p=>[...p,pos]);
       savePositionOpen(pos,adjConfidence);
