@@ -1,7 +1,28 @@
-// New Deriv REST API — base: https://api.derivws.com/trading/v1/options
-// Auth: Authorization: Bearer <pat_token>  +  Deriv-App-ID: <app_id>
+// Deriv's newer REST API (api.derivws.com/trading/v1/options) is auth'd with
+// a Personal Access Token ("pat_..."), which is a DIFFERENT credential type
+// from the classic ws.derivws.com "API token" — a pat_ token is rejected by
+// the classic {"authorize": token} WebSocket message ("InvalidToken"), and a
+// classic token / the public app_id=1089 is rejected here ("Invalid
+// application"). Verified end-to-end against Deriv directly (curl + a throwaway
+// ws script) before writing this, since this handles real trading:
+//
+//   1. GET  /trading/v1/options/accounts                        (Bearer + Deriv-App-ID)
+//      -> [{ account_id, balance, currency, account_type: "demo"|"real", ... }]
+//   2. POST /trading/v1/options/accounts/{account_id}/otp        (same headers)
+//      -> { data: { url: "wss://api.derivws.com/trading/v1/options/ws/demo?otp=..." } }
+//   3. Connect to that URL directly — the OTP in the URL IS the auth, no
+//      separate `authorize` message. It's single-use and expires in 120s, so
+//      steps 2-3 must happen back to back, per action (no caching the OTP).
+//   4. Send ONE classic-shaped Deriv WS message and read the matching
+//      response: {"balance":1}, {"buy":"1","price":...,"parameters":{...}},
+//      or {"sell":contract_id,"price":0}.
+//
+// DERIV_APP_ID must be a real registered app id from developers.deriv.com
+// (Register new application) — the classic public test id 1089 does NOT
+// work against this REST product.
+import WebSocket from "ws";
 
-const DERIV_BASE = "https://api.derivws.com/trading/v1/options";
+const REST_BASE = "https://api.derivws.com/trading/v1/options";
 
 const SYMBOL_MAP = {
   "EUR/USD": "frxEURUSD", "GBP/USD": "frxGBPUSD", "USD/JPY": "frxUSDJPY",
@@ -9,88 +30,116 @@ const SYMBOL_MAP = {
   "USD/CAD": "frxUSDCAD", "EUR/GBP": "frxEURGBP",
 };
 
-function derivHeaders(token, appId) {
-  return {
-    "Authorization": `Bearer ${token}`,
-    "Deriv-App-ID": String(appId),
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-  };
+function authHeaders(token, appId) {
+  return { "Authorization": `Bearer ${token}`, "Deriv-App-ID": String(appId), "Content-Type": "application/json" };
 }
 
-async function derivREST(method, path, token, appId, body) {
-  const url = `${DERIV_BASE}${path}`;
-  console.log("[deriv-order]", method, url, body ? JSON.stringify(body) : "");
-  const r = await fetch(url, {
-    method,
-    headers: derivHeaders(token, appId),
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
+async function pickAccount(token, appId, wantType) {
+  const r = await fetch(`${REST_BASE}/accounts`, { headers: authHeaders(token, appId) });
   const text = await r.text();
-  console.log("[deriv-order] status:", r.status, "body:", text.slice(0, 500));
-  let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  return { ok: r.ok, status: r.status, data };
+  if (!r.ok) throw new Error(`accounts failed (${r.status}): ${text.slice(0, 300)}`);
+  let data; try { data = JSON.parse(text); } catch { throw new Error(`accounts: non-JSON response: ${text.slice(0, 300)}`); }
+  const accounts = data?.data || [];
+  if (!accounts.length) throw new Error("No Deriv accounts found for this token");
+  return accounts.find(a => a.account_type === wantType) || accounts[0];
+}
+
+async function getOtpWsUrl(token, appId, accountId) {
+  const r = await fetch(`${REST_BASE}/accounts/${accountId}/otp`, { method: "POST", headers: authHeaders(token, appId) });
+  const text = await r.text();
+  if (!r.ok) throw new Error(`otp failed (${r.status}): ${text.slice(0, 300)}`);
+  const data = JSON.parse(text);
+  const url = data?.data?.url;
+  if (!url) throw new Error(`otp: no url in response: ${text.slice(0, 300)}`);
+  return url;
+}
+
+// Connects to the OTP-authenticated URL, sends `request`, resolves with the
+// first response carrying a msg_type (or rejects on an API error/timeout).
+// The OTP is single-use — this connection is opened fresh per call.
+function derivWsCall(wsUrl, request, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    let settled = false;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch {}
+      fn(arg);
+    };
+    const timer = setTimeout(() => finish(reject, new Error("Deriv WS timeout")), timeoutMs);
+
+    ws.on("open", () => ws.send(JSON.stringify(request)));
+    ws.on("message", (raw) => {
+      let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (msg.error) { finish(reject, new Error(`${msg.error.code || "deriv_error"}: ${msg.error.message}`)); return; }
+      if (msg.msg_type) finish(resolve, msg);
+    });
+    ws.on("error", (e) => finish(reject, e));
+    ws.on("close", () => finish(reject, new Error("Deriv WS closed before a response arrived")));
+  });
+}
+
+async function derivAction(token, appId, accountType, request) {
+  const account = await pickAccount(token, appId, accountType);
+  const wsUrl = await getOtpWsUrl(token, appId, account.account_id);
+  const msg = await derivWsCall(wsUrl, request);
+  return { msg, account };
 }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   const token = process.env.DERIV_API_TOKEN;
-  const appId = process.env.DERIV_APP_ID || "1089";
-  console.log("[deriv-order] action:", req.body?.action, "| token present:", !!token, "| appId:", appId);
+  const appId = process.env.DERIV_APP_ID;
+  const accountType = process.env.DERIV_ACCOUNT_TYPE || "demo"; // switch to "real" only when deliberately going live
   if (!token) return res.status(500).json({ error: "DERIV_API_TOKEN not configured" });
+  if (!appId) return res.status(500).json({ error: "DERIV_APP_ID not configured — register one at developers.deriv.com, the public 1089 id doesn't work on this API" });
 
   const { action, symbol, side, stake = 10, multiplier = 100, contractId, tpTarget = 3, slTarget = 2 } = req.body || {};
 
   try {
     // ── BALANCE
     if (action === "balance") {
-      // Try to get account info first to find the loginid
-      const acct = await derivREST("GET", "/accounts", token, appId);
-      if (!acct.ok) return res.status(acct.status).json({ error: "balance failed", detail: acct.data });
-
-      // Try accounts list or direct balance endpoint
-      const accounts = acct.data?.accounts || acct.data?.data || acct.data;
-      console.log("[deriv-order] accounts response:", JSON.stringify(acct.data).slice(0, 300));
-
-      // Return raw data so we can see the structure
-      return res.status(200).json({ raw: acct.data, _debug: true });
+      const { msg, account } = await derivAction(token, appId, accountType, { balance: 1 });
+      return res.status(200).json({
+        balance: msg.balance?.balance, currency: msg.balance?.currency, loginid: msg.balance?.loginid,
+        accountType: account.account_type,
+      });
     }
 
-    // ── OPEN
+    // ── OPEN (buy)
     if (action === "open") {
       const derivSymbol = SYMBOL_MAP[symbol];
       if (!derivSymbol) return res.status(400).json({ error: `Symbol not supported: ${symbol}` });
 
-      const body = {
-        contract_type: side === "BUY" ? "MULTUP" : "MULTDOWN",
-        symbol: derivSymbol,
-        amount: stake,
-        multiplier,
-        limit_order: { take_profit: tpTarget, stop_loss: slTarget },
-        basis: "stake",
-        currency: "USD",
+      const buyRequest = {
+        buy: "1",
+        price: stake, // max acceptable price — for basis:"stake" this equals the stake itself
+        parameters: {
+          contract_type: side === "BUY" ? "MULTUP" : "MULTDOWN",
+          symbol: derivSymbol,
+          currency: "USD",
+          amount: stake,
+          basis: "stake",
+          multiplier,
+          limit_order: { take_profit: tpTarget, stop_loss: slTarget },
+        },
       };
 
-      const r = await derivREST("POST", "/contracts", token, appId, body);
-      console.log("[deriv-order] open response:", JSON.stringify(r.data).slice(0, 500));
-      if (!r.ok) return res.status(r.status).json({ error: "open failed", detail: r.data });
-
-      const d = r.data?.data || r.data;
-      return res.status(200).json({ contractId: d?.contract_id || d?.id, buyPrice: d?.buy_price, stake, multiplier, status: "OPEN", raw: d });
+      const { msg } = await derivAction(token, appId, accountType, buyRequest);
+      const b = msg.buy;
+      return res.status(200).json({ contractId: b?.contract_id, buyPrice: b?.buy_price, stake, multiplier, status: "OPEN", raw: b });
     }
 
-    // ── CLOSE
+    // ── CLOSE (sell)
     if (action === "close") {
       if (!contractId) return res.status(400).json({ error: "contractId required" });
 
-      const r = await derivREST("DELETE", `/contracts/${contractId}`, token, appId);
-      console.log("[deriv-order] close response:", JSON.stringify(r.data).slice(0, 500));
-      if (!r.ok) return res.status(r.status).json({ error: "close failed", detail: r.data });
-
-      const d = r.data?.data || r.data;
-      return res.status(200).json({ contractId, sellPrice: d?.sell_price || d?.sold_for || 0, status: "CLOSED", raw: d });
+      const { msg } = await derivAction(token, appId, accountType, { sell: Number(contractId), price: 0 });
+      const s = msg.sell;
+      return res.status(200).json({ contractId, sellPrice: s?.sold_for, status: "CLOSED", raw: s });
     }
 
     return res.status(400).json({ error: `Unknown action: ${action}` });
