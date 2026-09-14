@@ -3776,15 +3776,21 @@ export default function TradingBot(){
             <div style={{display:"flex",gap:5,marginTop:8}}>
               {Array.from({length:MAX_POSITIONS},(_,i)=>{
                 const pos=positions[i];
-                const pnl=pos?posPnL(pos,price,pos.allocatedSize||positionSize):null;
-                const col=pos?(pnl>=0?T.green:T.red):T.dim;
+                // Each position needs ITS OWN symbol's live price here, not the
+                // on-screen symbol's `price` — using the wrong symbol's price
+                // against a very different entry produced absurd PnL (e.g. a
+                // BTC/USDT position priced against an EUR/GBP-scale number).
+                const posSym=pos?.symbol||symbol;
+                const posLivePrice=pos?(posSym===symbol?price:(livePrices[posSym]??ASSETS[posSym]?.basePrice)):null;
+                const pnl=(pos&&posLivePrice!=null)?posPnL(pos,posLivePrice,pos.allocatedSize||positionSize):null;
+                const col=pos?(pnl==null?T.muted:pnl>=0?T.green:T.red):T.dim;
                 return(
                   <div key={i} style={{flex:1,height:28,border:`1px solid ${col}`,borderRadius:5,background:`${col}12`,
                     display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
                     {pos?(
                       <>
                         <span style={{fontSize:7,color:col}}>{pos.type}</span>
-                        <span className="mono" style={{fontSize:8,color:col}}>{fUSD(pnl)}</span>
+                        <span className="mono" style={{fontSize:8,color:col}}>{pnl==null?"…":fUSD(pnl)}</span>
                       </>
                     ):(
                       <span style={{fontSize:8,color:T.muted}}>#{i+1}</span>
