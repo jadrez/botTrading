@@ -678,9 +678,9 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
     if(!mainRef.current||!rsiRef.current||!macdRef.current) return;
 
     const base={
-      layout:{ background:{color:"#04060f"}, textColor:"#4a6080" },
-      grid:{ vertLines:{color:"#0d1a2d"}, horzLines:{color:"#0d1a2d"} },
-      rightPriceScale:{ borderColor:"#152035" },
+      layout:{ background:{color:"#FFFFFF"}, textColor:"#8A7F68" },
+      grid:{ vertLines:{color:"#EFE8D4"}, horzLines:{color:"#EFE8D4"} },
+      rightPriceScale:{ borderColor:"#D8CDB0" },
       handleScroll:true, handleScale:true,
     };
 
@@ -688,18 +688,18 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
     const main=createChart(mainRef.current,{
       ...base,
       crosshair:{ mode:CrosshairMode.Normal,
-        vertLine:{color:"#00b8e650",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#00b8e6"},
-        horzLine:{color:"#00b8e650",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#00b8e6"},
+        vertLine:{color:"#007A8A50",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#007A8A"},
+        horzLine:{color:"#007A8A50",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#007A8A"},
       },
-      timeScale:{ borderColor:"#152035", timeVisible:true, secondsVisible:false, fixLeftEdge:true, rightOffset:10, barSpacing:8 },
-      rightPriceScale:{ borderColor:"#152035", minimumWidth:90 },
-      watermark:{ visible:true, text:symbol, fontSize:40, color:"rgba(0,184,230,0.03)", horzAlign:"left", vertAlign:"top" },
+      timeScale:{ borderColor:"#D8CDB0", timeVisible:true, secondsVisible:false, fixLeftEdge:true, rightOffset:10, barSpacing:8 },
+      rightPriceScale:{ borderColor:"#D8CDB0", minimumWidth:90 },
+      watermark:{ visible:true, text:symbol, fontSize:40, color:"rgba(0,122,138,0.05)", horzAlign:"left", vertAlign:"top" },
     });
 
     const cs=main.addCandlestickSeries({
-      upColor:"#00e676", downColor:"#ff1744",
-      borderUpColor:"#00e676", borderDownColor:"#ff1744",
-      wickUpColor:"#00e676cc", wickDownColor:"#ff1744cc",
+      upColor:"#00A868", downColor:"#E5233F",
+      borderUpColor:"#00875A", borderDownColor:"#D8112F",
+      wickUpColor:"#00875Acc", wickDownColor:"#D8112Fcc",
       priceFormat:{ type:"price", precision, minMove:Math.pow(10,-precision) },
     });
     const vs=main.addHistogramSeries({
@@ -707,12 +707,12 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
     });
     main.priceScale("vol").applyOptions({ scaleMargins:{top:0.82,bottom:0} });
 
-    const e9s=main.addLineSeries({ color:"#00b8e6", lineWidth:1.5, title:"EMA9",  priceLineVisible:false, lastValueVisible:true,  crosshairMarkerVisible:false });
-    const e21s=main.addLineSeries({ color:"#ffd600", lineWidth:1.5, title:"EMA21", priceLineVisible:false, lastValueVisible:true,  crosshairMarkerVisible:false });
-    const e200s=main.addLineSeries({ color:"#ff6d00", lineWidth:2, lineStyle:LineStyle.Dashed, title:"EMA200", priceLineVisible:false, lastValueVisible:true, crosshairMarkerVisible:false });
-    const bbu=main.addLineSeries({ color:"#00b8e635", lineWidth:1, lineStyle:LineStyle.Dashed, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
-    const bbm=main.addLineSeries({ color:"#344d7040", lineWidth:1, lineStyle:LineStyle.Dotted, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
-    const bbl=main.addLineSeries({ color:"#00b8e635", lineWidth:1, lineStyle:LineStyle.Dashed, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
+    const e9s=main.addLineSeries({ color:"#007A8A", lineWidth:1.5, title:"EMA9",  priceLineVisible:false, lastValueVisible:true,  crosshairMarkerVisible:false });
+    const e21s=main.addLineSeries({ color:"#B98A00", lineWidth:1.5, title:"EMA21", priceLineVisible:false, lastValueVisible:true,  crosshairMarkerVisible:false });
+    const e200s=main.addLineSeries({ color:"#C97A00", lineWidth:2, lineStyle:LineStyle.Dashed, title:"EMA200", priceLineVisible:false, lastValueVisible:true, crosshairMarkerVisible:false });
+    const bbu=main.addLineSeries({ color:"#007A8A45", lineWidth:1, lineStyle:LineStyle.Dashed, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
+    const bbm=main.addLineSeries({ color:"#8A7F6850", lineWidth:1, lineStyle:LineStyle.Dotted, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
+    const bbl=main.addLineSeries({ color:"#007A8A45", lineWidth:1, lineStyle:LineStyle.Dashed, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false });
 
     // Crosshair legend
     main.subscribeCrosshairMove(p=>{
@@ -724,32 +724,32 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
     const rsiChart=createChart(rsiRef.current,{
       ...base,
       crosshair:{ mode:CrosshairMode.Normal,
-        vertLine:{color:"#00b8e630",width:1,style:LineStyle.Dashed,labelVisible:false},
-        horzLine:{color:"#00b8e630",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#1a0533"},
+        vertLine:{color:"#007A8A30",width:1,style:LineStyle.Dashed,labelVisible:false},
+        horzLine:{color:"#007A8A30",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#4A2E7A"},
       },
-      timeScale:{ visible:false, borderColor:"#152035" },
-      rightPriceScale:{ borderColor:"#152035", scaleMargins:{top:0.1,bottom:0.1} },
+      timeScale:{ visible:false, borderColor:"#D8CDB0" },
+      rightPriceScale:{ borderColor:"#D8CDB0", scaleMargins:{top:0.1,bottom:0.1} },
     });
-    const rsiS=rsiChart.addLineSeries({ color:"#a855f7", lineWidth:1.5, title:"RSI", priceLineVisible:false, lastValueVisible:true });
-    rsiS.createPriceLine({ price:70, color:"#ff174445", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:"OB 70" });
-    rsiS.createPriceLine({ price:30, color:"#00e67645", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:"OS 30" });
-    rsiS.createPriceLine({ price:50, color:"#344d7040", lineWidth:1, lineStyle:LineStyle.Dotted, axisLabelVisible:false });
+    const rsiS=rsiChart.addLineSeries({ color:"#8B3FE0", lineWidth:1.5, title:"RSI", priceLineVisible:false, lastValueVisible:true });
+    rsiS.createPriceLine({ price:70, color:"#D8112F55", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:"OB 70" });
+    rsiS.createPriceLine({ price:30, color:"#00875A55", lineWidth:1, lineStyle:LineStyle.Dashed, axisLabelVisible:false, title:"OS 30" });
+    rsiS.createPriceLine({ price:50, color:"#8A7F6850", lineWidth:1, lineStyle:LineStyle.Dotted, axisLabelVisible:false });
 
     // ── MACD chart
     const macdChart=createChart(macdRef.current,{
       ...base,
       crosshair:{ mode:CrosshairMode.Normal,
-        vertLine:{color:"#00b8e630",width:1,style:LineStyle.Dashed,labelVisible:false},
-        horzLine:{color:"#00b8e630",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#152035"},
+        vertLine:{color:"#007A8A30",width:1,style:LineStyle.Dashed,labelVisible:false},
+        horzLine:{color:"#007A8A30",width:1,style:LineStyle.Dashed,labelBackgroundColor:"#D8CDB0"},
       },
-      timeScale:{ borderColor:"#152035", timeVisible:true, secondsVisible:false },
-      rightPriceScale:{ borderColor:"#152035" },
+      timeScale:{ borderColor:"#D8CDB0", timeVisible:true, secondsVisible:false },
+      rightPriceScale:{ borderColor:"#D8CDB0" },
     });
     const macdFmt={type:"price",precision:5,minMove:0.00001};
     const macdHist=macdChart.addHistogramSeries({ priceLineVisible:false, lastValueVisible:false, title:"Hist", priceFormat:macdFmt });
-    const macdLine=macdChart.addLineSeries({ color:"#00b8e6", lineWidth:1.5, title:"MACD", priceLineVisible:false, lastValueVisible:true, priceFormat:macdFmt });
-    const macdSig =macdChart.addLineSeries({ color:"#ff6d00", lineWidth:1.5, title:"Signal", priceLineVisible:false, lastValueVisible:true, priceFormat:macdFmt });
-    macdChart.addLineSeries({ color:"#344d7030", lineWidth:1, lineStyle:LineStyle.Dotted, priceLineVisible:false, lastValueVisible:false }).setData([]);
+    const macdLine=macdChart.addLineSeries({ color:"#007A8A", lineWidth:1.5, title:"MACD", priceLineVisible:false, lastValueVisible:true, priceFormat:macdFmt });
+    const macdSig =macdChart.addLineSeries({ color:"#C97A00", lineWidth:1.5, title:"Signal", priceLineVisible:false, lastValueVisible:true, priceFormat:macdFmt });
+    macdChart.addLineSeries({ color:"#8A7F6830", lineWidth:1, lineStyle:LineStyle.Dotted, priceLineVisible:false, lastValueVisible:false }).setData([]);
 
     // ── Sync timescales
     let syncing=false;
@@ -811,7 +811,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
       // ── Fast path: only update last bar — preserves scroll position and shows tick animation
       try{
         cs.update({time:last.time,open:last.o,high:last.h,low:last.l,close:last.c});
-        vs.update({time:last.time,value:last.v||0,color:last.c>=last.o?"#00e67640":"#ff174440"});
+        vs.update({time:last.time,value:last.v||0,color:last.c>=last.o?"#00875A40":"#D8112F40"});
         // Update last EMA9/21 point
         const k9=2/10,k21=2/22;
         let e9=closes[0],e21=closes[0];
@@ -863,7 +863,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
           if(mlD_last!==undefined){
             macdLine.update({time:last.time,value:mlD_last});
             macdSig.update({time:last.time,value:msD_last});
-            macdHist.update({time:last.time,value:mhD_last,color:mhD_last>=0?"#00e67680":"#ff174480"});
+            macdHist.update({time:last.time,value:mhD_last,color:mhD_last>=0?"#00875A80":"#D8112F80"});
           }
         }
       }catch{}
@@ -872,7 +872,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
 
     // ── Full setData path: initial load, symbol switch, timeframe change ──
     cs.setData(clean.map(c=>({time:c.time,open:c.o,high:c.h,low:c.l,close:c.c})));
-    vs.setData(clean.map(c=>({time:c.time,value:c.v||0,color:c.c>=c.o?"#00e67640":"#ff174440"})));
+    vs.setData(clean.map(c=>({time:c.time,value:c.v||0,color:c.c>=c.o?"#00875A40":"#D8112F40"})));
 
     // EMA per candle
     const e9d=[],e21d=[];
@@ -930,7 +930,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
         const hv=mv-sigV;
         mlD.push({time:times[i],value:mv});
         msD.push({time:times[i],value:sigV});
-        mhD.push({time:times[i],value:hv,color:hv>=0?"#00e67680":"#ff174480"});
+        mhD.push({time:times[i],value:hv,color:hv>=0?"#00875A80":"#D8112F80"});
       }
     }
     macdHist.setData(mhD); macdLine.setData(mlD); macdSig.setData(msD);
@@ -954,14 +954,14 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
     srLines.current=[];
     (srLevels.resistances||[]).forEach(r=>{
       srLines.current.push(cs.createPriceLine({
-        price:r.price, color:"#ff174455", lineWidth:1,
+        price:r.price, color:"#D8112F55", lineWidth:1,
         lineStyle:LineStyle.Dotted, axisLabelVisible:false,
         title:`R×${r.touches}`,
       }));
     });
     (srLevels.supports||[]).forEach(s=>{
       srLines.current.push(cs.createPriceLine({
-        price:s.price, color:"#00e67655", lineWidth:1,
+        price:s.price, color:"#00875A55", lineWidth:1,
         lineStyle:LineStyle.Dotted, axisLabelVisible:false,
         title:`S×${s.touches}`,
       }));
@@ -987,8 +987,8 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
     if(!proj) return;
 
     const {center,upper,lower,targetPrice,stopPrice,isBuy}=proj;
-    const col=isBuy?"#00e676":"#ff1744";
-    const colFaint=isBuy?"#00e67628":"#ff174428";
+    const col=isBuy?"#00875A":"#D8112F";
+    const colFaint=isBuy?"#00875A28":"#D8112F28";
 
     const centerS=main.addLineSeries({color:col,lineWidth:2,lineStyle:LineStyle.Dashed,
       priceLineVisible:false,lastValueVisible:true,title:isBuy?"▲ Target":"▼ Target"});
@@ -1011,7 +1011,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
         cs.createPriceLine({price:targetPrice,color:col,lineWidth:1,
           lineStyle:LineStyle.Dashed,axisLabelVisible:true,
           title:`🎯 Objetivo ${targetPrice.toFixed(precision)}`}),
-        cs.createPriceLine({price:stopPrice,color:isBuy?"#ff1744":"#00e676",lineWidth:1,
+        cs.createPriceLine({price:stopPrice,color:isBuy?"#D8112F":"#00875A",lineWidth:1,
           lineStyle:LineStyle.Dotted,axisLabelVisible:true,
           title:`🛑 Stop ${stopPrice.toFixed(precision)}`}),
       );
@@ -1027,7 +1027,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
 
     positions.forEach(pos=>{
       const isBuy=pos.type==="BUY";
-      const entryCol=isBuy?"#00e676":"#ff1744";
+      const entryCol=isBuy?"#00875A":"#D8112F";
       posLines.current.push(
         cs.createPriceLine({price:pos.entry, color:entryCol, lineWidth:2, lineStyle:LineStyle.Solid, axisLabelVisible:true, title:`${pos.type} @ ${pos.entry}`}),
       );
@@ -1052,7 +1052,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
       return{
         time: nearest,
         position: isBuy?"belowBar":"aboveBar",
-        color: isProfit?"#00e676":"#ff1744",
+        color: isProfit?"#00875A":"#D8112F",
         shape: isBuy?"arrowUp":"arrowDown",
         text: `${t.reason} ${t.pnl>=0?"+":""}$${t.pnl?.toFixed(2)}`,
         size:1,
@@ -1067,39 +1067,39 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
     <div style={{display:"flex",flexDirection:"column",height:"100%",position:"relative"}}>
 
       {/* OHLCV Legend */}
-      <div style={{position:"absolute",top:8,left:12,zIndex:10,display:"flex",gap:14,fontSize:10,
-        fontFamily:"IBM Plex Mono,monospace",pointerEvents:"none",background:"#04060fcc",padding:"4px 10px",borderRadius:4}}>
-        <span style={{color:"#4a6080"}}>{symbol}</span>
+      <div style={{position:"absolute",top:8,left:12,zIndex:10,display:"flex",gap:14,fontSize:11,
+        fontFamily:"IBM Plex Mono,monospace",pointerEvents:"none",background:"#FFFFFFdd",padding:"4px 10px",borderRadius:4,border:`1px solid ${T.border}`}}>
+        <span style={{color:T.muted,fontWeight:700}}>{symbol}</span>
         {legend&&<>
-          <span>O <span style={{color:legend.open>=legend.close?"#ff1744":"#00e676"}}>{Number(legend.open).toFixed(precision)}</span></span>
-          <span>H <span style={{color:"#00e676"}}>{Number(legend.high).toFixed(precision)}</span></span>
-          <span>L <span style={{color:"#ff1744"}}>{Number(legend.low).toFixed(precision)}</span></span>
-          <span>C <span style={{color:legend.close>=legend.open?"#00e676":"#ff1744",fontWeight:700}}>{Number(legend.close).toFixed(precision)}</span></span>
+          <span>O <span style={{color:legend.open>=legend.close?"#D8112F":"#00875A"}}>{Number(legend.open).toFixed(precision)}</span></span>
+          <span>H <span style={{color:"#00875A"}}>{Number(legend.high).toFixed(precision)}</span></span>
+          <span>L <span style={{color:"#D8112F"}}>{Number(legend.low).toFixed(precision)}</span></span>
+          <span>C <span style={{color:legend.close>=legend.open?"#00875A":"#D8112F",fontWeight:700}}>{Number(legend.close).toFixed(precision)}</span></span>
         </>}
-        <span style={{color:"#00b8e6",marginLeft:8}}>── EMA9</span>
-        <span style={{color:"#ffd600"}}>── EMA21</span>
-        <span style={{color:"#00b8e640"}}>- - BB</span>
+        <span style={{color:T.accent,marginLeft:8}}>── EMA9</span>
+        <span style={{color:T.yellow}}>── EMA21</span>
+        <span style={{color:`${T.accent}80`}}>- - BB</span>
       </div>
 
       {/* Main chart (candles) */}
       <div ref={mainRef} style={{flex:4,minHeight:0}}/>
 
       {/* RSI label + chart */}
-      <div style={{borderTop:"1px solid #0d1a2d",display:"flex",alignItems:"center",
-        gap:10,padding:"2px 10px",background:"#04060f"}}>
-        <span style={{fontSize:8,color:"#a855f7",letterSpacing:2,fontFamily:"IBM Plex Mono,monospace"}}>RSI 14</span>
-        <span style={{fontSize:8,color:"#ff174460"}}>─ 70</span>
-        <span style={{fontSize:8,color:"#00e67660"}}>─ 30</span>
+      <div style={{borderTop:`1px solid ${T.border}`,display:"flex",alignItems:"center",
+        gap:10,padding:"3px 10px",background:"#FFFFFF"}}>
+        <span style={{fontSize:9,color:"#8B3FE0",letterSpacing:2,fontFamily:"IBM Plex Mono,monospace",fontWeight:700}}>RSI 14</span>
+        <span style={{fontSize:9,color:"#D8112F90"}}>─ 70</span>
+        <span style={{fontSize:9,color:"#00875A90"}}>─ 30</span>
       </div>
       <div ref={rsiRef} style={{flex:1,minHeight:0}}/>
 
       {/* MACD label + chart */}
-      <div style={{borderTop:"1px solid #0d1a2d",display:"flex",alignItems:"center",
-        gap:10,padding:"2px 10px",background:"#04060f"}}>
-        <span style={{fontSize:8,color:"#00b8e6",letterSpacing:2,fontFamily:"IBM Plex Mono,monospace"}}>MACD</span>
-        <span style={{fontSize:8,color:"#ff6d00"}}>── Signal</span>
-        <span style={{fontSize:8,color:"#00e67660"}}>▌ Hist+</span>
-        <span style={{fontSize:8,color:"#ff174460"}}>▌ Hist-</span>
+      <div style={{borderTop:`1px solid ${T.border}`,display:"flex",alignItems:"center",
+        gap:10,padding:"3px 10px",background:"#FFFFFF"}}>
+        <span style={{fontSize:9,color:T.accent,letterSpacing:2,fontFamily:"IBM Plex Mono,monospace",fontWeight:700}}>MACD</span>
+        <span style={{fontSize:9,color:T.orange}}>── Signal</span>
+        <span style={{fontSize:9,color:"#00875A90"}}>▌ Hist+</span>
+        <span style={{fontSize:9,color:"#D8112F90"}}>▌ Hist-</span>
       </div>
       <div ref={macdRef} style={{flex:1,minHeight:0}}/>
     </div>
@@ -1136,7 +1136,7 @@ function PosRow({pos, price, precision, onClose, tpTarget=3, slTarget=2}){
       </div>
       <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
         <span style={{fontSize:8,color:T.red}}>SL -{fUSD(slTarget,false)}</span>
-        {pos.derivContractId&&<span style={{fontSize:7,color:"#00b8e6",background:"#00b8e615",padding:"1px 5px",borderRadius:3}}>DERIV #{String(pos.derivContractId)}</span>}
+        {pos.derivContractId&&<span style={{fontSize:7,color:T.accent,background:`${T.accent}18`,padding:"1px 5px",borderRadius:3}}>DERIV #{String(pos.derivContractId)}</span>}
         <span style={{fontSize:8,color:pnl>=0?T.green:T.muted}}>{pct.toFixed(0)}% → TP +{fUSD(tpTarget,false)}</span>
       </div>
     </div>
@@ -2897,8 +2897,7 @@ export default function TradingBot(){
   return(
     <>
       <style>{STYLES}</style>
-      <div className="scanlines"/>
-      <div style={{position:"relative",zIndex:1,minHeight:"100vh",padding:"14px 20px",maxWidth:1400,margin:"0 auto"}}>
+      <div style={{position:"relative",zIndex:1,minHeight:"100vh",padding:"18px 28px",zoom:1.3}}>
 
         {/* HEADER */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,paddingBottom:12,borderBottom:`1px solid ${T.border}`}}>
@@ -3054,7 +3053,7 @@ export default function TradingBot(){
               opacity:!derivEnabled?1:.55}}>
             <div>
               <div style={{fontSize:13,fontWeight:700,color:!derivEnabled?T.accent:T.muted,letterSpacing:.5}}>🧪 SIMULADO</div>
-              <div style={{fontSize:9,color:!derivEnabled?"#7891b8":T.muted,marginTop:2}}>Paper trading · el bot sigue entrenando su aprendizaje</div>
+              <div style={{fontSize:9,color:!derivEnabled?T.accent:T.muted,marginTop:2}}>Paper trading · el bot sigue entrenando su aprendizaje</div>
             </div>
             {!derivEnabled&&<span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.accent,padding:"3px 8px",borderRadius:4,letterSpacing:.5}}>ACTIVO</span>}
           </button>
@@ -3066,7 +3065,7 @@ export default function TradingBot(){
               opacity:derivEnabled?1:.55}}>
             <div>
               <div style={{fontSize:13,fontWeight:700,color:derivEnabled?T.red:T.muted,letterSpacing:.5}}>🔴 DERIV (REAL)</div>
-              <div style={{fontSize:9,color:derivEnabled?"#ff8a9a":T.muted,marginTop:2}}>Dinero real vía tu cuenta Deriv conectada</div>
+              <div style={{fontSize:9,color:derivEnabled?"#B3324A":T.muted,marginTop:2}}>Dinero real vía tu cuenta Deriv conectada</div>
             </div>
             {derivEnabled&&<span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.red,padding:"3px 8px",borderRadius:4,letterSpacing:.5}}>ACTIVO</span>}
           </button>
@@ -3079,12 +3078,12 @@ export default function TradingBot(){
               <span style={{fontSize:16}}>🔴</span>
               <div>
                 <div style={{fontSize:11,fontWeight:700,color:T.red,letterSpacing:.5}}>DINERO REAL — las operaciones aquí se ejecutan en tu cuenta Deriv</div>
-                <div style={{fontSize:9,color:"#ff8a9a",marginTop:1}}>
+                <div style={{fontSize:9,color:"#B3324A",marginTop:1}}>
                   {derivLoginId?`Cuenta ${derivLoginId} · conectada`:"Conectando con Deriv..."}
                 </div>
               </div>
             </div>
-            <div style={{fontSize:9,color:"#ff8a9a",textAlign:"right"}}>⚠️ Solo forex (ROBUSTO/MIXTO)<br/>máx {MAX_REAL_POSITIONS} reales · sin duplicar apuestas correlacionadas</div>
+            <div style={{fontSize:9,color:"#B3324A",textAlign:"right"}}>⚠️ Solo forex (ROBUSTO/MIXTO)<br/>máx {MAX_REAL_POSITIONS} reales · sin duplicar apuestas correlacionadas</div>
           </div>
         )}
 
@@ -3996,7 +3995,7 @@ export default function TradingBot(){
             </div>
           ))}
         </div>
-        <div style={{fontSize:9,color:derivEnabled?"#ff8a9a":T.muted,marginBottom:10}}>
+        <div style={{fontSize:9,color:derivEnabled?"#B3324A":T.muted,marginBottom:10}}>
           {derivEnabled?"🔴 Balance leído en vivo desde la API de Deriv — no simulado":"📊 Cifras simuladas — sin dinero real involucrado"}
         </div>
 
@@ -4005,7 +4004,7 @@ export default function TradingBot(){
           ema9={ema9} ema21={ema21} volTrend={volTrend} trend1h={trend1h} precision={asset.precision}/>
 
         {/* CHART — Lightweight Charts */}
-        <div style={{background:"#04060f",border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:10}}>
+        <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:10}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 14px",borderBottom:`1px solid ${T.border}`}}>
             <div style={{display:"flex",alignItems:"center",gap:12}}>
               <span className="live" style={{fontSize:9,color:T.green}}>EN VIVO</span>
@@ -4027,9 +4026,9 @@ export default function TradingBot(){
             <div style={{display:"flex",gap:10,fontSize:8,alignItems:"center"}}>
               <span style={{color:T.accent}}>── EMA9/21</span>
               <span style={{color:T.orange}}>── EMA200</span>
-              <span style={{color:"#00b8e640"}}>··· BB</span>
-              <span style={{color:"#00e67670"}}>··· S</span>
-              <span style={{color:"#ff174470"}}>··· R</span>
+              <span style={{color:"#007A8A60"}}>··· BB</span>
+              <span style={{color:"#00875A70"}}>··· S</span>
+              <span style={{color:"#D8112F70"}}>··· R</span>
               {symPositions.length>0&&<span style={{color:T.yellow,fontWeight:700,background:`${T.yellow}15`,padding:"1px 7px",borderRadius:3}}>{symPositions.length} pos activa(s)</span>}
               {positions.length>symPositions.length&&<span style={{color:T.orange,fontSize:8,background:`${T.orange}15`,padding:"1px 7px",borderRadius:3}}>{positions.length-symPositions.length} en otros pares</span>}
             </div>
