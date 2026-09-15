@@ -41,3 +41,14 @@ export const ANALYSIS_INTERVAL_MS = 300000;
 // posPnL() already folds direction in, so this just compares dollar PnL.
 export const TRAIL_BREAKEVEN_AT = 0.5;  // 50% of TP reached → stop moves to breakeven
 export const TRAIL_GIVEBACK     = 0.4;  // once trailing, allow giving back 40% of the peak
+
+// Simulado-only: several MIXTO pairs sit at an 80-90% walk-forward-validated
+// confidence bar, which is correctly strict for real money but means paper
+// trading rarely opens/rotates — too few completed round-trips for the
+// pattern-learning system to have much to learn from. Knock this many points
+// off the bar ONLY for a candidate that will land in Simulado (crypto/
+// commodities always, or forex once the real-money cap/duplicate checks rule
+// out Deriv Real) — a real-money candidate always keeps the full validated
+// bar untouched. Floored so it never gets so low it's just trading noise.
+export const SIM_CONFIDENCE_DISCOUNT = 15;
+export const SIM_CONFIDENCE_FLOOR    = 45;

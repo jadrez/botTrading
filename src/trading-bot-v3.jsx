@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createChart, LineStyle, CrosshairMode } from "lightweight-charts";
 import { T, STYLES } from "./theme.js";
 import { SYMBOL_STRATEGY, scaledTpSl } from "./lib/symbolStrategy.js";
-import { MAX_POSITIONS, MAX_TOTAL_POSITIONS, MAX_REAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK } from "./lib/constants.js";
+import { MAX_POSITIONS, MAX_TOTAL_POSITIONS, MAX_REAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK, SIM_CONFIDENCE_DISCOUNT, SIM_CONFIDENCE_FLOOR } from "./lib/constants.js";
 import Sparkline from "./components/Sparkline.jsx";
 import TierBadge from "./components/TierBadge.jsx";
 import TechnicalPanel from "./components/TechnicalPanel.jsx";
@@ -2485,7 +2485,15 @@ export default function TradingBot(){
     // auto-open outright (see SYMBOL_STRATEGY definition near ASSETS).
     const stratCfg=SYMBOL_STRATEGY[symbolRef.current];
     const symbolAutoDisabled=stratCfg?.tier==="SIN-EDGE";
-    if(stratCfg?.minConf) minConf=Math.max(minConf,stratCfg.minConf);
+    // Real-money candidates (Deriv Real + forex) keep the full validated bar;
+    // everything else — crypto/commodities, or Simulado mode — is definitely
+    // landing in paper trading, so it gets the Simulado discount for faster
+    // learning cycles (see SIM_CONFIDENCE_DISCOUNT).
+    const couldBeReal=derivEnabledRef.current && ASSETS[symbolRef.current]?.type==="forex";
+    if(stratCfg?.minConf!=null){
+      const tierMinConf=couldBeReal?stratCfg.minConf:Math.max(SIM_CONFIDENCE_FLOOR,stratCfg.minConf-SIM_CONFIDENCE_DISCOUNT);
+      minConf=Math.max(minConf,tierMinConf);
+    }
 
     setDynamicMinConf(minConf);
     addLog(`🔍 Analizando ${symbolRef.current}: ${reason} | umbral dinámico: ${minConf}%${symbolAutoDisabled?" | ⛔ auto-trading desactivado (sin edge validado)":""}`,"info");
@@ -2759,8 +2767,15 @@ export default function TradingBot(){
 
       // Same two learning feedback loops as the active symbol: this symbol's
       // own recent record (not the global blend) and how its detected
-      // patterns have historically performed.
-      const baseMinConf=consLossesRef.current>=2?Math.min(90,strat.minConf+10):strat.minConf;
+      // patterns have historically performed. Computed BEFORE the confidence
+      // check (moved up from below) so we already know whether this
+      // candidate would actually land on Deriv Real or in Simulado — a real
+      // candidate keeps the full validated bar, everything else gets the
+      // Simulado discount for faster learning cycles.
+      const dupSymbol=findCorrelatedRealDuplicate(sym,data.signal,openRealPositions);
+      const willBeReal=derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS && !dupSymbol;
+      const tierMinConf=willBeReal?strat.minConf:Math.max(SIM_CONFIDENCE_FLOOR,strat.minConf-SIM_CONFIDENCE_DISCOUNT);
+      const baseMinConf=consLossesRef.current>=2?Math.min(90,tierMinConf+10):tierMinConf;
       const minConf=getSymbolMinConf(allTrades,sym,baseMinConf);
       const {delta,note}=getPatternAdjustment(data.patterns,byPatternStats);
       const adjConfidence=Math.max(0,Math.min(99,data.confidence+delta));
@@ -2774,8 +2789,7 @@ export default function TradingBot(){
       // concurrent real positions, and never a real duplicate of an
       // already-open real bet on a correlated symbol.
       let derivContractId=null;
-      const dupSymbol=findCorrelatedRealDuplicate(sym,data.signal,openRealPositions);
-      if(derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS && !dupSymbol){
+      if(willBeReal){
         const dResult=await openDerivOrder(sym,data.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
         if(dResult.ok){
           derivContractId=dResult.contractId;
