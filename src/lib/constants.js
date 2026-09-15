@@ -7,6 +7,14 @@
 export const MAX_POSITIONS        = 10;   // per-symbol cap
 export const MAX_TOTAL_POSITIONS  = 10;   // global cap across every symbol combined —
                                             // matters once AUTO can open on more than the active symbol
+
+// Real-money (Deriv) position cap — separate from MAX_TOTAL_POSITIONS above,
+// which also counts simulated ones. Started at 1 (extremely conservative,
+// for the first real connection); raised to 10 once real execution was
+// verified working end to end (open, close, portfolio sync, Deriv-side
+// closure reconciliation all confirmed live). At $5 stake, worst case is
+// 10 × $5 = $50 (Deriv's stop-out caps any single loss at its own stake).
+export const MAX_REAL_POSITIONS   = 10;
 // v4: raised $3 -> $5. At $5 stake × 100x (notional $500), the validated
 // price-move % (0.6-0.9%) scales to a ~$3-4.50 TP — lands the per-trade
 // dollar target where it was asked to land ($3+ before the trailing

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createChart, LineStyle, CrosshairMode } from "lightweight-charts";
 import { T, STYLES } from "./theme.js";
 import { SYMBOL_STRATEGY, scaledTpSl } from "./lib/symbolStrategy.js";
-import { MAX_POSITIONS, MAX_TOTAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK } from "./lib/constants.js";
+import { MAX_POSITIONS, MAX_TOTAL_POSITIONS, MAX_REAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK } from "./lib/constants.js";
 import Sparkline from "./components/Sparkline.jsx";
 import TierBadge from "./components/TierBadge.jsx";
 import TechnicalPanel from "./components/TechnicalPanel.jsx";
@@ -342,6 +342,24 @@ function getPatternAdjustment(patternNames, byPatternStats){
   if(avgWr>=65) return {delta:6, note:`patrón históricamente fuerte (${Math.round(avgWr)}% WR)`};
   if(avgWr<=35) return {delta:-10, note:`patrón históricamente débil (${Math.round(avgWr)}% WR)`};
   return {delta:0, note:null};
+}
+
+// Real money only: block opening a real position that's actually the SAME
+// underlying bet as one already open, dressed up as a "different" symbol.
+// EUR/USD and USD/CHF are correlated at -1 (move opposite) — a BUY EUR/USD
+// plus a BUY USD/CHF aren't diversification, they're both "USD weakens"
+// twice over. Returns the symbol it would duplicate, or null if the new
+// position adds independent exposure. ASSETS[x].correlations isn't always
+// defined symmetrically, so check both directions.
+function findCorrelatedRealDuplicate(sym, type, openRealPositions){
+  for(const openPos of openRealPositions){
+    if(openPos.symbol===sym) continue; // same symbol — MAX_POSITIONS already caps this
+    const corrDir=ASSETS[sym]?.correlations?.[openPos.symbol] ?? ASSETS[openPos.symbol]?.correlations?.[sym];
+    if(!corrDir) continue; // no known correlation between these two
+    const alignedType=corrDir>0?openPos.type:(openPos.type==="BUY"?"SELL":"BUY");
+    if(type===alignedType) return openPos.symbol;
+  }
+  return null;
 }
 
 // Mirrors a position into open_positions (see api/positions.js) so it isn't
@@ -2581,18 +2599,25 @@ export default function TradingBot(){
           const activeAssetCheck=ASSETS[activeSym];
           const ps=positionSizeRef.current;
 
-          // ── Deriv order for forex pairs — conservative mode while real money is
-          // new here: only the ACTIVE symbol (never correlated pairs), only when
-          // its walk-forward tier is ROBUSTO (not MIXTO), and only when there's no
-          // other real position open right now (one real trade at a time).
+          // ── Deriv order for forex pairs — the CORRELATED-pairs loop below
+          // never sends its own positions to Deriv (only the active symbol
+          // ever can), never SIN-EDGE tier, capped at MAX_REAL_POSITIONS real
+          // positions open at once, and never a real duplicate of an
+          // already-open real bet dressed up as a different symbol (e.g. BUY
+          // EUR/USD while already long USD/CHF is the same "USD weakens"
+          // bet twice, since they move at -1 correlation).
           let derivContractId=null;
           const activeTier=SYMBOL_STRATEGY[activeSym]?.tier;
-          const hasOpenRealPosition=posRef.current.some(p=>p.derivContractId);
+          const openRealPositions=posRef.current.filter(p=>p.derivContractId);
+          const realPositionsCount=openRealPositions.length;
+          const dupSymbol=findCorrelatedRealDuplicate(activeSym,result.signal,openRealPositions);
           if(derivEnabledRef.current && activeAssetCheck?.type==="forex"){
-            if(activeTier!=="ROBUSTO"){
-              addLog(`🔴 Deriv: ${activeSym} es tier ${activeTier} (no ROBUSTO) — posición registrada en simulación, no en Deriv`,"sell");
-            } else if(hasOpenRealPosition){
-              addLog(`🔴 Deriv: ya hay una posición real abierta — posición registrada en simulación (modo conservador: 1 a la vez)`,"sell");
+            if(activeTier==="SIN-EDGE"||!activeTier){
+              addLog(`🔴 Deriv: ${activeSym} es tier ${activeTier||"desconocido"} — posición registrada en simulación, no en Deriv`,"sell");
+            } else if(realPositionsCount>=MAX_REAL_POSITIONS){
+              addLog(`🔴 Deriv: ya hay ${realPositionsCount}/${MAX_REAL_POSITIONS} posiciones reales abiertas — posición registrada en simulación`,"sell");
+            } else if(dupSymbol){
+              addLog(`🔴 Deriv: ${result.signal} ${activeSym} es la misma apuesta que la posición real en ${dupSymbol} (correlacionados) — posición registrada en simulación`,"sell");
             } else {
               const dResult=await openDerivOrder(activeSym,result.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
               if(dResult.ok){
@@ -2690,19 +2715,21 @@ export default function TradingBot(){
      análisis completo con IA arriba) usando la señal técnica determinista
      de assetSignals — la misma clase de regla que valida el walk-forward,
      sin gastar una llamada a Groq por símbolo. Mayormente simulado (paper) —
-     la EXCEPCIÓN es cuando derivEnabled está activo y el símbolo en turno
-     es forex + tier ROBUSTO + no hay ya otra posición real abierta, mismo
-     gate conservador que el análisis del símbolo activo (ver runAnalysis).
-     Respeta el cupo por símbolo (MAX_POSITIONS) y el cupo global
-     (MAX_TOTAL_POSITIONS). */
+     la EXCEPCIÓN es cuando derivEnabled está activo y el símbolo en turno es
+     forex (ROBUSTO o MIXTO, nunca SIN-EDGE), hay cupo bajo MAX_REAL_POSITIONS,
+     y no sería la misma apuesta que otra posición real ya abierta en un
+     símbolo correlacionado — mismo gate que el análisis del símbolo activo
+     (ver runAnalysis). Respeta también el cupo por símbolo (MAX_POSITIONS) y
+     el cupo global (MAX_TOTAL_POSITIONS). */
   const runAutoScan=useCallback(async()=>{
     if(!autoRef.current) return;
     if(posRef.current.length>=MAX_TOTAL_POSITIONS) return;
     const allTrades=loadTrades();
     const byPatternStats=calcLearningStats(allTrades)?.byPattern||[];
-    // Tracked locally (not just posRef) so two qualifying symbols in the
-    // SAME scan pass can't both go real before posRef re-syncs on render.
-    let hasOpenRealPosition=posRef.current.some(p=>p.derivContractId);
+    // Tracked locally (not just posRef) so multiple qualifying symbols in the
+    // SAME scan pass can't overshoot MAX_REAL_POSITIONS, or both become the
+    // same correlated bet, before posRef re-syncs on render.
+    const openRealPositions=posRef.current.filter(p=>p.derivContractId).map(p=>({symbol:p.symbol,type:p.type}));
     for(const [sym,strat] of Object.entries(SYMBOL_STRATEGY)){
       if(strat.tier==="SIN-EDGE") continue;
       if(sym===symbolRef.current) continue; // ya lo cubre el análisis principal
@@ -2724,19 +2751,24 @@ export default function TradingBot(){
 
       const ps=positionSizeRef.current;
 
-      // Real-money gate — identical conservatism to the active symbol's own
-      // analysis path: only forex, only ROBUSTO tier, only one real
-      // position open at a time, regardless of which symbol qualifies first.
+      // Real-money gate — same rule as the active symbol's own analysis
+      // path: forex only (already true here, SIN-EDGE already skipped by
+      // the loop's own `continue` above), capped at MAX_REAL_POSITIONS
+      // concurrent real positions, and never a real duplicate of an
+      // already-open real bet on a correlated symbol.
       let derivContractId=null;
-      if(derivEnabledRef.current && ASSETS[sym]?.type==="forex" && strat.tier==="ROBUSTO" && !hasOpenRealPosition){
+      const dupSymbol=findCorrelatedRealDuplicate(sym,data.signal,openRealPositions);
+      if(derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS && !dupSymbol){
         const dResult=await openDerivOrder(sym,data.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
         if(dResult.ok){
           derivContractId=dResult.contractId;
-          hasOpenRealPosition=true;
+          openRealPositions.push({symbol:sym,type:data.signal});
           addLog(`🔴 Deriv orden REAL ${data.signal} abierta (auto multi-símbolo) | ContractID:${derivContractId} | ${sym} · Stake:$${ps} × ${multiplierRef.current}x`,"info");
         } else {
           addLog(`⚠️ Deriv: ${dResult.error} — ${sym} registrado en simulación`,"sell");
         }
+      } else if(derivEnabledRef.current && ASSETS[sym]?.type==="forex" && dupSymbol){
+        addLog(`🔴 Deriv: ${data.signal} ${sym} es la misma apuesta que la posición real en ${dupSymbol} (correlacionados) — registrado en simulación`,"sell");
       }
 
       const scaled=scaledTpSl(sym,ps,multiplierRef.current);
@@ -3035,7 +3067,7 @@ export default function TradingBot(){
                 </div>
               </div>
             </div>
-            <div style={{fontSize:9,color:"#ff8a9a",textAlign:"right"}}>⚠️ Modo conservador<br/>solo símbolos ROBUSTO · 1 posición real a la vez</div>
+            <div style={{fontSize:9,color:"#ff8a9a",textAlign:"right"}}>⚠️ Solo forex (ROBUSTO/MIXTO)<br/>máx {MAX_REAL_POSITIONS} reales · sin duplicar apuestas correlacionadas</div>
           </div>
         )}
 
