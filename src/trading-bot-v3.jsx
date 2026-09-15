@@ -58,9 +58,17 @@ const DERIV_SYMBOLS = {
   "EUR/USD":"frxEURUSD","GBP/USD":"frxGBPUSD","USD/JPY":"frxUSDJPY",
   "AUD/USD":"frxAUDUSD","NZD/USD":"frxNZDUSD","USD/CHF":"frxUSDCHF",
   "USD/CAD":"frxUSDCAD","EUR/GBP":"frxEURGBP",
-  // Commodities — Gold and Silver have valid frx symbols on Deriv; Oil uses Yahoo Finance polling
-  "XAU/USD":"frxXAUUSD","XAG/USD":"frxXAGUSD",
-  // XTI/USD intentionally omitted — XTIUSD is not available on the public Deriv WS; uses Yahoo Finance
+  // Gold/Silver/Oil are intentionally NOT here — verified live: Deriv's public WS
+  // accepts a one-off "frxXAUUSD" ticks_history query fine, but REJECTS it the
+  // moment subscribe:1 is added ({"error":{"code":"InvalidSymbol", ...}}) —
+  // live subscription for metals just isn't offered on this feed, historical
+  // replay is. That error also came back with msg_type:"ticks_history" (the
+  // original request's type), not msg_type:"error", so the app's own error
+  // handling never saw it and never fell back — silently stuck on the initial
+  // genCandles($2700-ish placeholder) price forever, visible to a real user as
+  // gold "trading" $1600+ below its real price. All three commodities use the
+  // Yahoo Finance path instead (real history + 8s polling), which was already
+  // built for exactly this and verified returning the correct live price.
 };
 
 /* ─── UTILS ─────────────────────────────────────────────────────────────── */
@@ -1925,6 +1933,39 @@ export default function TradingBot(){
           try{
             const msg=JSON.parse(evt.data);
 
+            // Deriv error responses keep the ORIGINAL request's msg_type
+            // (e.g. "ticks_history"), not "error" — the error itself only
+            // ever shows up in msg.error. Checking msg_type==="error" alone
+            // (as this used to) never catches that: verified live that
+            // subscribing to frxXAUUSD/frxXAGUSD gets rejected
+            // ({error:{code:"InvalidSymbol"}}) with msg_type:"ticks_history",
+            // so the code silently kept showing the initial placeholder price
+            // forever with no fallback and no visible sign anything failed.
+            if(msg.error){
+              console.warn("[Deriv WS forex]",msg.error?.message||msg.error);
+              if(cur.yahooTicker&&!iv){
+                iv=setInterval(async()=>{
+                  const np=await fetchCommodityRateCached(cur.yahooTicker,5000);
+                  if(!np||isNaN(np)) return;
+                  _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+                  setPrice(np); priceRef.current=np;
+                  setPriceVerified(true); setForexLive(true);
+                  setCandles(prev=>{
+                    if(!prev.length) return prev;
+                    const updated=[...prev];
+                    const lastIdx=updated.length-1;
+                    const last={...updated[lastIdx]};
+                    const nowSec=Math.floor(Date.now()/1000);
+                    last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
+                    if(nowSec-last.time>=granularity) updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
+                    else updated[lastIdx]=last;
+                    return updated;
+                  });
+                },8000);
+              }
+              return;
+            }
+
             if(msg.msg_type==="candles"){
               // Full history from Deriv — replace placeholder candles
               const newCandles=(msg.candles||[]).map(c=>({
@@ -1961,30 +2002,6 @@ export default function TradingBot(){
                 }
                 return updated;
               });
-
-            } else if(msg.msg_type==="error"){
-              console.warn("[Deriv WS forex]",msg.error?.message||msg.error);
-              // If this commodity has a Yahoo fallback and WS failed, start polling
-              if(cur.yahooTicker&&!iv){
-                iv=setInterval(async()=>{
-                  const np=await fetchCommodityRateCached(cur.yahooTicker,5000);
-                  if(!np||isNaN(np)) return;
-                  _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
-                  setPrice(np); priceRef.current=np;
-                  setPriceVerified(true); setForexLive(true);
-                  setCandles(prev=>{
-                    if(!prev.length) return prev;
-                    const updated=[...prev];
-                    const lastIdx=updated.length-1;
-                    const last={...updated[lastIdx]};
-                    const nowSec=Math.floor(Date.now()/1000);
-                    last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
-                    if(nowSec-last.time>=granularity) updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
-                    else updated[lastIdx]=last;
-                    return updated;
-                  });
-                },8000);
-              }
             }
           }catch{}
         };
