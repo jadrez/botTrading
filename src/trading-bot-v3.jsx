@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createChart, LineStyle, CrosshairMode } from "lightweight-charts";
 import { T, STYLES } from "./theme.js";
 import { SYMBOL_STRATEGY, scaledTpSl } from "./lib/symbolStrategy.js";
-import { MAX_POSITIONS, MAX_TOTAL_POSITIONS, MAX_REAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK, SIM_CONFIDENCE_DISCOUNT, SIM_CONFIDENCE_FLOOR } from "./lib/constants.js";
+import { MAX_POSITIONS, MAX_SIM_POSITIONS, MAX_REAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK, SIM_CONFIDENCE_DISCOUNT, SIM_CONFIDENCE_FLOOR } from "./lib/constants.js";
 import Sparkline from "./components/Sparkline.jsx";
 import TierBadge from "./components/TierBadge.jsx";
 import TechnicalPanel from "./components/TechnicalPanel.jsx";
@@ -2753,20 +2753,24 @@ export default function TradingBot(){
      y no sería la misma apuesta que otra posición real ya abierta en un
      símbolo correlacionado — mismo gate que el análisis del símbolo activo
      (ver runAnalysis). Respeta también el cupo por símbolo (MAX_POSITIONS) y
-     el cupo global (MAX_TOTAL_POSITIONS). */
+     los cupos GLOBALES INDEPENDIENTES de cada modo — MAX_SIM_POSITIONS y
+     MAX_REAL_POSITIONS ya no comparten un solo pool de 10: antes, Simulado
+     (más símbolos elegibles + umbral más bajo) llenaba ese pool compartido
+     casi de inmediato, dejando a Real sin cupo aunque calificara. */
   const runAutoScan=useCallback(async()=>{
     if(!autoRef.current) return;
-    if(posRef.current.length>=MAX_TOTAL_POSITIONS) return;
     const allTrades=loadTrades();
     const byPatternStats=calcLearningStats(allTrades)?.byPattern||[];
     // Tracked locally (not just posRef) so multiple qualifying symbols in the
-    // SAME scan pass can't overshoot MAX_REAL_POSITIONS, or both become the
-    // same correlated bet, before posRef re-syncs on render.
+    // SAME scan pass can't overshoot either pool, or both become the same
+    // correlated bet, before posRef re-syncs on render.
+    let simCount=posRef.current.filter(p=>!p.derivContractId).length;
     const openRealPositions=posRef.current.filter(p=>p.derivContractId).map(p=>({symbol:p.symbol,type:p.type}));
+    if(simCount>=MAX_SIM_POSITIONS && openRealPositions.length>=MAX_REAL_POSITIONS) return; // ambos pools llenos
     for(const [sym,strat] of Object.entries(SYMBOL_STRATEGY)){
       if(strat.tier==="SIN-EDGE") continue;
       if(sym===symbolRef.current) continue; // ya lo cubre el análisis principal
-      if(posRef.current.length>=MAX_TOTAL_POSITIONS) break;
+      if(simCount>=MAX_SIM_POSITIONS && openRealPositions.length>=MAX_REAL_POSITIONS) break;
       if(!isMarketOpen(ASSETS[sym]?.type)) continue; // forex/materias cerrados el fin de semana
       const symSlots=MAX_POSITIONS-posRef.current.filter(p=>p.symbol===sym).length;
       if(symSlots<=0) continue;
@@ -2782,6 +2786,7 @@ export default function TradingBot(){
       // Simulado discount for faster learning cycles.
       const dupSymbol=findCorrelatedRealDuplicate(sym,data.signal,openRealPositions);
       const willBeReal=derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS && !dupSymbol;
+      if(!willBeReal && simCount>=MAX_SIM_POSITIONS) continue; // aterrizaría en Simulado pero ese pool ya está lleno
       const tierMinConf=willBeReal?strat.minConf:Math.max(SIM_CONFIDENCE_FLOOR,strat.minConf-SIM_CONFIDENCE_DISCOUNT);
       const baseMinConf=consLossesRef.current>=2?Math.min(90,tierMinConf+10):tierMinConf;
       const minConf=getSymbolMinConf(allTrades,sym,baseMinConf);
@@ -2810,6 +2815,8 @@ export default function TradingBot(){
         addLog(`🔴 Deriv: ${data.signal} ${sym} es la misma apuesta que la posición real en ${dupSymbol} (correlacionados) — registrado en simulación`,"sell");
       }
 
+      if(!derivContractId) simCount++; // aterrizó en Simulado — incluye el fallback cuando la orden real falló
+
       const scaled=scaledTpSl(sym,ps,multiplierRef.current);
       const pos={
         type:data.signal, entry:data.price, id:Date.now()+Math.random(),
@@ -2829,7 +2836,7 @@ export default function TradingBot(){
     clearInterval(countRef.current);
     if(!autoMode){setAutoPhase("idle");setNextAnalysis(null);return;}
 
-    addLog(`🤖 AUTO ACTIVADO — TP:+${fUSD(tpTargetRef.current)} | SL:-${fUSD(slTargetRef.current)} | Máx ${MAX_POSITIONS} pos/símbolo, ${MAX_TOTAL_POSITIONS} en total | escaneando todos los símbolos validados`,"info");
+    addLog(`🤖 AUTO ACTIVADO — TP:+${fUSD(tpTargetRef.current)} | SL:-${fUSD(slTargetRef.current)} | Máx ${MAX_POSITIONS} pos/símbolo, ${MAX_SIM_POSITIONS} simuladas + ${MAX_REAL_POSITIONS} reales | escaneando todos los símbolos validados`,"info");
     runAnalysis("Inicio modo automático");
     runAutoScan();
 
@@ -2855,7 +2862,11 @@ export default function TradingBot(){
   /* ── React to TP hit → re-analyze ───────────────────────────────────── */
   useEffect(()=>{
     if(!pendingAnalysisRef.current||analyzing)return;
-    if(autoRef.current&&posRef.current.length<MAX_TOTAL_POSITIONS){
+    // Soft optimization gate only — runAnalysis itself still checks
+    // per-symbol symSlots and, for real orders, MAX_REAL_POSITIONS
+    // separately, so this just avoids a pointless re-analysis call once
+    // Simulado's own pool is full (real orders aren't gated by this).
+    if(autoRef.current&&posRef.current.filter(p=>!p.derivContractId).length<MAX_SIM_POSITIONS){
       setTimeout(()=>{
         if(autoRef.current) runAnalysis("Re-análisis post TP — evaluando nueva entrada");
       },1500);

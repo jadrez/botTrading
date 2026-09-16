@@ -4,12 +4,19 @@
 // worst-case total loss across all 10 (Deriv multipliers cap loss at stake)
 // is $30 — 15% of a $200 starting balance, a sane ceiling for more parallel
 // opportunities without materially changing per-trade risk.
-export const MAX_POSITIONS        = 10;   // per-symbol cap
-export const MAX_TOTAL_POSITIONS  = 10;   // global cap across every symbol combined —
-                                            // matters once AUTO can open on more than the active symbol
+export const MAX_POSITIONS        = 10;   // per-symbol cap (counts both modes together)
+// Simulado's own global cap — kept INDEPENDENT of MAX_REAL_POSITIONS below.
+// Before this split, both modes shared one pool of 10: Simulado (far more
+// eligible symbols — crypto/commodities/forex, and a lower confidence bar)
+// filled it almost immediately, leaving real trading starved of a slot even
+// when a qualifying forex signal appeared. Now each mode gets its own 10, so
+// up to 20 total can be open (10 Simulado + 10 Real) — Simulado still gets
+// to learn freely without crowding out Real.
+export const MAX_SIM_POSITIONS    = 10;
 
-// Real-money (Deriv) position cap — separate from MAX_TOTAL_POSITIONS above,
-// which also counts simulated ones. Started at 1 (extremely conservative,
+// Real-money (Deriv) position cap — its own independent pool from
+// MAX_SIM_POSITIONS above (see that constant's comment). Started at 1
+// (extremely conservative,
 // for the first real connection); raised to 10 once real execution was
 // verified working end to end (open, close, portfolio sync, Deriv-side
 // closure reconciliation all confirmed live). At $5 stake, worst case is
