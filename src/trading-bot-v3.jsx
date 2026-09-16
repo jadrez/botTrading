@@ -395,6 +395,7 @@ function savePositionOpen(pos, confidence){
       clientId:pos.id, symbol:pos.symbol, type:pos.type, entryPrice:pos.entry,
       allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, confidence,
       tp:pos.tp, sl:pos.sl, derivContractId:pos.derivContractId, commission:pos.commission,
+      openedBy:pos.openedBy||"BOT",
     }),
   }).catch(()=>{});
 }
@@ -1688,7 +1689,7 @@ export default function TradingBot(){
             body:JSON.stringify({
               symbol:pos.symbol, type:pos.type, entryPrice:pos.entry, exitPrice:detail.exitSpot??pos.entry,
               pnl, closeReason:reason, derivContractId:pos.derivContractId, commission:pos.commission??detail.commission,
-              allocatedSize:pos.allocatedSize, multiplier:pos.multiplier,
+              allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, openedBy:pos.openedBy||"BOT",
               openedAt:pos.openTime?new Date(pos.openTime).toISOString():undefined,
               closedAt:detail.closeTime?new Date(detail.closeTime).toISOString():undefined,
             }),
@@ -1698,7 +1699,7 @@ export default function TradingBot(){
         setTrades(t=>[...reconciled.map(({pos,detail,pnl,reason})=>({
           symbol:pos.symbol, type:pos.type, entry:pos.entry, exit:detail.exitSpot??pos.entry, pnl,
           reason, derivContractId:pos.derivContractId, commission:pos.commission??detail.commission,
-          allocatedSize:pos.allocatedSize, multiplier:pos.multiplier,
+          allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, openedBy:pos.openedBy||"BOT",
           time:now(), tradeTime:Math.floor(Date.now()/1000),
           openTime:pos.openTime, closeTime:detail.closeTime||Date.now(),
           activePatterns:[],
@@ -1711,7 +1712,7 @@ export default function TradingBot(){
           id:`deriv-${p.contractId}`, symbol:p.symbol, type:p.type, entry:p.entry,
           allocatedSize:p.buyPrice, multiplier:p.multiplier, peakPnl:0,
           tp:p.tp, sl:p.sl, derivContractId:p.contractId, commission:p.commission,
-          derivProfit:p.profit, derivSpot:p.currentSpot,
+          derivProfit:p.profit, derivSpot:p.currentSpot, openedBy:"MANUAL",
           openTime:p.openTime||Date.now(),
         }));
         newOnes.forEach(p=>savePositionOpen(p,null));
@@ -2452,6 +2453,7 @@ export default function TradingBot(){
           patterns:closedTrade.activePatterns, closeReason:reason,
           derivContractId:pos.derivContractId, commission,
           allocatedSize:pos.allocatedSize||positionSizeRef.current, multiplier:pos.multiplier||multiplierRef.current,
+          openedBy:pos.openedBy||"BOT",
           openedAt:closedTrade.openTime?new Date(closedTrade.openTime).toISOString():undefined,
           closedAt:new Date(closeTimeMs).toISOString(),
         }),
@@ -3978,11 +3980,14 @@ export default function TradingBot(){
                               {pos.commission!=null?`com. $${pos.commission.toFixed(2)}`:"sin comisión"}
                             </div>
                           </div>
-                          <span style={{fontSize:8,fontWeight:700,color:T.bg,
-                            background:pos.derivContractId?T.red:T.accent,padding:"2px 7px",borderRadius:4,
-                            textAlign:"center",width:"fit-content"}}>
-                            {pos.derivContractId?"DERIV":"SIM"}
-                          </span>
+                          <div>
+                            <span style={{fontSize:8,fontWeight:700,color:T.bg,
+                              background:pos.derivContractId?T.red:T.accent,padding:"2px 7px",borderRadius:4,
+                              textAlign:"center",width:"fit-content"}}>
+                              {pos.derivContractId?"DERIV":"SIM"}
+                            </span>
+                            {pos.openedBy==="MANUAL"&&<div style={{fontSize:7,color:T.orange,marginTop:2}}>✋ manual</div>}
+                          </div>
                           <span style={{fontSize:9,fontWeight:700,color:isProtected?T.green:T.muted,
                             background:isProtected?`${T.green}18`:"transparent",padding:isProtected?"3px 7px":0,borderRadius:4}}>
                             {isProtected?"🔒 protegida":`hace ${elapsedMin}m`}
@@ -4034,10 +4039,13 @@ export default function TradingBot(){
                                 {t.commission!=null?`com. $${t.commission.toFixed(2)}`:"sin comisión"}
                               </div>
                             </div>
-                            <span style={{fontSize:8,fontWeight:700,color:T.bg,
-                              background:t.derivContractId?T.red:T.accent,padding:"2px 7px",borderRadius:4,textAlign:"center",width:"fit-content"}}>
-                              {t.derivContractId?"DERIV":"SIM"}
-                            </span>
+                            <div>
+                              <span style={{fontSize:8,fontWeight:700,color:T.bg,
+                                background:t.derivContractId?T.red:T.accent,padding:"2px 7px",borderRadius:4,textAlign:"center",width:"fit-content"}}>
+                                {t.derivContractId?"DERIV":"SIM"}
+                              </span>
+                              {t.openedBy==="MANUAL"&&<div style={{fontSize:7,color:T.orange,marginTop:1}}>✋ manual</div>}
+                            </div>
                             <span style={{fontSize:9,color:T.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                               {(t.activePatterns||[]).join(", ")||"—"}
                             </span>

@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS trades (
   allocated_size   NUMERIC,                  -- stake used for this trade
   multiplier       INT,                      -- leverage multiplier used — allocated_size×multiplier
                                               -- is the "volumen" (notional exposure) shown in the UI
+  opened_by        TEXT DEFAULT 'BOT',        -- 'BOT' (opened by the bot's own analysis) |
+                                              -- 'MANUAL' (a real Deriv contract the portfolio-sync
+                                              -- effect discovered that the bot never opened itself —
+                                              -- someone opened it directly in DTrader). Independent
+                                              -- of deriv_contract_id (sim vs real) — a manual DTrader
+                                              -- trade is still real money, just not the bot's own call.
   opened_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed_at        TIMESTAMPTZ
 );
@@ -56,6 +62,7 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS deriv_contract_id TEXT;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS commission NUMERIC;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS allocated_size NUMERIC;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS multiplier INT;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS opened_by TEXT DEFAULT 'BOT';
 
 -- Rolling walk-forward folds: params are re-picked on a training window and
 -- then judged ONLY on the immediately-following, never-seen block. This is
@@ -96,12 +103,14 @@ CREATE TABLE IF NOT EXISTS open_positions (
   sl               NUMERIC,                -- NOT the active symbol's current tpTarget/slTarget
   deriv_contract_id TEXT,                  -- set only when actually executed on Deriv (real money)
   commission       NUMERIC,                -- real $ commission Deriv charged, from the sync
+  opened_by        TEXT DEFAULT 'BOT',       -- 'BOT' | 'MANUAL' — see the same column on `trades`
   opened_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS tp NUMERIC;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS sl NUMERIC;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS deriv_contract_id TEXT;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS commission NUMERIC;
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS opened_by TEXT DEFAULT 'BOT';
 -- The Deriv-portfolio-sync effect (trading-bot-v3.jsx) decides a contract is
 -- "new" by checking React's in-memory positions state — if that state was
 -- momentarily incomplete (e.g. the tab had just reloaded and the DB-restore
