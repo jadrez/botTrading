@@ -1392,6 +1392,14 @@ export default function TradingBot(){
   const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp_v3")||String(initTp)));
   const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl_v3")||String(initSl)));
   const [derivEnabled,setDerivEnabled]    = useState(()=>localStorage.getItem("derivEnabled")==="true");
+  // Deliberately separate from derivEnabled: derivEnabled ARMS/DISARMS real
+  // money (it's the trading gate — see runAnalysis/runAutoScan), so it must
+  // stay whatever the user last chose even while they browse. Before this,
+  // Operaciones Trading reused derivEnabled to decide which table to show,
+  // which meant just clicking over to look at the Simulado table silently
+  // disarmed Deriv Real (and vice versa) — the likely reason real trading
+  // went quiet after a single position. This is purely a view filter.
+  const [tradingViewFilter,setTradingViewFilter] = useState(()=>localStorage.getItem("derivEnabled")==="true");
   const [derivBalance,setDerivBalance]    = useState(null);
   const [derivLoginId,setDerivLoginId]    = useState(null);
   const [derivConnectErr,setDerivConnectErr]= useState(null);
@@ -3415,11 +3423,10 @@ export default function TradingBot(){
 
         {/* ── NAVIGATION ── */}
         {(()=>{
-          // Tab badge counts only the ACTIVE mode's positions — matches the
-          // filtered view inside the tab itself (see viewPositions above);
-          // showing the total across both modes here was confusing once the
-          // inner table stopped doing that.
-          const modePositions=positions.filter(p=>derivEnabled?!!p.derivContractId:!p.derivContractId);
+          // Tab badge counts whichever mode Operaciones Trading is currently
+          // VIEWING (tradingViewFilter) — independent of derivEnabled, which
+          // only arms/disarms real money and must not change from browsing.
+          const modePositions=positions.filter(p=>tradingViewFilter?!!p.derivContractId:!p.derivContractId);
           return(
         <div style={{display:"flex",gap:0,marginBottom:12,borderBottom:`1px solid ${T.border}`,paddingBottom:0}}>
           {[
@@ -3718,19 +3725,43 @@ export default function TradingBot(){
 
         {/* ══════════ VISTA: OPERACIONES TRADING — abiertas en vivo + histórico ══════════ */}
         {activeView==="trading"&&(()=>{
-          // Scope this whole view to the active mode — Simulado shows only
-          // paper trades, Deriv Real shows only trades that actually hit
-          // Deriv (derivContractId present). Switching modes shouldn't leave
-          // the other mode's activity visible here; the ORIGEN badge still
-          // exists for when both ever mix (e.g. right after switching mode
-          // mid-session with older positions still open).
-          const viewPositions=positions.filter(p=>derivEnabled?!!p.derivContractId:!p.derivContractId);
-          const viewTrades=trades.filter(t=>derivEnabled?!!t.derivContractId:!t.derivContractId);
+          // Scope this whole view to tradingViewFilter — a VIEW-only choice,
+          // independent of derivEnabled (which arms/disarms real money).
+          // Simulado shows only paper trades, Deriv Real shows only trades
+          // that actually hit Deriv (derivContractId present); the ORIGEN
+          // badge still exists for when both ever mix. See the toggle right
+          // below — switching it never touches derivEnabled.
+          const viewPositions=positions.filter(p=>tradingViewFilter?!!p.derivContractId:!p.derivContractId);
+          const viewTrades=trades.filter(t=>tradingViewFilter?!!t.derivContractId:!t.derivContractId);
           const closedWins=viewTrades.filter(t=>t.pnl>0).length;
           const closedLosses=viewTrades.filter(t=>t.pnl<=0).length;
           const totalClosedPnl=viewTrades.reduce((s,t)=>s+(t.pnl||0),0);
           return(
             <div style={{animation:"fadeUp .3s ease"}}>
+
+              {/* Viendo: — puramente qué tabla se muestra, NUNCA arma/desarma
+                  dinero real (eso es el selector SIMULADO/DERIV REAL de arriba,
+                  derivEnabled). Antes esta vista reusaba derivEnabled también
+                  como filtro, así que solo entrar a mirar el modo contrario
+                  desarmaba el trading real sin querer. */}
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                <span style={{fontSize:9,color:T.muted,letterSpacing:1}}>VIENDO:</span>
+                <button onClick={()=>setTradingViewFilter(false)}
+                  style={{background:!tradingViewFilter?`${T.accent}18`:"transparent",
+                    border:`1px solid ${!tradingViewFilter?T.accent:T.border}`,borderRadius:20,
+                    padding:"4px 14px",cursor:"pointer",fontSize:10,fontWeight:700,
+                    color:!tradingViewFilter?T.accent:T.muted}}>🧪 Simulado</button>
+                <button onClick={()=>setTradingViewFilter(true)}
+                  style={{background:tradingViewFilter?`${T.red}18`:"transparent",
+                    border:`1px solid ${tradingViewFilter?T.red:T.border}`,borderRadius:20,
+                    padding:"4px 14px",cursor:"pointer",fontSize:10,fontWeight:700,
+                    color:tradingViewFilter?T.red:T.muted}}>🔴 Deriv Real</button>
+                {tradingViewFilter!==derivEnabled&&(
+                  <span style={{fontSize:9,color:T.orange}}>
+                    ⚠ estás viendo {tradingViewFilter?"Deriv Real":"Simulado"}, pero el trading en vivo está armado en {derivEnabled?"Deriv Real":"Simulado"}
+                  </span>
+                )}
+              </div>
 
               {/* Resumen */}
               <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:16}}>
@@ -3761,7 +3792,7 @@ export default function TradingBot(){
                 <div style={{fontSize:14,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:10}}>POSICIONES ABIERTAS EN VIVO</div>
                 {viewPositions.length===0?(
                   <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"20px",textAlign:"center",fontSize:11,color:T.muted}}>
-                    {derivEnabled?"Sin posiciones reales abiertas en Deriv ahora mismo.":"Sin posiciones abiertas ahora mismo."}
+                    {tradingViewFilter?"Sin posiciones reales abiertas en Deriv ahora mismo.":"Sin posiciones abiertas ahora mismo."}
                   </div>
                 ):(
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -3846,7 +3877,7 @@ export default function TradingBot(){
                 <div style={{fontSize:14,fontWeight:700,color:T.text,letterSpacing:1,marginBottom:10}}>HISTÓRICO — GANANCIAS Y PÉRDIDAS</div>
                 {viewTrades.length===0?(
                   <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"20px",textAlign:"center",fontSize:11,color:T.muted}}>
-                    {derivEnabled?"Sin operaciones reales cerradas en Deriv todavía.":"Sin operaciones cerradas todavía."}
+                    {tradingViewFilter?"Sin operaciones reales cerradas en Deriv todavía.":"Sin operaciones cerradas todavía."}
                   </div>
                 ):(
                   <>
