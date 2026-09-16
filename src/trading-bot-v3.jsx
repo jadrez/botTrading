@@ -2318,23 +2318,58 @@ export default function TradingBot(){
   },[symbol]);
 
   /* ── Close position ──────────────────────────────────────────────────── */
-  const closePosition=useCallback((posId,currentPrice,reason)=>{
-    setPositions(prev=>{
-      const pos=prev.find(p=>p.id===posId);
-      if(!pos)return prev;
+  // Tracks positions currently mid-close so the TP/SL watchers (which re-run
+  // on every price tick) can't fire a SECOND Deriv sell for the same
+  // contract while the first is still in flight — the async real-money path
+  // below no longer removes the position from state synchronously, widening
+  // the window where a watcher could otherwise re-trigger it.
+  const closingIdsRef=useRef(new Set());
+  const closePosition=useCallback(async(posId,currentPrice,reason)=>{
+    if(closingIdsRef.current.has(posId)) return;
+    closingIdsRef.current.add(posId);
+    try{
+      const pos=posRef.current.find(p=>p.id===posId);
+      if(!pos) return;
+
+      let exitPrice=currentPrice;
+      let pnl=posPnL(pos,currentPrice,pos.allocatedSize||positionSizeRef.current);
+      let commission=pos.commission;
+      let closeTimeMs=Date.now();
+
+      // Real money: the close must actually succeed on Deriv BEFORE we touch
+      // any local state or history. Previously this fired the Deriv sell
+      // without awaiting it and recorded a close using OUR OWN price
+      // regardless of whether Deriv's side actually went through — if the
+      // sell failed for any reason, the position stayed open on Deriv while
+      // the app fabricated a closed trade with a PnL nobody ever realized.
       if(derivEnabledRef.current && pos.derivContractId){
-        closeDerivOrder(pos.derivContractId)
-          .then(r=>{ if(!r.ok) console.warn("Deriv close error:",r.error); });
+        const closeResult=await closeDerivOrder(pos.derivContractId);
+        if(!closeResult.ok){
+          addLog(`⚠️ Deriv rechazó el cierre de ${pos.symbol} (${closeResult.error}) — la posición SIGUE ABIERTA, no se registró ningún cierre`,"sell");
+          return;
+        }
+        // Pull Deriv's own authoritative settlement (exit_spot/profit/commission)
+        // instead of trusting our own price feed's snapshot at click-time.
+        const detail=await getDerivContract(pos.derivContractId);
+        if(detail&&detail.isSold){
+          exitPrice=detail.exitSpot??currentPrice;
+          pnl=detail.profit??pnl;
+          commission=detail.commission??commission;
+          closeTimeMs=detail.closeTime??closeTimeMs;
+        } else {
+          addLog(`ℹ️ Deriv confirmó el cierre de ${pos.symbol} pero aún no hay detalle de liquidación — usando precio local como referencia temporal`,"info");
+        }
       }
+
       deletePositionOpen(pos.id);
-      const pnl=posPnL(pos,currentPrice,pos.allocatedSize||positionSizeRef.current);
+      setPositions(prev=>prev.filter(p=>p.id!==posId));
       const posSym=pos.symbol||symbolRef.current;
       const prec=ASSETS[posSym]?.precision||ASSETS[symbolRef.current].precision;
       const emoji=reason==="TP+"?"🚀":reason==="TP"?"✅":reason==="SL"?"🛑":reason==="TRAIL"?"🔒":"⬜";
-      addLog(`${emoji} ${reason} ${pos.type} ${posSym} @ ${fP(currentPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
+      addLog(`${emoji} ${reason} ${pos.type} ${posSym} @ ${fP(exitPrice,prec)} → ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
       setBalance(b=>{const nb=b+pnl;balanceRef.current=nb;return nb;});
-      const closedTrade={...pos,exit:currentPrice,pnl,reason,time:now(),tradeTime:Math.floor(Date.now()/1000),
-        closeTime:Date.now(), symbol:posSym, activePatterns:patternsRef.current.map(p=>p.name)};
+      const closedTrade={...pos,exit:exitPrice,pnl,reason,time:now(),tradeTime:Math.floor(closeTimeMs/1000),
+        closeTime:closeTimeMs, symbol:posSym, activePatterns:patternsRef.current.map(p=>p.name), commission};
       setTrades(t=>[closedTrade,...t.slice(0,49)]);
       saveTradeLearning(closedTrade);
       setLearningStats(calcLearningStats(loadTrades()));
@@ -2344,11 +2379,12 @@ export default function TradingBot(){
       fetch("/api/trades",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
           symbol:closedTrade.symbol, type:closedTrade.type,
-          entryPrice:closedTrade.entry, exitPrice:currentPrice, pnl,
+          entryPrice:closedTrade.entry, exitPrice, pnl,
           patterns:closedTrade.activePatterns, closeReason:reason,
-          derivContractId:pos.derivContractId, commission:pos.commission,
+          derivContractId:pos.derivContractId, commission,
           allocatedSize:pos.allocatedSize||positionSizeRef.current, multiplier:pos.multiplier||multiplierRef.current,
           openedAt:closedTrade.openTime?new Date(closedTrade.openTime).toISOString():undefined,
+          closedAt:new Date(closeTimeMs).toISOString(),
         }),
       }).catch(()=>{});
       saveBalance(balanceRef.current+pnl);
@@ -2371,8 +2407,9 @@ export default function TradingBot(){
         pendingAnalysisRef.current=true;
         setAutoPhase("tp_hit_analyzing");
       }
-      return prev.filter(p=>p.id!==posId);
-    });
+    } finally {
+      closingIdsRef.current.delete(posId);
+    }
   },[addLog]);
 
   /* ── TP / SL watcher — active symbol ────────────────────────────────── */
@@ -2380,7 +2417,7 @@ export default function TradingBot(){
     if(!priceVerified) return;
     const peakUpdates=[];
     posRef.current
-      .filter(p=>p.symbol===symbol)
+      .filter(p=>p.symbol===symbol&&!closingIdsRef.current.has(p.id))
       .forEach(pos=>{
         // Each position carries its own tp/sl (scaled for ITS symbol) since
         // multiple symbols can be open at once — falls back to the active
@@ -2410,7 +2447,7 @@ export default function TradingBot(){
   useEffect(()=>{
     const peakUpdates=[];
     posRef.current
-      .filter(p=>p.symbol&&p.symbol!==symbol)
+      .filter(p=>p.symbol&&p.symbol!==symbol&&!closingIdsRef.current.has(p.id))
       .forEach(pos=>{
         const cp=livePrices[pos.symbol];
         const cfg=ASSETS[pos.symbol];
