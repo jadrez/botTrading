@@ -1973,9 +1973,19 @@ export default function TradingBot(){
             // forever with no fallback and no visible sign anything failed.
             if(msg.error){
               console.warn("[Deriv WS forex]",msg.error?.message||msg.error);
-              if(cur.yahooTicker&&!iv){
+              // Fallback covers BOTH commodity (yahooTicker) and forex
+              // (forexFrom/forexTo) symbols — this branch used to only
+              // handle commodities, so when Deriv's live subscribe started
+              // rejecting forex too (verified live: frxEURUSD's bare
+              // ticks_history succeeds, subscribe:1 now gets InvalidSymbol —
+              // the same quirk gold/silver had, now hitting all 8 forex
+              // pairs), the price just froze on the initial placeholder with
+              // no fallback ever kicking in.
+              if(!iv){
                 iv=setInterval(async()=>{
-                  const np=await fetchCommodityRateCached(cur.yahooTicker,5000);
+                  const np=cur.type==="commodity"
+                    ? await fetchCommodityRateCached(cur.yahooTicker,5000)
+                    : await fetchForexRateCached(forexFrom,forexTo,5000);
                   if(!np||isNaN(np)) return;
                   _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
                   setPrice(np); priceRef.current=np;
