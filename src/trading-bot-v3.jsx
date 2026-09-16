@@ -1798,6 +1798,7 @@ export default function TradingBot(){
     const cur=ASSETS[symbol];
     const tfInterval=chartInterval||"1m";
     let iv;
+    let backfilled=false; // guards the one-shot real-candle backfill below
     let derivWs=null;
     let wsAlive=true;
 
@@ -1973,6 +1974,35 @@ export default function TradingBot(){
             // forever with no fallback and no visible sign anything failed.
             if(msg.error){
               console.warn("[Deriv WS forex]",msg.error?.message||msg.error);
+              // Backfill REAL candle history for the current timeframe —
+              // without this, only the live-price poller below ever ran,
+              // so the chart kept whatever (placeholder, or a previous
+              // timeframe's) candles it already had and switching interval
+              // (which tears down and reopens this connection with a new
+              // granularity) looked like the chart "lost" data: same bug
+              // class as the frozen-price one, just for history instead of
+              // the live edge. /api/forex already does this exact job for
+              // commodities (cur.yahooTicker) — same endpoint handles forex
+              // directly via from/to.
+              if(!backfilled){
+                backfilled=true;
+                (async()=>{
+                  try{
+                    const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
+                      body:JSON.stringify({from:forexFrom,to:forexTo,candles:true,limit:500,interval:tfInterval})});
+                    if(r.ok){
+                      const d=await r.json();
+                      if(d.candles?.length>5){
+                        const np=d.rate||d.candles.at(-1)?.c;
+                        if(np&&!isNaN(np)){
+                          _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+                          applyForexCandles(d.candles.map(c=>({...c,v:c.v||0})), np);
+                        }
+                      }
+                    }
+                  }catch{}
+                })();
+              }
               // Fallback covers BOTH commodity (yahooTicker) and forex
               // (forexFrom/forexTo) symbols — this branch used to only
               // handle commodities, so when Deriv's live subscribe started
