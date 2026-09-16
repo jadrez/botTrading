@@ -4018,7 +4018,7 @@ export default function TradingBot(){
               <span>
                 {isDisabled
                   ?`${symbol}: sin ventaja estadística validada (walk-forward 0/4 folds) — auto-trading desactivado. Solo análisis manual.`
-                  :`${symbol}: ventaja inconsistente entre folds de validación — auto-trading activo con umbral de confianza elevado (≥${SYMBOL_STRATEGY[symbol].minConf}%).`}
+                  :`${symbol}: ventaja inconsistente entre folds de validación — umbral elevado en Deriv Real (≥${SYMBOL_STRATEGY[symbol].minConf}%); en Simulado baja a ≥${Math.max(SIM_CONFIDENCE_FLOOR,SYMBOL_STRATEGY[symbol].minConf-SIM_CONFIDENCE_DISCOUNT)}%.`}
               </span>
             </div>
           );
