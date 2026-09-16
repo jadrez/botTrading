@@ -2967,10 +2967,10 @@ export default function TradingBot(){
   return(
     <>
       <style>{STYLES}</style>
-      <div style={{position:"relative",zIndex:1,minHeight:"100vh",padding:"18px 28px",zoom:1.3}}>
+      <div style={{position:"relative",zIndex:1,minHeight:"100vh",padding:"18px 28px"}}>
 
         {/* HEADER */}
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,paddingBottom:12,borderBottom:`1px solid ${T.border}`}}>
+        <div className="header-row" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:12,paddingBottom:12,borderBottom:`1px solid ${T.border}`}}>
           <div>
             <div style={{fontSize:9,color:T.muted,letterSpacing:4,textTransform:"uppercase",marginBottom:6}}>Robot Autónomo de Trading</div>
             {/* SELECTORS ROW — crypto dropdown + forex dropdown + scanner */}
@@ -3114,7 +3114,7 @@ export default function TradingBot(){
             trade regardless of source) — this only changes who executes the
             active symbol's forex trade (see the ROBUSTO + 1-at-a-time gate in
             runAnalysis) and what the stats row displays. */}
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+        <div className="g2" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
           <button onClick={()=>setDerivEnabled(false)}
             style={{background:!derivEnabled?`${T.accent}14`:"transparent",
               border:`2px solid ${!derivEnabled?T.accent:T.border}`,borderRadius:8,
@@ -3171,7 +3171,7 @@ export default function TradingBot(){
                 </span>
                 <span style={{fontSize:8,color:T.muted}}>haz clic para abrir · correlaciones respecto al par activo</span>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+              <div className="g4" style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
                 {FOREX_SYMS.map(sym=>{
                   const cfg=ASSETS[sym];
                   const isActive=sym===symbol;
@@ -3270,7 +3270,7 @@ export default function TradingBot(){
                 </span>
                 <span style={{fontSize:8,color:T.muted}}>haz clic para abrir gráfica</span>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+              <div className="g3" style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
                 {COMMODITY_SYMS.map(sym=>{
                   const cfg=ASSETS[sym];
                   const isActive=sym===symbol;
@@ -3356,7 +3356,7 @@ export default function TradingBot(){
             </div>
             {/* Crypto section */}
             <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>CRYPTO</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5,marginBottom:8}}>
+            <div className="g3" style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5,marginBottom:8}}>
               {Object.entries(ASSETS).filter(([,cfg])=>cfg.type==="crypto").map(([sym,cfg])=>{
                 const isActive=sym===symbol;
                 const sig=isActive?{
@@ -3386,7 +3386,7 @@ export default function TradingBot(){
             </div>
             {/* Forex section */}
             <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>FOREX</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:5,marginBottom:8}}>
+            <div className="g4" style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:5,marginBottom:8}}>
               {Object.entries(ASSETS).filter(([,cfg])=>cfg.type==="forex").map(([sym,cfg])=>{
                 const isActive=sym===symbol;
                 const sig=isActive?{
@@ -3433,7 +3433,7 @@ export default function TradingBot(){
             </div>
             {/* Commodities section */}
             <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>MATERIAS PRIMAS</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>
+            <div className="g3" style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>
               {Object.entries(ASSETS).filter(([,cfg])=>cfg.type==="commodity").map(([sym,cfg])=>{
                 const isActive=sym===symbol;
                 const w=isActive&&asset.type==="commodity"
@@ -3551,7 +3551,7 @@ export default function TradingBot(){
           const best=allData.filter(x=>x.d.signal!=="HOLD").sort((a,b)=>(b.d.confidence||0)-(a.d.confidence||0))[0];
 
           return(
-            <div style={{animation:"fadeUp .3s ease",display:"grid",gridTemplateColumns:"1fr 360px",gap:16,alignItems:"start"}}>
+            <div className="split-panel" style={{animation:"fadeUp .3s ease",display:"grid",gridTemplateColumns:"1fr 360px",gap:16,alignItems:"start"}}>
             <div style={{minWidth:0}}>
               {/* Header */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -3573,9 +3573,13 @@ export default function TradingBot(){
                 </div>
               </div>
 
-              {/* Table header */}
+              {/* Table header — wrapped (with all rows below, forex + materias
+                  primas) in one horizontal-scroll container: 8 fixed-width
+                  columns never fit a phone screen, so it scrolls sideways
+                  instead of squashing or overflowing the page. */}
+              <div className="table-scroll">
               <div style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
-                gap:6,padding:"5px 10px",marginBottom:4,borderBottom:`1px solid ${T.border}40`}}>
+                gap:6,padding:"5px 10px",marginBottom:4,borderBottom:`1px solid ${T.border}40`,minWidth:760}}>
                 {["PAR","TENDENCIA","SEÑAL","CONF.","ENTRADA","RANGO STOP · OBJETIVO","PIPS","R/R"].map(h=>(
                   <div key={h} style={{fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>{h}</div>
                 ))}
@@ -3585,7 +3589,7 @@ export default function TradingBot(){
               {uniquePairs.map(sym=>{
                 const d=buildActiveData(sym)||forexWatch[sym];
                 if(!d)return(
-                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
+                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",minWidth:760,
                     gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
                     border:`1px solid ${T.border}`,alignItems:"center"}}>
                     <span style={{fontSize:11,fontWeight:700,color:T.accent}}>{sym}</span>
@@ -3601,7 +3605,7 @@ export default function TradingBot(){
                 return(
                   <div key={sym} className="fade-up"
                     onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
-                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
+                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",minWidth:760,
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
                       border:`1px solid ${isHold?T.border:col+"35"}`,
@@ -3682,7 +3686,7 @@ export default function TradingBot(){
                 const cfg=ASSETS[sym];
                 const d=buildActiveData(sym)||commodityWatch[sym];
                 if(!d)return(
-                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
+                  <div key={sym} style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",minWidth:760,
                     gap:6,padding:"10px",marginBottom:3,borderRadius:6,background:T.card,
                     border:`1px solid ${T.border}`,alignItems:"center"}}>
                     <span style={{fontSize:11,fontWeight:700,color:T.yellow}}>⬡ {cfg.label}</span>
@@ -3698,7 +3702,7 @@ export default function TradingBot(){
                 return(
                   <div key={sym} className="fade-up"
                     onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
-                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",
+                    style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",minWidth:760,
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
                       border:`1px solid ${isHold?T.border:col+"35"}`,
@@ -3734,6 +3738,7 @@ export default function TradingBot(){
                   </div>
                 );
               })}
+              </div>{/* end table-scroll */}
 
               <div style={{marginTop:12,padding:"8px 12px",background:T.card,borderRadius:6,
                 border:`1px solid ${T.border}`,fontSize:9,color:T.muted,lineHeight:1.6}}>
@@ -3812,7 +3817,7 @@ export default function TradingBot(){
               </div>
 
               {/* Resumen */}
-              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:16}}>
+              <div className="g5" style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:16}}>
                 <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 14px",textAlign:"center"}}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:2,marginBottom:4}}>ABIERTAS</div>
                   <div className="mono" style={{fontSize:16,fontWeight:700,color:T.accent}}>{viewPositions.length}</div>
@@ -3843,9 +3848,10 @@ export default function TradingBot(){
                     {tradingViewFilter?"Sin posiciones reales abiertas en Deriv ahora mismo.":"Sin posiciones abiertas ahora mismo."}
                   </div>
                 ):(
+                  <div className="table-scroll">
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
                     <div style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 85px 65px 90px 70px",
-                      gap:10,padding:"0 14px 6px",fontSize:10,color:T.text,letterSpacing:1.5,fontWeight:700}}>
+                      gap:10,padding:"0 14px 6px",fontSize:10,color:T.text,letterSpacing:1.5,fontWeight:700,minWidth:1150}}>
                       <div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div>
                       <div>OBJETIVO</div><div>STOP</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div><div></div>
                     </div>
@@ -3876,7 +3882,7 @@ export default function TradingBot(){
                       const volumen=ps*mult; // notional exposure — stake × multiplier
                       return(
                         <div key={pos.id} className="fade-up" style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 70px 100px 100px 100px 85px 65px 90px 70px",
-                          gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:8,padding:"10px 14px"}}>
+                          gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:8,padding:"10px 14px",minWidth:1150}}>
                           <div>
                             <span style={{fontSize:12,fontWeight:700,color:T.text}}>{posSym}</span>
                             {pos.derivContractId&&<div style={{fontSize:7,color:T.red,marginTop:1}}>#{String(pos.derivContractId)}</div>}
@@ -3917,6 +3923,7 @@ export default function TradingBot(){
                       );
                     })}
                   </div>
+                  </div>
                 )}
               </div>
 
@@ -3928,11 +3935,11 @@ export default function TradingBot(){
                     {tradingViewFilter?"Sin operaciones reales cerradas en Deriv todavía.":"Sin operaciones cerradas todavía."}
                   </div>
                 ):(
-                  <>
-                    <div style={{display:"grid",gridTemplateColumns:"95px 95px 90px 70px 90px 90px 90px 90px 85px 60px 1fr",gap:10,padding:"0 14px 6px",fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700}}>
+                  <div className="table-scroll">
+                    <div style={{display:"grid",gridTemplateColumns:"95px 95px 90px 70px 90px 90px 90px 90px 85px 60px 1fr",gap:10,padding:"0 14px 6px",fontSize:7,color:T.muted,letterSpacing:1.5,fontWeight:700,minWidth:1100}}>
                       <div>APERTURA</div><div>CIERRE</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>PATRONES</div>
                     </div>
-                    <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                    <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:1100}}>
                       {viewTrades.slice(0,50).map((t,i)=>{
                         const prec=ASSETS[t.symbol]?.precision||5;
                         const win=t.pnl>0;
@@ -3940,7 +3947,7 @@ export default function TradingBot(){
                         const volumen=(t.allocatedSize||0)*(t.multiplier||0);
                         return(
                           <div key={i} style={{display:"grid",gridTemplateColumns:"95px 95px 90px 70px 90px 90px 90px 90px 85px 60px 1fr",
-                            gap:10,alignItems:"center",background:T.card,border:`1px solid ${col}25`,borderRadius:7,padding:"9px 14px"}}>
+                            gap:10,alignItems:"center",background:T.card,border:`1px solid ${col}25`,borderRadius:7,padding:"9px 14px",minWidth:1100}}>
                             <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.openTime)}</span>
                             <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime||(t.tradeTime?t.tradeTime*1000:null))}</span>
                             <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||symbol}</span>
@@ -3966,7 +3973,7 @@ export default function TradingBot(){
                         );
                       })}
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             </div>
@@ -3976,7 +3983,7 @@ export default function TradingBot(){
         {/* ══════════ VISTA: DASHBOARD ══════════ */}
         {activeView==="dashboard"&&(<>
 
-        <div style={{display:"grid",gridTemplateColumns:"1fr 380px",gap:16,alignItems:"start"}}>
+        <div className="split-panel" style={{display:"grid",gridTemplateColumns:"1fr 380px",gap:16,alignItems:"start"}}>
         <div style={{minWidth:0}}>
 
         {/* SIGNAL HERO — la señal activa es lo primero que se ve en el Dashboard */}
@@ -4071,7 +4078,7 @@ export default function TradingBot(){
         )}
 
         {/* STATS ROW */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:4}}>
+        <div className="g6" style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:4}}>
           {[
             derivEnabled
               ?{l:"BALANCE DERIV", v:derivBalance!=null?`$${derivBalance.toFixed(2)}`:"…", c:T.red}
@@ -4258,7 +4265,7 @@ export default function TradingBot(){
                 </div>
               </div>
               {/* Prices row */}
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+              <div className="g3" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
                 {[
                   {l:"ENTRADA",v:fP(activePrediction.entryPrice,prec3),c:T.accent,s:"precio al señalizar"},
                   {l:"🎯 OBJETIVO",v:fP(activePrediction.targetPrice,prec3),c:T.green,s:`+${targetPips.toFixed(1)} pips · R:${rr}`},
@@ -4285,7 +4292,7 @@ export default function TradingBot(){
         })()}
 
         {/* CONTROLS */}
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+        <div className="g3" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
           <button onClick={()=>runAnalysis("Análisis manual")} disabled={analyzing}
             style={{background:analyzing?T.dim:`${T.accent}14`,border:`1px solid ${analyzing?T.border:T.accent}`,
               color:analyzing?T.muted:T.accent,borderRadius:8,padding:"11px 8px",cursor:analyzing?"not-allowed":"pointer",fontSize:12,fontWeight:700}}>
@@ -4343,7 +4350,7 @@ export default function TradingBot(){
 
               {/* Niveles de entrada */}
               {proj&&!isHold&&(
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:8}}>
+                <div className="g3" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:8}}>
                   {[
                     {l:"ENTRADA (precio actual)", v:fP(price,asset.precision), c:col},
                     {l:`OBJETIVO ${isBuy?"RESISTENCIA":"SOPORTE"}`, v:fP(proj.targetPrice,asset.precision), c:isBuy?T.green:T.red},
@@ -4525,7 +4532,7 @@ export default function TradingBot(){
           {showLearning&&learningStats&&(
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               {/* Global stats */}
-              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
+              <div className="g5" style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
                 {[
                   {l:"TOTAL TRADES", v:learningStats.total,                              c:T.text},
                   {l:"WIN RATE",     v:`${learningStats.wr}%`,                           c:learningStats.wr>=50?T.green:T.red},

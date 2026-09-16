@@ -23,4 +23,27 @@ export const STYLES = `
   .live::before{content:'';display:inline-block;width:9px;height:9px;border-radius:50%;background:#00C46A;animation:pulse 1.4s ease-in-out infinite;margin-right:6px;}
   .fade-up{animation:fadeUp .3s ease forwards;}
   .breathe{animation:breathe 2s ease-in-out infinite;}
+
+  /* ─── RESPONSIVE ───────────────────────────────────────────────────────
+     Every layout grid in the app sets its desktop gridTemplateColumns
+     inline; these classes only override that at narrower widths (with
+     !important, since inline style otherwise always wins). Applied
+     alongside the inline style, never instead of it. */
+  @media (max-width: 980px){
+    .g6{grid-template-columns:repeat(3,1fr)!important;}
+    .g5{grid-template-columns:repeat(3,1fr)!important;}
+    .g4{grid-template-columns:repeat(2,1fr)!important;}
+    .g3{grid-template-columns:repeat(2,1fr)!important;}
+    .split-panel{grid-template-columns:1fr!important;}
+  }
+  @media (max-width: 560px){
+    .g6,.g5,.g4,.g3{grid-template-columns:repeat(2,1fr)!important;}
+    .g2{grid-template-columns:1fr!important;}
+    .header-row{flex-direction:column;align-items:flex-start!important;gap:10px;}
+    .header-row>div:last-child{text-align:left!important;}
+  }
+  /* Wide fixed-column tables (many px-based columns) never fit a phone
+     screen — scroll them horizontally instead of letting them overflow
+     the page or squash into unreadable columns. */
+  .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
 `;
