@@ -102,6 +102,17 @@ ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS tp NUMERIC;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS sl NUMERIC;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS deriv_contract_id TEXT;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS commission NUMERIC;
+-- The Deriv-portfolio-sync effect (trading-bot-v3.jsx) decides a contract is
+-- "new" by checking React's in-memory positions state — if that state was
+-- momentarily incomplete (e.g. the tab had just reloaded and the DB-restore
+-- fetch hadn't finished yet), it re-inserted an already-tracked contract
+-- under a different client_id ("deriv-<contractId>"), creating a real
+-- duplicate the app then double-counted as two open positions. Client-side
+-- checks can't be trusted alone for something this consequential — this
+-- index makes a second row for the same real contract impossible at the
+-- database level regardless of any future client race condition.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_open_positions_deriv_contract
+  ON open_positions (deriv_contract_id) WHERE deriv_contract_id IS NOT NULL;
 
 -- Server-side bot config (TP/SL/stake/multiplier), the durable replacement
 -- for the bot_tp_v2/bot_sl_v2/bot_stake/bot_mult localStorage keys.
