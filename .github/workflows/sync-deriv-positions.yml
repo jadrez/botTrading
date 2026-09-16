@@ -1,0 +1,30 @@
+name: Sync Deriv real positions (server-side)
+
+# The app's own "Deriv portfolio sync" only runs client-side, inside a
+# browser tab that has the app open with Deriv Real armed — verified live:
+# two positions opened manually in DTrader were correctly visible via the
+# API but never appeared in open_positions because no tab was open+armed to
+# reconcile them. This runs the exact same reconciliation from a schedule
+# instead, calling the deployed API over HTTP (no separate Deriv
+# credentials needed) so real positions stay visible regardless of whether
+# anyone has the app open.
+on:
+  schedule:
+    # Every 5 minutes — real money, so this stays tighter than the daily/
+    # weekly strategy jobs.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync-deriv-positions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run backtest:sync-deriv-positions
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
