@@ -91,11 +91,26 @@ const fDateTime = ms => ms
   ? new Date(ms).toLocaleString("es",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})
   : "—";
 
-// Deriv multiplier P&L: stake × multiplier × (Δprice / entry)
+// Deriv multiplier P&L: stake × multiplier × (Δprice / entry). Doesn't (and
+// can't, without knowing it) account for commission — fine for Simulado,
+// but for a real position it's an ESTIMATE only, and our own price feed can
+// drift enough from Deriv's own to flip the sign on a small position.
 function posPnL(pos, price, stake=DEFAULT_STAKE){
   const dir  = pos.type==="BUY" ? 1 : -1;
   const mult = pos.multiplier || DEFAULT_MULTIPLIER;
   return dir * (price - pos.entry) / pos.entry * stake * mult;
+}
+
+// For a real (Deriv) position, prefer the profit Deriv itself last reported
+// (pos.derivProfit, refreshed every 20s by the portfolio-sync effect) — it's
+// authoritative: Deriv's own price, commission already netted in. Verified
+// live: our own posPnL() showed some AUD/USD positions positive while
+// Deriv's own panel showed every one of them negative (commission alone was
+// ~$0.20-0.22 per position, enough to flip a near-zero move). Falls back to
+// the local estimate only when there's no synced value yet (brand new
+// position, or simulated — which has no Deriv profit at all).
+function effectivePnL(pos, price, stake=DEFAULT_STAKE){
+  return pos.derivContractId && pos.derivProfit!=null ? pos.derivProfit : posPnL(pos,price,stake);
 }
 
 // Dynamic stop level for a position given its best-ever unrealized profit
@@ -1109,7 +1124,7 @@ function LWChart({ candles, positions, trades, symbol, precision, srLevels, aiRe
 /* ─── POSITION ROW ───────────────────────────────────────────────────────── */
 function PosRow({pos, price, precision, onClose, tpTarget=3, slTarget=2}){
   const ps=pos.allocatedSize||DEFAULT_STAKE;
-  const pnl=posPnL(pos,price,ps);
+  const pnl=effectivePnL(pos,price,ps);
   const col=pnl>=0?T.green:T.red;
   const pct=Math.min(100,Math.max(0,(pnl/tpTarget)*100));
   const pctChange=(price-pos.entry)/pos.entry*100;
@@ -1696,6 +1711,7 @@ export default function TradingBot(){
           id:`deriv-${p.contractId}`, symbol:p.symbol, type:p.type, entry:p.entry,
           allocatedSize:p.buyPrice, multiplier:p.multiplier, peakPnl:0,
           tp:p.tp, sl:p.sl, derivContractId:p.contractId, commission:p.commission,
+          derivProfit:p.profit, derivSpot:p.currentSpot,
           openTime:p.openTime||Date.now(),
         }));
         newOnes.forEach(p=>savePositionOpen(p,null));
@@ -1709,7 +1725,13 @@ export default function TradingBot(){
         const refreshed=stillTracked.map(p=>{
           if(!p.derivContractId) return p;
           const match=derivPositions.find(dp=>String(dp.contractId)===String(p.derivContractId));
-          return match&&p.commission==null?{...p,commission:match.commission}:p;
+          if(!match) return p;
+          // derivProfit/derivSpot: Deriv's own authoritative live P&L and
+          // price for this contract, refreshed every sync — see
+          // effectivePnL(), which prefers this over our own price feed's
+          // estimate for real positions.
+          return{...p, commission:p.commission==null?match.commission:p.commission,
+            derivProfit:match.profit, derivSpot:match.currentSpot};
         });
         return[...refreshed,...newOnes];
       });
@@ -2332,7 +2354,7 @@ export default function TradingBot(){
       if(!pos) return;
 
       let exitPrice=currentPrice;
-      let pnl=posPnL(pos,currentPrice,pos.allocatedSize||positionSizeRef.current);
+      let pnl=effectivePnL(pos,currentPrice,pos.allocatedSize||positionSizeRef.current);
       let commission=pos.commission;
       let closeTimeMs=Date.now();
 
@@ -2424,7 +2446,7 @@ export default function TradingBot(){
         // symbol's current tpTarget/slTarget only for older positions that
         // predate that field.
         const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
-        const pnl=posPnL(pos,price,pos.allocatedSize||positionSize);
+        const pnl=effectivePnL(pos,price,pos.allocatedSize||positionSize);
         const peakPnl=Math.max(pos.peakPnl||0,pnl);
         // extendedStopLevel: TP is no longer a hard ceiling — once peak
         // profit reaches it, the floor keeps rising (giving back only 40%
@@ -2453,7 +2475,7 @@ export default function TradingBot(){
         const cfg=ASSETS[pos.symbol];
         if(!cp||cp===cfg?.basePrice) return;
         const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
-        const pnl=posPnL(pos,cp,pos.allocatedSize||positionSize);
+        const pnl=effectivePnL(pos,cp,pos.allocatedSize||positionSize);
         const peakPnl=Math.max(pos.peakPnl||0,pnl);
         const stopLevel=extendedStopLevel(peakPnl,posTp,posSl);
         if(pnl<=stopLevel){
@@ -2945,10 +2967,10 @@ export default function TradingBot(){
 
   /* ── Stats ───────────────────────────────────────────────────────────── */
   const symPositions=positions.filter(p=>p.symbol===symbol);
-  const unrealized=symPositions.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize||positionSize),0);
+  const unrealized=symPositions.reduce((s,p)=>s+effectivePnL(p,price,p.allocatedSize||positionSize),0);
   const totalUnrealized=positions.reduce((s,p)=>{
     const cp=livePricesRef.current[p.symbol]||price;
-    return s+posPnL(p,cp,p.allocatedSize||positionSize);
+    return s+effectivePnL(p,cp,p.allocatedSize||positionSize);
   },0);
   const winCount=trades.filter(t=>t.pnl>0).length;
   const winRate=trades.length?Math.round(winCount/trades.length*100):0;
@@ -3859,10 +3881,13 @@ export default function TradingBot(){
                       const posSym=pos.symbol||symbol;
                       const cfg=ASSETS[posSym];
                       const prec=cfg?.precision||5;
-                      const livePrice=posSym===symbol?price:(livePrices[posSym]??cfg?.basePrice);
+                      // Deriv's own current_spot (refreshed every sync) for a real
+                      // position — keeps the % column consistent with the PNL
+                      // column, which already prefers Deriv's own profit.
+                      const livePrice=pos.derivSpot??(posSym===symbol?price:(livePrices[posSym]??cfg?.basePrice));
                       const ps=pos.allocatedSize||positionSize;
                       const mult=pos.multiplier||multiplier;
-                      const pnl=posPnL(pos,livePrice,ps);
+                      const pnl=effectivePnL(pos,livePrice,ps);
                       const isBuy=pos.type==="BUY";
                       const dir=isBuy?1:-1;
                       const col=pnl>=0?T.green:T.red;
@@ -4181,7 +4206,7 @@ export default function TradingBot(){
                 // BTC/USDT position priced against an EUR/GBP-scale number).
                 const posSym=pos?.symbol||symbol;
                 const posLivePrice=pos?(posSym===symbol?price:(livePrices[posSym]??ASSETS[posSym]?.basePrice)):null;
-                const pnl=(pos&&posLivePrice!=null)?posPnL(pos,posLivePrice,pos.allocatedSize||positionSize):null;
+                const pnl=(pos&&posLivePrice!=null)?effectivePnL(pos,posLivePrice,pos.allocatedSize||positionSize):null;
                 const col=pos?(pnl==null?T.muted:pnl>=0?T.green:T.red):T.dim;
                 return(
                   <div key={i} style={{flex:1,height:28,border:`1px solid ${col}`,borderRadius:5,background:`${col}12`,
