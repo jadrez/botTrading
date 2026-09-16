@@ -1661,7 +1661,15 @@ export default function TradingBot(){
      lets the bot's own learning react to everything Deriv actually did, not
      just what the bot itself closed. */
   useEffect(()=>{
-    if(!derivEnabled) return;
+    // Deliberately NOT gated on derivEnabled: this is read-only reconciliation
+    // (never opens or closes anything itself), so it must keep refreshing
+    // pos.derivProfit/derivSpot — which effectivePnL() prefers over our own
+    // price feed — for real positions REGARDLESS of whether Deriv Real is
+    // currently armed. Verified live: 2 manually-opened AUD/USD positions
+    // showed POSITIVE in the app while Deriv reported both negative, because
+    // this effect never ran while the arm switch sat on Simulado — viewing
+    // accurate real data shouldn't require arming real trading, same
+    // reasoning as the tradingViewFilter split earlier.
     const sync=async()=>{
       const derivPositions=await getDerivPortfolio();
       if(!derivPositions) return;
@@ -1740,7 +1748,7 @@ export default function TradingBot(){
     sync();
     const iv=setInterval(sync,20000);
     return()=>clearInterval(iv);
-  },[derivEnabled,addLog]);
+  },[addLog]);
 
   /* ── Symbol change ───────────────────────────────────────────────────── */
   const handleSymbolChange=useCallback((newSym)=>{
