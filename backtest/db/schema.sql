@@ -120,10 +120,26 @@ CREATE TABLE IF NOT EXISTS bot_config (
 CREATE TABLE IF NOT EXISTS symbol_strategy (
   symbol           TEXT PRIMARY KEY,
   tier             TEXT NOT NULL,           -- 'ROBUSTO' | 'MIXTO' | 'SIN-EDGE'
-  tp               NUMERIC,                 -- NULL for SIN-EDGE
+  tp               NUMERIC,                 -- effective values the app reads — NULL for SIN-EDGE
   sl               NUMERIC,
   min_conf         INT,
   profitable_folds INT,
   total_folds      INT,
+  -- The walk-forward-validated ANCHOR, set only by update-strategy.mjs (the
+  -- weekly market-data re-validation) — never touched by retrain-live.mjs.
+  -- tp/sl/min_conf above are nudged off THIS baseline (bounded, see
+  -- retrain-live.mjs), so a run that goes stale or wrong can never drift the
+  -- effective values far from what was actually validated, and the weekly
+  -- job resetting tp/sl/min_conf = wf_tp/wf_sl/wf_min_conf wipes any drift.
+  wf_tp            NUMERIC,
+  wf_sl            NUMERIC,
+  wf_min_conf      INT,
+  live_trades_used INT,                     -- sample size retrain-live.mjs last used, for transparency
+  live_adjusted_at TIMESTAMPTZ,              -- NULL if retrain-live.mjs has never touched this symbol
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE symbol_strategy ADD COLUMN IF NOT EXISTS wf_tp NUMERIC;
+ALTER TABLE symbol_strategy ADD COLUMN IF NOT EXISTS wf_sl NUMERIC;
+ALTER TABLE symbol_strategy ADD COLUMN IF NOT EXISTS wf_min_conf INT;
+ALTER TABLE symbol_strategy ADD COLUMN IF NOT EXISTS live_trades_used INT;
+ALTER TABLE symbol_strategy ADD COLUMN IF NOT EXISTS live_adjusted_at TIMESTAMPTZ;

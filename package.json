@@ -10,7 +10,8 @@
     "backtest": "node backtest/run.mjs",
     "backtest:sweep": "node backtest/sweep.mjs",
     "backtest:wf": "node backtest/walkforward.mjs",
-    "backtest:update-strategy": "node backtest/update-strategy.mjs"
+    "backtest:update-strategy": "node backtest/update-strategy.mjs",
+    "backtest:retrain-live": "node backtest/retrain-live.mjs"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

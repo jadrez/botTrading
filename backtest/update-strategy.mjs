@@ -25,12 +25,19 @@ function parseArgs(argv) {
 }
 
 async function upsertStrategy(pool, row) {
+  // wf_tp/wf_sl/wf_min_conf are the validated ANCHOR — always reset here to
+  // the same fresh values as tp/sl/min_conf, wiping out whatever bounded
+  // nudge retrain-live.mjs applied during the week. That daily job only ever
+  // nudges off of this baseline, so it can't compound drift away from what
+  // was actually walk-forward-validated.
   await pool.query(
-    `INSERT INTO symbol_strategy (symbol, tier, tp, sl, min_conf, profitable_folds, total_folds, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7, now())
+    `INSERT INTO symbol_strategy (symbol, tier, tp, sl, min_conf, profitable_folds, total_folds, wf_tp, wf_sl, wf_min_conf, live_trades_used, live_adjusted_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$3,$4,$5, NULL, NULL, now())
      ON CONFLICT (symbol) DO UPDATE SET
        tier = EXCLUDED.tier, tp = EXCLUDED.tp, sl = EXCLUDED.sl, min_conf = EXCLUDED.min_conf,
        profitable_folds = EXCLUDED.profitable_folds, total_folds = EXCLUDED.total_folds,
+       wf_tp = EXCLUDED.tp, wf_sl = EXCLUDED.sl, wf_min_conf = EXCLUDED.min_conf,
+       live_trades_used = NULL, live_adjusted_at = NULL,
        updated_at = now()`,
     [row.symbol, row.tier, row.tp, row.sl, row.minConf, row.profitableFolds ?? null, row.totalFolds ?? null]
   );

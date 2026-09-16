@@ -1,0 +1,27 @@
+name: Retrain from live results (self-learning)
+
+# Daily complement to update-strategy.yml (weekly, re-validates against
+# fresh MARKET data). This one reads the bot's OWN closed trades and nudges
+# minConf/tp within a bounded range of the walk-forward anchor (wf_tp/
+# wf_min_conf) — see backtest/retrain-live.mjs for the full rationale and
+# safety bounds. Requires a minimum sample per symbol; symbols without
+# enough closed trades yet are left untouched.
+on:
+  schedule:
+    # 06:00 UTC daily — after a full day of trading activity across sessions.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  retrain-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run backtest:retrain-live
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
