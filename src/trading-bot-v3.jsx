@@ -1802,7 +1802,14 @@ export default function TradingBot(){
     let derivWs=null;
     let wsAlive=true;
 
-    const applyForexCandles=(newCandles,rate)=>{
+    // verified=false is ONLY for the synthetic placeholder below — it must
+    // NOT flip priceVerified/forexLive true, or a real open position on this
+    // symbol can get its SL/TP evaluated against the fake price for the one
+    // render before real data arrives. Verified live: XAU/USD entry $4382.80
+    // closed "SL" at exit $2700.00 (the placeholder basePrice) — the TP/SL
+    // watcher's only guard is priceVerified, which this call used to set
+    // true unconditionally, real data or not.
+    const applyForexCandles=(newCandles,rate,verified=true)=>{
       if(!newCandles?.length) return;
       setCandles(newCandles);
       const closes=newCandles.map(c=>c.c);
@@ -1826,8 +1833,8 @@ export default function TradingBot(){
       setShortTrend(st); shortTrendRef.current=st;
       setSrLevels(sr); srRef.current=sr;
       const {forexFrom,forexTo}=cur;
-      if(np) _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
-      setForexLive(true); setPriceVerified(true);
+      if(np&&verified) _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
+      setForexLive(verified); setPriceVerified(verified);
     };
 
     if(cur.type==="crypto"){
@@ -1884,7 +1891,7 @@ export default function TradingBot(){
       // Show placeholder immediately — Deriv WebSocket will replace within ~2s
       const cached=_fxCache[`${forexFrom}_${forexTo}`];
       const initRate=cached?.rate||cur.basePrice;
-      applyForexCandles(genCandles(initRate,300,tfInterval),initRate);
+      applyForexCandles(genCandles(initRate,300,tfInterval),initRate,false);
 
       if(!derivSym){
         // No Deriv symbol mapping — use Yahoo Finance candle history + polling
