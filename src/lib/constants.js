@@ -54,8 +54,20 @@ export const TRAIL_GIVEBACK     = 0.4;  // once trailing, allow giving back 40% 
 // trading rarely opens/rotates — too few completed round-trips for the
 // pattern-learning system to have much to learn from. Knock this many points
 // off the bar ONLY for a candidate that will land in Simulado (crypto/
-// commodities always, or forex once the real-money cap/duplicate checks rule
-// out Deriv Real) — a real-money candidate always keeps the full validated
-// bar untouched. Floored so it never gets so low it's just trading noise.
+// commodities always, or forex once the real-money cap rules out Deriv
+// Real) — a real-money candidate always keeps the full validated bar
+// untouched. Floored so it never gets so low it's just trading noise.
 export const SIM_CONFIDENCE_DISCOUNT = 15;
 export const SIM_CONFIDENCE_FLOOR    = 45;
+
+// Real money, correlated-duplicate case: with only 8 forex pairs all
+// fundamentally tracking USD strength, a hard block here (the original
+// design) meant just 2 open real positions on opposite sides (e.g. AUD/USD
+// BUY + USD/CHF BUY) mathematically blocked EVERY other pair in BOTH
+// directions — verified live, real trading never diversified past 2 symbols.
+// Changed from a block to a confidence PENALTY on request: a real candidate
+// that's the same underlying bet as an already-open real position on a
+// correlated symbol can still go real, just needs this many extra points of
+// confidence — still discourages piling into one factor, without making
+// diversification mathematically impossible.
+export const CORR_DUP_CONFIDENCE_PENALTY = 12;

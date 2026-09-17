@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createChart, LineStyle, CrosshairMode } from "lightweight-charts";
 import { T, STYLES } from "./theme.js";
 import { SYMBOL_STRATEGY, scaledTpSl } from "./lib/symbolStrategy.js";
-import { MAX_POSITIONS, MAX_SIM_POSITIONS, MAX_REAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK, SIM_CONFIDENCE_DISCOUNT, SIM_CONFIDENCE_FLOOR } from "./lib/constants.js";
+import { MAX_POSITIONS, MAX_SIM_POSITIONS, MAX_REAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK, SIM_CONFIDENCE_DISCOUNT, SIM_CONFIDENCE_FLOOR, CORR_DUP_CONFIDENCE_PENALTY } from "./lib/constants.js";
 import Sparkline from "./components/Sparkline.jsx";
 import TierBadge from "./components/TierBadge.jsx";
 import TechnicalPanel from "./components/TechnicalPanel.jsx";
@@ -2778,17 +2778,26 @@ export default function TradingBot(){
           const realPositionsCount=openRealPositions.length;
           const dupSymbol=findCorrelatedRealDuplicate(activeSym,result.signal,openRealPositions);
           if(autoRealRef.current && derivEnabledRef.current && activeAssetCheck?.type==="forex"){
-            if(activeTier==="SIN-EDGE"||!activeTier){
-              addLog(`🔴 Deriv: ${activeSym} es tier ${activeTier||"desconocido"} — posición registrada en simulación, no en Deriv`,"sell");
-            } else if(realPositionsCount>=MAX_REAL_POSITIONS){
-              addLog(`🔴 Deriv: ya hay ${realPositionsCount}/${MAX_REAL_POSITIONS} posiciones reales abiertas — posición registrada en simulación`,"sell");
-            } else if(dupSymbol){
-              addLog(`🔴 Deriv: ${result.signal} ${activeSym} es la misma apuesta que la posición real en ${dupSymbol} (correlacionados) — posición registrada en simulación`,"sell");
+            // Correlated duplicate is a confidence PENALTY, not a hard block
+            // (was one — verified live it mathematically capped real trading
+            // at ~2 diversified symbols out of 7 eligible, since just 2
+            // opposite-signed positions span every sign combination on the
+            // rest via the correlation table). Still needs the reinforced
+            // bar to actually go real; blockReasonReal stays null otherwise.
+            let blockReasonReal=null;
+            if(activeTier==="SIN-EDGE"||!activeTier) blockReasonReal=`${activeSym} es tier ${activeTier||"desconocido"}`;
+            else if(realPositionsCount>=MAX_REAL_POSITIONS) blockReasonReal=`ya hay ${realPositionsCount}/${MAX_REAL_POSITIONS} posiciones reales abiertas`;
+            else if(dupSymbol){
+              const reinforcedMinConf=Math.min(95,(SYMBOL_STRATEGY[activeSym]?.minConf??minConf)+CORR_DUP_CONFIDENCE_PENALTY);
+              if(result.confidence<reinforcedMinConf) blockReasonReal=`${result.signal} ${activeSym} es la misma apuesta que la posición real en ${dupSymbol} (correlacionados) — confianza ${result.confidence}% < umbral reforzado ${reinforcedMinConf}%`;
+            }
+            if(blockReasonReal){
+              addLog(`🔴 Deriv: ${blockReasonReal} — posición registrada en simulación`,"sell");
             } else {
               const dResult=await openDerivOrder(activeSym,result.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
               if(dResult.ok){
                 derivContractId=dResult.contractId;
-                addLog(`🔴 Deriv orden REAL ${result.signal} abierta | ContractID:${derivContractId} | Stake:$${ps} × ${multiplierRef.current}x @ ${dResult.buyPrice}`,"info");
+                addLog(`🔴 Deriv orden REAL ${result.signal} abierta${dupSymbol?` [misma apuesta que ${dupSymbol}, confianza reforzada OK]`:""} | ContractID:${derivContractId} | Stake:$${ps} × ${multiplierRef.current}x @ ${dResult.buyPrice}`,"info");
               } else {
                 addLog(`⚠️ Deriv: ${dResult.error} — posición registrada en simulación`,"sell");
               }
@@ -2891,11 +2900,15 @@ export default function TradingBot(){
      análisis completo con IA arriba) usando la señal técnica determinista
      de assetSignals — la misma clase de regla que valida el walk-forward,
      sin gastar una llamada a Groq por símbolo. Mayormente simulado (paper) —
-     la EXCEPCIÓN es cuando derivEnabled está activo y el símbolo en turno es
-     forex (ROBUSTO o MIXTO, nunca SIN-EDGE), hay cupo bajo MAX_REAL_POSITIONS,
-     y no sería la misma apuesta que otra posición real ya abierta en un
-     símbolo correlacionado — mismo gate que el análisis del símbolo activo
-     (ver runAnalysis). Respeta también el cupo por símbolo (MAX_POSITIONS) y
+     la EXCEPCIÓN es cuando AUTO Deriv Real + derivEnabled están activos y el
+     símbolo en turno es forex (ROBUSTO o MIXTO, nunca SIN-EDGE) con cupo bajo
+     MAX_REAL_POSITIONS — mismo gate que el análisis del símbolo activo (ver
+     runAnalysis). Si es la misma apuesta que otra posición real ya abierta
+     en un símbolo correlacionado, ya NO se bloquea — solo exige
+     CORR_DUP_CONFIDENCE_PENALTY puntos más de confianza (antes bloqueaba
+     por completo; con solo 8 pares forex ligados al mismo factor de fondo
+     -fuerza del dólar-, eso topaba la diversificación real en la práctica a
+     ~2 símbolos). Respeta también el cupo por símbolo (MAX_POSITIONS) y
      los cupos GLOBALES INDEPENDIENTES de cada modo — MAX_SIM_POSITIONS y
      MAX_REAL_POSITIONS ya no comparten un solo pool de 10: antes, Simulado
      (más símbolos elegibles + umbral más bajo) llenaba ese pool compartido
@@ -2925,18 +2938,22 @@ export default function TradingBot(){
       // patterns have historically performed. Computed BEFORE the confidence
       // check (moved up from below) so we already know whether this
       // candidate would actually land on Deriv Real or in Simulado — a real
-      // candidate keeps the full validated bar, everything else gets the
-      // Simulado discount for faster learning cycles.
+      // candidate keeps the full validated bar (plus CORR_DUP_CONFIDENCE_PENALTY
+      // if it's the same bet as an already-open real position on a
+      // correlated symbol — no longer a hard block, see that constant),
+      // everything else gets the Simulado discount for faster learning cycles.
       const dupSymbol=findCorrelatedRealDuplicate(sym,data.signal,openRealPositions);
-      const willBeReal=autoRealRef.current && derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS && !dupSymbol;
+      const willBeReal=autoRealRef.current && derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS;
       // Neither switch wants this candidate: it wouldn't be real (Deriv Real
       // AUTO off, or not eligible) and Simulado AUTO is off too, so there's
       // nowhere for it to land — skip before spending the minConf/pattern
       // computation on it.
       if(!willBeReal && !autoRef.current) continue;
       if(!willBeReal && simCount>=MAX_SIM_POSITIONS) continue; // aterrizaría en Simulado pero ese pool ya está lleno
-      const tierMinConf=willBeReal?strat.minConf:Math.max(SIM_CONFIDENCE_FLOOR,strat.minConf-SIM_CONFIDENCE_DISCOUNT);
-      const baseMinConf=consLossesRef.current>=2?Math.min(90,tierMinConf+10):tierMinConf;
+      const tierMinConf=willBeReal
+        ? Math.min(95,strat.minConf+(dupSymbol?CORR_DUP_CONFIDENCE_PENALTY:0))
+        : Math.max(SIM_CONFIDENCE_FLOOR,strat.minConf-SIM_CONFIDENCE_DISCOUNT);
+      const baseMinConf=consLossesRef.current>=2?Math.min(95,tierMinConf+10):tierMinConf;
       const minConf=getSymbolMinConf(allTrades,sym,baseMinConf);
       const {delta,note}=getPatternAdjustment(data.patterns,byPatternStats);
       const adjConfidence=Math.max(0,Math.min(99,data.confidence+delta));
@@ -2946,21 +2963,19 @@ export default function TradingBot(){
 
       // Real-money gate — same rule as the active symbol's own analysis
       // path: forex only (already true here, SIN-EDGE already skipped by
-      // the loop's own `continue` above), capped at MAX_REAL_POSITIONS
-      // concurrent real positions, and never a real duplicate of an
-      // already-open real bet on a correlated symbol.
+      // the loop's own `continue` above) and capped at MAX_REAL_POSITIONS
+      // concurrent real positions. A correlated duplicate already had to
+      // clear the reinforced confidence bar above to get here.
       let derivContractId=null;
       if(willBeReal){
         const dResult=await openDerivOrder(sym,data.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
         if(dResult.ok){
           derivContractId=dResult.contractId;
           openRealPositions.push({symbol:sym,type:data.signal});
-          addLog(`🔴 Deriv orden REAL ${data.signal} abierta (auto multi-símbolo) | ContractID:${derivContractId} | ${sym} · Stake:$${ps} × ${multiplierRef.current}x`,"info");
+          addLog(`🔴 Deriv orden REAL ${data.signal} abierta (auto multi-símbolo)${dupSymbol?` [misma apuesta que ${dupSymbol}, confianza ${adjConfidence}% ≥ umbral reforzado ${minConf}%]`:""} | ContractID:${derivContractId} | ${sym} · Stake:$${ps} × ${multiplierRef.current}x`,"info");
         } else {
           addLog(`⚠️ Deriv: ${dResult.error} — ${sym} registrado en simulación`,"sell");
         }
-      } else if(derivEnabledRef.current && ASSETS[sym]?.type==="forex" && dupSymbol){
-        addLog(`🔴 Deriv: ${data.signal} ${sym} es la misma apuesta que la posición real en ${dupSymbol} (correlacionados) — registrado en simulación`,"sell");
       }
 
       // The real attempt above can still fail even when willBeReal was true
