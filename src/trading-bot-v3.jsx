@@ -2420,7 +2420,16 @@ export default function TradingBot(){
       // regardless of whether Deriv's side actually went through — if the
       // sell failed for any reason, the position stayed open on Deriv while
       // the app fabricated a closed trade with a PnL nobody ever realized.
-      if(derivEnabledRef.current && pos.derivContractId){
+      //
+      // Gated on pos.derivContractId ALONE — NOT derivEnabledRef.current.
+      // Whether a position is real is a property of the position, not of
+      // whatever the arm switch currently sits on. Verified live: clicking
+      // "Cerrar" on a manually-discovered real position while Simulado was
+      // armed did nothing on Deriv's side at all (this whole branch was
+      // skipped) — the exact same phantom-close bug this comment already
+      // describes, reintroduced through the arm-switch condition instead of
+      // a missing await.
+      if(pos.derivContractId){
         const closeResult=await closeDerivOrder(pos.derivContractId);
         if(!closeResult.ok){
           addLog(`⚠️ Deriv rechazó el cierre de ${pos.symbol} (${closeResult.error}) — la posición SIGUE ABIERTA, no se registró ningún cierre`,"sell");
