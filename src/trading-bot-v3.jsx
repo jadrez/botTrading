@@ -1369,6 +1369,12 @@ export default function TradingBot(){
   // OFF, meaning "autonomous" in name only if you had to re-arm it by hand
   // every time the tab reloaded.
   const [autoMode,setAutoMode]   = useState(()=>localStorage.getItem("bot_auto_mode")==="true");
+  // Independent from autoMode (Simulado) — previously ONE switch drove both:
+  // any signal either went real (if derivEnabled+eligible) or fell back to
+  // Simulado, with no way to run one without the other. Requested live after
+  // the user found AUTO OFF explained why nothing was opening, then wanted
+  // Simulado and Deriv Real controllable separately instead of coupled.
+  const [autoRealMode,setAutoRealMode] = useState(()=>localStorage.getItem("bot_auto_real_mode")==="true");
   const [scheduledStart,setScheduledStart] = useState(null); // ms epoch, or null
   const [scheduleInput,setScheduleInput]   = useState("");   // <input type="datetime-local"> value
   const [scheduleRemainingMs,setScheduleRemainingMs] = useState(null);
@@ -1438,6 +1444,7 @@ export default function TradingBot(){
   const posRef    = useRef([]);
   const priceRef  = useRef(ASSETS["ETH/USDT"].basePrice);
   const autoRef   = useRef(false);
+  const autoRealRef = useRef(false);
   const rsiRef    = useRef(50);
   const macdRef   = useRef({macd:0,signal:0,hist:0});
   const bbRef     = useRef({upper:0,mid:0,lower:0});
@@ -1465,6 +1472,7 @@ export default function TradingBot(){
   useEffect(()=>{posRef.current=positions;},[positions]);
   useEffect(()=>{priceRef.current=price;},[price]);
   useEffect(()=>{autoRef.current=autoMode;localStorage.setItem("bot_auto_mode",String(autoMode));},[autoMode]);
+  useEffect(()=>{autoRealRef.current=autoRealMode;localStorage.setItem("bot_auto_real_mode",String(autoRealMode));},[autoRealMode]);
   useEffect(()=>{rsiRef.current=rsi;},[rsi]);
   useEffect(()=>{macdRef.current=macd;},[macd]);
   useEffect(()=>{bbRef.current=bb;},[bb]);
@@ -2747,7 +2755,7 @@ export default function TradingBot(){
       }
       // ────────────────────────────────────────────────────────────────────
 
-      if(autoRef.current){
+      if(autoRef.current||autoRealRef.current){
         const activeSym=symbolRef.current;
         const symSlots=MAX_POSITIONS-posRef.current.filter(p=>p.symbol===activeSym).length;
         if(!symbolAutoDisabled&&result.should_open&&result.signal!=="HOLD"&&symSlots>0&&result.confidence>=minConf){
@@ -2769,7 +2777,7 @@ export default function TradingBot(){
           const openRealPositions=posRef.current.filter(p=>p.derivContractId);
           const realPositionsCount=openRealPositions.length;
           const dupSymbol=findCorrelatedRealDuplicate(activeSym,result.signal,openRealPositions);
-          if(derivEnabledRef.current && activeAssetCheck?.type==="forex"){
+          if(autoRealRef.current && derivEnabledRef.current && activeAssetCheck?.type==="forex"){
             if(activeTier==="SIN-EDGE"||!activeTier){
               addLog(`🔴 Deriv: ${activeSym} es tier ${activeTier||"desconocido"} — posición registrada en simulación, no en Deriv`,"sell");
             } else if(realPositionsCount>=MAX_REAL_POSITIONS){
@@ -2785,6 +2793,16 @@ export default function TradingBot(){
                 addLog(`⚠️ Deriv: ${dResult.error} — posición registrada en simulación`,"sell");
               }
             }
+          }
+
+          // Nowhere for this signal to land: it didn't become real (Deriv
+          // Real AUTO off, not eligible, or the Deriv attempt itself failed)
+          // and Simulado AUTO is off too — skip instead of silently falling
+          // back to a simulated open nobody asked for.
+          if(!derivContractId && !autoRef.current){
+            addLog(`⏸ Señal ${result.signal} ${activeSym} calificó pero no se ejecutó — AUTO Deriv Real sin condiciones para ir real y AUTO Simulado está apagado`,"info");
+            setAutoPhase("waiting_conditions");
+            setAnalyzing(false); pendingAnalysisRef.current=false; return;
           }
 
           const mainScaled=scaledTpSl(activeSym,ps,multiplierRef.current);
@@ -2883,7 +2901,7 @@ export default function TradingBot(){
      (más símbolos elegibles + umbral más bajo) llenaba ese pool compartido
      casi de inmediato, dejando a Real sin cupo aunque calificara. */
   const runAutoScan=useCallback(async()=>{
-    if(!autoRef.current) return;
+    if(!autoRef.current&&!autoRealRef.current) return;
     const allTrades=loadTrades();
     const byPatternStats=calcLearningStats(allTrades)?.byPattern||[];
     // Tracked locally (not just posRef) so multiple qualifying symbols in the
@@ -2910,7 +2928,12 @@ export default function TradingBot(){
       // candidate keeps the full validated bar, everything else gets the
       // Simulado discount for faster learning cycles.
       const dupSymbol=findCorrelatedRealDuplicate(sym,data.signal,openRealPositions);
-      const willBeReal=derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS && !dupSymbol;
+      const willBeReal=autoRealRef.current && derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS && !dupSymbol;
+      // Neither switch wants this candidate: it wouldn't be real (Deriv Real
+      // AUTO off, or not eligible) and Simulado AUTO is off too, so there's
+      // nowhere for it to land — skip before spending the minConf/pattern
+      // computation on it.
+      if(!willBeReal && !autoRef.current) continue;
       if(!willBeReal && simCount>=MAX_SIM_POSITIONS) continue; // aterrizaría en Simulado pero ese pool ya está lleno
       const tierMinConf=willBeReal?strat.minConf:Math.max(SIM_CONFIDENCE_FLOOR,strat.minConf-SIM_CONFIDENCE_DISCOUNT);
       const baseMinConf=consLossesRef.current>=2?Math.min(90,tierMinConf+10):tierMinConf;
@@ -2940,6 +2963,10 @@ export default function TradingBot(){
         addLog(`🔴 Deriv: ${data.signal} ${sym} es la misma apuesta que la posición real en ${dupSymbol} (correlacionados) — registrado en simulación`,"sell");
       }
 
+      // The real attempt above can still fail even when willBeReal was true
+      // (Deriv API error) — if Simulado AUTO is off, there's no fallback to
+      // record it into, so the signal is simply not taken this cycle.
+      if(!derivContractId && !autoRef.current) continue;
       if(!derivContractId) simCount++; // aterrizó en Simulado — incluye el fallback cuando la orden real falló
 
       const scaled=scaledTpSl(sym,ps,multiplierRef.current);
@@ -2959,9 +2986,9 @@ export default function TradingBot(){
   useEffect(()=>{
     clearInterval(timerRef.current);
     clearInterval(countRef.current);
-    if(!autoMode){setAutoPhase("idle");setNextAnalysis(null);return;}
+    if(!autoMode&&!autoRealMode){setAutoPhase("idle");setNextAnalysis(null);return;}
 
-    addLog(`🤖 AUTO ACTIVADO — TP:+${fUSD(tpTargetRef.current)} | SL:-${fUSD(slTargetRef.current)} | Máx ${MAX_POSITIONS} pos/símbolo, ${MAX_SIM_POSITIONS} simuladas + ${MAX_REAL_POSITIONS} reales | escaneando todos los símbolos validados`,"info");
+    addLog(`🤖 AUTO ACTIVADO (${[autoMode&&"Simulado",autoRealMode&&"Deriv Real"].filter(Boolean).join(" + ")}) — TP:+${fUSD(tpTargetRef.current)} | SL:-${fUSD(slTargetRef.current)} | Máx ${MAX_POSITIONS} pos/símbolo, ${MAX_SIM_POSITIONS} simuladas + ${MAX_REAL_POSITIONS} reales | escaneando todos los símbolos validados`,"info");
     runAnalysis("Inicio modo automático");
     runAutoScan();
 
@@ -2974,7 +3001,7 @@ export default function TradingBot(){
 
     timerRef.current=setInterval(()=>{
       remaining=ANALYSIS_INTERVAL_MS;
-      if(!autoRef.current)return;
+      if(!autoRef.current&&!autoRealRef.current)return;
       const symCount=posRef.current.filter(p=>p.symbol===symbolRef.current).length;
       if(symCount<MAX_POSITIONS) runAnalysis("Ciclo automático regular");
       else setAutoPhase("monitoring");
@@ -2982,7 +3009,7 @@ export default function TradingBot(){
     },ANALYSIS_INTERVAL_MS);
 
     return()=>{clearInterval(timerRef.current);clearInterval(countRef.current);};
-  },[autoMode,runAutoScan]);
+  },[autoMode,autoRealMode,runAutoScan]);
 
   /* ── React to TP hit → re-analyze ───────────────────────────────────── */
   useEffect(()=>{
@@ -4255,7 +4282,7 @@ export default function TradingBot(){
         )}
 
         {/* AUTO STATUS */}
-        {autoMode&&(
+        {(autoMode||autoRealMode)&&(
           <div className="fade-up" style={{background:`${phaseInfo.color}0e`,border:`1px solid ${phaseInfo.color}35`,borderRadius:8,padding:"10px 16px",marginBottom:10}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div>
@@ -4388,17 +4415,27 @@ export default function TradingBot(){
           );
         })()}
 
-        {/* CONTROLS */}
-        <div className="g3" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+        {/* CONTROLS — AUTO split into two independent switches: Simulado and
+            Deriv Real used to share ONE button, so there was no way to run
+            one without the other (a signal either went real when eligible or
+            fell back to Simulado). Requested live right after discovering
+            that AUTO OFF — not "esperando el mes de Simulado" or Deriv being
+            cautious — was the whole reason nothing was opening. */}
+        <div className="g4" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:10}}>
           <button onClick={()=>runAnalysis("Análisis manual")} disabled={analyzing}
             style={{background:analyzing?T.dim:`${T.accent}14`,border:`1px solid ${analyzing?T.border:T.accent}`,
               color:analyzing?T.muted:T.accent,borderRadius:8,padding:"11px 8px",cursor:analyzing?"not-allowed":"pointer",fontSize:12,fontWeight:700}}>
             {analyzing?"⏳ Analizando...":"🔍 Analizar IA"}
           </button>
-          <button onClick={()=>setAutoMode(p=>{if(p){setAutoPhase("idle");setNextAnalysis(null);}return!p;})}
+          <button onClick={()=>setAutoMode(p=>{if(p&&!autoRealMode){setAutoPhase("idle");setNextAnalysis(null);}return!p;})}
             style={{background:autoMode?`${T.green}14`:"transparent",border:`2px solid ${autoMode?T.green:T.border}`,
               color:autoMode?T.green:T.muted,borderRadius:8,padding:"11px 8px",cursor:"pointer",fontSize:12,fontWeight:700}}>
-            {autoMode?"🟢 AUTO ON":"⚪ AUTO OFF"}
+            {autoMode?"🟢 AUTO SIMULADO":"⚪ AUTO SIMULADO"}
+          </button>
+          <button onClick={()=>setAutoRealMode(p=>{if(p&&!autoMode){setAutoPhase("idle");setNextAnalysis(null);}return!p;})}
+            style={{background:autoRealMode?`${T.red}14`:"transparent",border:`2px solid ${autoRealMode?T.red:T.border}`,
+              color:autoRealMode?T.red:T.muted,borderRadius:8,padding:"11px 8px",cursor:"pointer",fontSize:12,fontWeight:700}}>
+            {autoRealMode?"🔴 AUTO DERIV REAL":"⚪ AUTO DERIV REAL"}
           </button>
           <button onClick={()=>loadNews(symbol)} disabled={loadingNews}
             style={{background:loadingNews?T.dim:`${T.yellow}10`,border:`1px solid ${loadingNews?T.border:T.yellow}`,
