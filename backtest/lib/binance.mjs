@@ -1,4 +1,11 @@
-// Historical candles for crypto — Binance public klines API (no key needed).
+// Historical candles for crypto — Binance's public-market-data mirror (no
+// key needed). Deliberately data-api.binance.vision, NOT api.binance.com:
+// the main domain 451s requests from cloud/datacenter IP ranges (verified
+// live — GitHub Actions' runners got "Binance 451 for ETHUSDT" every time),
+// a geo/regulatory block Binance applies to the main API regardless of the
+// request being fully public, unauthenticated market data. The .vision
+// mirror serves the identical read-only endpoints specifically to route
+// around that — same response shape, verified directly.
 // Paginated: 1000 candles per call, walked forward by startTime until `days`
 // of history is covered.
 
@@ -12,7 +19,7 @@ export async function fetchBinanceHistory(symbol, { days = 365, interval = "1h" 
   const candles = [];
   let cursor = startTime;
   while (cursor < endTime) {
-    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&startTime=${cursor}&limit=1000`;
+    const url = `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=${interval}&startTime=${cursor}&limit=1000`;
     const r = await fetch(url);
     if (!r.ok) throw new Error(`Binance ${r.status} for ${symbol}`);
     const rows = await r.json();
