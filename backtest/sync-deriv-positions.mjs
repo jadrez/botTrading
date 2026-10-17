@@ -19,7 +19,11 @@
 
 import { getPool } from "./lib/db.mjs";
 
-const DEFAULT_API_BASE = "https://bot-trading-nu.vercel.app";
+// trading-lijuflow.fly.dev (not the custom trading.lijuflow.com domain) —
+// the Fly subdomain always resolves/has a valid cert regardless of the
+// Cloudflare DNS records for the custom domain, so this job can't go stale
+// if those ever lapse or are mid-propagation.
+const DEFAULT_API_BASE = "https://trading-lijuflow.fly.dev";
 
 function parseArgs(argv) {
   const out = {};

@@ -1309,12 +1309,13 @@ async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,tre
   });
   if(!r.ok){
     // 401/403 here means Groq rejected the API key itself — this is a config
-    // problem in Vercel's env vars (GROQ_API_KEY), not a bug in this app.
-    // Distinguish it from a generic network error so it's obvious to fix.
+    // problem in the GROQ_API_KEY secret (Fly: `fly secrets set`), not a bug
+    // in this app. Distinguish it from a generic network error so it's
+    // obvious to fix.
     const isAuthError=r.status===401||r.status===403;
     return{signal:"HOLD",confidence:40,
       reasoning:isAuthError
-        ?"GROQ_API_KEY inválida o expirada — genera una nueva en console.groq.com y actualízala en Vercel (Settings → Environment Variables), luego redeploy."
+        ?"GROQ_API_KEY inválida o expirada — genera una nueva en console.groq.com y actualízala con `fly secrets set GROQ_API_KEY=...`."
         :`Error del servidor de análisis (HTTP ${r.status}).`,
       news_impact:"NEUTRAL",
       key_factor:isAuthError?"API key de Groq inválida":"Error conexión",

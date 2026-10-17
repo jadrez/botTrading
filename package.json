@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "start": "node server.mjs",
     "backtest": "node backtest/run.mjs",
     "backtest:sweep": "node backtest/sweep.mjs",
     "backtest:wf": "node backtest/walkforward.mjs",
@@ -16,6 +17,7 @@
   },
   "dependencies": {
     "dotenv": "^17.4.2",
+    "express": "^4.22.3",
     "lightweight-charts": "^4.2.1",
     "pg": "^8.23.0",
     "react": "^18.3.1",
