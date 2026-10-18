@@ -22,6 +22,18 @@ export const MAX_SIM_POSITIONS    = 10;
 // closure reconciliation all confirmed live). At $5 stake, worst case is
 // 10 × $5 = $50 (Deriv's stop-out caps any single loss at its own stake).
 export const MAX_REAL_POSITIONS   = 10;
+
+// Real money, SAME-symbol stacking — found live in production data: on
+// 2026-09-16 the bot opened 6 separate real BUY AUD/USD positions within
+// ~13 hours (MAX_POSITIONS=10/symbol never stopped it, and
+// findCorrelatedRealDuplicate() deliberately skips same-symbol, assuming
+// MAX_POSITIONS already covers it — it doesn't, that cap counts sim+real
+// combined and was sized for cross-symbol diversification, not this). All 6
+// got stopped out together for -$21 instead of one position losing its
+// normal ~$3.50. One real position per symbol at a time — a fresh signal on
+// a symbol that already has an open real position registers in Simulado
+// instead, same as any other real-ineligible candidate.
+export const MAX_REAL_POSITIONS_PER_SYMBOL = 1;
 // v4: raised $3 -> $5. At $5 stake × 100x (notional $500), the validated
 // price-move % (0.6-0.9%) scales to a ~$3-4.50 TP — lands the per-trade
 // dollar target where it was asked to land ($3+ before the trailing

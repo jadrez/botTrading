@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createChart, LineStyle, CrosshairMode } from "lightweight-charts";
 import { T, STYLES } from "./theme.js";
 import { SYMBOL_STRATEGY, scaledTpSl } from "./lib/symbolStrategy.js";
-import { MAX_POSITIONS, MAX_SIM_POSITIONS, MAX_REAL_POSITIONS, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK, SIM_CONFIDENCE_DISCOUNT, SIM_CONFIDENCE_FLOOR, CORR_DUP_CONFIDENCE_PENALTY } from "./lib/constants.js";
+import { MAX_POSITIONS, MAX_SIM_POSITIONS, MAX_REAL_POSITIONS, MAX_REAL_POSITIONS_PER_SYMBOL, DEFAULT_STAKE, DEFAULT_MULTIPLIER, ANALYSIS_INTERVAL_MS, TRAIL_BREAKEVEN_AT, TRAIL_GIVEBACK, SIM_CONFIDENCE_DISCOUNT, SIM_CONFIDENCE_FLOOR, CORR_DUP_CONFIDENCE_PENALTY } from "./lib/constants.js";
 import Sparkline from "./components/Sparkline.jsx";
 import TierBadge from "./components/TierBadge.jsx";
 import TechnicalPanel from "./components/TechnicalPanel.jsx";
@@ -362,9 +362,17 @@ function getPatternAdjustment(patternNames, byPatternStats){
   const matches=byPatternStats.filter(p=>patternNames.includes(p.name) && p.t>=5);
   if(!matches.length) return {delta:0, note:null};
   const avgWr=matches.reduce((s,p)=>s+p.wr,0)/matches.length;
-  if(avgWr>=65) return {delta:6, note:`patrón históricamente fuerte (${Math.round(avgWr)}% WR)`};
-  if(avgWr<=35) return {delta:-10, note:`patrón históricamente débil (${Math.round(avgWr)}% WR)`};
-  return {delta:0, note:null};
+  // Graduated around 50% (a real coin flip — not 35/65) instead of a flat
+  // dead zone. Found live: "Double Top"/"Double Bottom" fire on ~85% of all
+  // trades (680/634 of 792 — the pivot-tolerance that detects them is far
+  // too loose, see detectPatterns) sitting at 45-46% WR, which the old
+  // 35-65% dead zone scored as a neutral +0 despite real evidence they add
+  // no edge — by sheer volume those two patterns alone were -$672 of
+  // accumulated pnl. Same slope as before at the extremes (±0.5/point,
+  // capped at the old -10/+6), just no longer blind in the middle.
+  const delta=Math.max(-10,Math.min(6,Math.round((avgWr-50)*0.5)));
+  if(delta===0) return {delta:0, note:null};
+  return {delta, note:`patrón histórico ${delta>0?"fuerte":"débil"} (${Math.round(avgWr)}% WR)`};
 }
 
 // Real money only: block opening a real position that's actually the SAME
@@ -1423,6 +1431,12 @@ export default function TradingBot(){
   // disarmed Deriv Real (and vice versa) — the likely reason real trading
   // went quiet after a single position. This is purely a view filter.
   const [tradingViewFilter,setTradingViewFilter] = useState(()=>localStorage.getItem("derivEnabled")==="true");
+  // Histórico search filters — independent of tradingViewFilter (sim/real
+  // toggle stays as its own switch; these narrow further within that set).
+  const [histFrom,setHistFrom]       = useState("");
+  const [histTo,setHistTo]           = useState("");
+  const [histSymbol,setHistSymbol]   = useState("");
+  const [histType,setHistType]       = useState("");
   const [derivBalance,setDerivBalance]    = useState(null);
   const [derivLoginId,setDerivLoginId]    = useState(null);
   const [derivConnectErr,setDerivConnectErr]= useState(null);
@@ -1503,7 +1517,7 @@ export default function TradingBot(){
   // durable history loads (falls back silently to the local-only view if the
   // DB is unreachable — see api/trades.js).
   useEffect(()=>{
-    fetch("/api/trades?limit=500")
+    fetch("/api/trades?limit=5000")
       .then(r=>r.ok?r.json():null)
       .then(d=>{
         if(d?.trades?.length){
@@ -2475,7 +2489,7 @@ export default function TradingBot(){
       fetch("/api/trades",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
           symbol:closedTrade.symbol, type:closedTrade.type,
-          entryPrice:closedTrade.entry, exitPrice, pnl,
+          entryPrice:closedTrade.entry, exitPrice, pnl, confidence:pos.confidence??null,
           patterns:closedTrade.activePatterns, closeReason:reason,
           derivContractId:pos.derivContractId, commission,
           allocatedSize:pos.allocatedSize||positionSizeRef.current, multiplier:pos.multiplier||multiplierRef.current,
@@ -2785,9 +2799,11 @@ export default function TradingBot(){
             // opposite-signed positions span every sign combination on the
             // rest via the correlation table). Still needs the reinforced
             // bar to actually go real; blockReasonReal stays null otherwise.
+            const sameSymbolRealCount=openRealPositions.filter(p=>p.symbol===activeSym).length;
             let blockReasonReal=null;
             if(activeTier==="SIN-EDGE"||!activeTier) blockReasonReal=`${activeSym} es tier ${activeTier||"desconocido"}`;
             else if(realPositionsCount>=MAX_REAL_POSITIONS) blockReasonReal=`ya hay ${realPositionsCount}/${MAX_REAL_POSITIONS} posiciones reales abiertas`;
+            else if(sameSymbolRealCount>=MAX_REAL_POSITIONS_PER_SYMBOL) blockReasonReal=`ya hay ${sameSymbolRealCount}/${MAX_REAL_POSITIONS_PER_SYMBOL} posición real abierta en ${activeSym} — no se apila la misma apuesta`;
             else if(dupSymbol){
               const reinforcedMinConf=Math.min(95,(SYMBOL_STRATEGY[activeSym]?.minConf??minConf)+CORR_DUP_CONFIDENCE_PENALTY);
               if(result.confidence<reinforcedMinConf) blockReasonReal=`${result.signal} ${activeSym} es la misma apuesta que la posición real en ${dupSymbol} (correlacionados) — confianza ${result.confidence}% < umbral reforzado ${reinforcedMinConf}%`;
@@ -2818,6 +2834,7 @@ export default function TradingBot(){
           const mainScaled=scaledTpSl(activeSym,ps,multiplierRef.current);
           const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
             symbol:activeSym,openTime:Date.now(),allocatedSize:ps,multiplier:multiplierRef.current,peakPnl:0,
+            confidence:result.confidence,
             tp:mainScaled?.tp??tpTargetRef.current, sl:mainScaled?.sl??slTargetRef.current,
             ...(derivContractId&&{derivContractId})};
 
@@ -2909,7 +2926,11 @@ export default function TradingBot(){
      CORR_DUP_CONFIDENCE_PENALTY puntos más de confianza (antes bloqueaba
      por completo; con solo 8 pares forex ligados al mismo factor de fondo
      -fuerza del dólar-, eso topaba la diversificación real en la práctica a
-     ~2 símbolos). Respeta también el cupo por símbolo (MAX_POSITIONS) y
+     ~2 símbolos). SÍ sigue bloqueando por completo apilar MÁS de una
+     posición real en el MISMO símbolo (MAX_REAL_POSITIONS_PER_SYMBOL) — en
+     producción el bot llegó a abrir 6 BUY reales en AUD/USD a la vez, que
+     cerraron todas juntas en pérdida; eso no es diversificación, es la misma
+     apuesta multiplicada. Respeta también el cupo por símbolo (MAX_POSITIONS) y
      los cupos GLOBALES INDEPENDIENTES de cada modo — MAX_SIM_POSITIONS y
      MAX_REAL_POSITIONS ya no comparten un solo pool de 10: antes, Simulado
      (más símbolos elegibles + umbral más bajo) llenaba ese pool compartido
@@ -2944,7 +2965,8 @@ export default function TradingBot(){
       // correlated symbol — no longer a hard block, see that constant),
       // everything else gets the Simulado discount for faster learning cycles.
       const dupSymbol=findCorrelatedRealDuplicate(sym,data.signal,openRealPositions);
-      const willBeReal=autoRealRef.current && derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS;
+      const sameSymbolRealCount=openRealPositions.filter(p=>p.symbol===sym).length;
+      const willBeReal=autoRealRef.current && derivEnabledRef.current && ASSETS[sym]?.type==="forex" && openRealPositions.length<MAX_REAL_POSITIONS && sameSymbolRealCount<MAX_REAL_POSITIONS_PER_SYMBOL;
       // Neither switch wants this candidate: it wouldn't be real (Deriv Real
       // AUTO off, or not eligible) and Simulado AUTO is off too, so there's
       // nowhere for it to land — skip before spending the minConf/pattern
@@ -2989,6 +3011,7 @@ export default function TradingBot(){
       const pos={
         type:data.signal, entry:data.price, id:Date.now()+Math.random(),
         symbol:sym, openTime:Date.now(), allocatedSize:ps, multiplier:multiplierRef.current, peakPnl:0,
+        confidence:adjConfidence,
         tp:scaled?.tp??tpTargetRef.current, sl:scaled?.sl??slTargetRef.current,
         ...(derivContractId&&{derivContractId}),
       };
@@ -3916,7 +3939,21 @@ export default function TradingBot(){
           // badge still exists for when both ever mix. See the toggle right
           // below — switching it never touches derivEnabled.
           const viewPositions=positions.filter(p=>tradingViewFilter?!!p.derivContractId:!p.derivContractId);
-          const viewTrades=trades.filter(t=>tradingViewFilter?!!t.derivContractId:!t.derivContractId);
+          const modeTrades=trades.filter(t=>tradingViewFilter?!!t.derivContractId:!t.derivContractId);
+          // Histórico search filters — date range (by close time, falls back
+          // to open time for trades still missing one), PAR, TIPO. Purely a
+          // narrowing view over modeTrades, same pattern as tradingViewFilter.
+          const histSymbolOptions=[...new Set(modeTrades.map(t=>t.symbol))].sort();
+          const fromMs=histFrom?new Date(histFrom+"T00:00:00").getTime():null;
+          const toMs=histTo?new Date(histTo+"T23:59:59").getTime():null;
+          const viewTrades=modeTrades.filter(t=>{
+            const ts=t.closeTime||t.openTime;
+            if(fromMs!=null&&(!ts||ts<fromMs)) return false;
+            if(toMs!=null&&(!ts||ts>toMs)) return false;
+            if(histSymbol&&t.symbol!==histSymbol) return false;
+            if(histType&&t.type!==histType) return false;
+            return true;
+          });
           const closedWins=viewTrades.filter(t=>t.pnl>0).length;
           const closedLosses=viewTrades.filter(t=>t.pnl<=0).length;
           const totalClosedPnl=viewTrades.reduce((s,t)=>s+(t.pnl||0),0);
@@ -4067,9 +4104,53 @@ export default function TradingBot(){
               {/* Histórico de cerradas */}
               <div>
                 <div style={{fontSize:14,fontWeight:700,color:T.text,letterSpacing:1,marginBottom:10}}>HISTÓRICO — GANANCIAS Y PÉRDIDAS</div>
+
+                {/* Filtros de búsqueda — fecha, PAR, TIPO. Narrowing-only sobre modeTrades (sim/real ya elegido arriba). */}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end",marginBottom:10,background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"10px 12px"}}>
+                  <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <span style={{fontSize:7,color:T.muted,letterSpacing:1}}>DESDE</span>
+                    <input type="date" value={histFrom} onChange={e=>setHistFrom(e.target.value)}
+                      style={{background:T.dim,border:`1px solid ${T.border}`,borderRadius:5,color:T.text,fontSize:10,padding:"5px 7px"}}/>
+                  </label>
+                  <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <span style={{fontSize:7,color:T.muted,letterSpacing:1}}>HASTA</span>
+                    <input type="date" value={histTo} onChange={e=>setHistTo(e.target.value)}
+                      style={{background:T.dim,border:`1px solid ${T.border}`,borderRadius:5,color:T.text,fontSize:10,padding:"5px 7px"}}/>
+                  </label>
+                  <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <span style={{fontSize:7,color:T.muted,letterSpacing:1}}>PAR</span>
+                    <select value={histSymbol} onChange={e=>setHistSymbol(e.target.value)}
+                      style={{background:T.dim,border:`1px solid ${T.border}`,borderRadius:5,color:T.text,fontSize:10,padding:"5px 7px",minWidth:110}}>
+                      <option value="">Todos</option>
+                      {histSymbolOptions.map(s=><option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </label>
+                  <label style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <span style={{fontSize:7,color:T.muted,letterSpacing:1}}>TIPO</span>
+                    <select value={histType} onChange={e=>setHistType(e.target.value)}
+                      style={{background:T.dim,border:`1px solid ${T.border}`,borderRadius:5,color:T.text,fontSize:10,padding:"5px 7px"}}>
+                      <option value="">Todos</option>
+                      <option value="BUY">BUY</option>
+                      <option value="SELL">SELL</option>
+                    </select>
+                  </label>
+                  {(histFrom||histTo||histSymbol||histType)&&(
+                    <button onClick={()=>{setHistFrom("");setHistTo("");setHistSymbol("");setHistType("");}}
+                      style={{background:"transparent",border:`1px solid ${T.border}`,borderRadius:5,color:T.muted,fontSize:10,padding:"6px 10px",cursor:"pointer"}}>
+                      ✕ Limpiar filtros
+                    </button>
+                  )}
+                  <div style={{marginLeft:"auto",fontSize:10,color:T.muted,textAlign:"right"}}>
+                    {viewTrades.length} operación{viewTrades.length!==1?"es":""}
+                    {viewTrades.length>0&&<> · <span style={{color:viewTrades.reduce((s,t)=>s+(t.pnl||0),0)>=0?T.green:T.red,fontWeight:700}}>{fUSD(viewTrades.reduce((s,t)=>s+(t.pnl||0),0))}</span></>}
+                  </div>
+                </div>
+
                 {viewTrades.length===0?(
                   <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:8,padding:"20px",textAlign:"center",fontSize:11,color:T.muted}}>
-                    {tradingViewFilter?"Sin operaciones reales cerradas en Deriv todavía.":"Sin operaciones cerradas todavía."}
+                    {modeTrades.length===0
+                      ?(tradingViewFilter?"Sin operaciones reales cerradas en Deriv todavía.":"Sin operaciones cerradas todavía.")
+                      :"Ninguna operación coincide con estos filtros."}
                   </div>
                 ):(
                   <div className="table-scroll">
@@ -4077,7 +4158,7 @@ export default function TradingBot(){
                       <div>APERTURA</div><div>CIERRE</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>PATRONES</div>
                     </div>
                     <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:1100}}>
-                      {viewTrades.slice(0,50).map((t,i)=>{
+                      {viewTrades.slice(0,200).map((t,i)=>{
                         const prec=ASSETS[t.symbol]?.precision||5;
                         const win=t.pnl>0;
                         const col=win?T.green:T.red;
@@ -4113,6 +4194,11 @@ export default function TradingBot(){
                         );
                       })}
                     </div>
+                  </div>
+                )}
+                {viewTrades.length>200&&(
+                  <div style={{fontSize:9,color:T.muted,textAlign:"center",marginTop:8}}>
+                    Mostrando 200 de {viewTrades.length} — ajusta los filtros para acotar más.
                   </div>
                 )}
               </div>
@@ -4159,6 +4245,7 @@ export default function TradingBot(){
                     const manualScaled=scaledTpSl(symbol,positionSizeRef.current,multiplierRef.current);
                     const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now(),symbol,openTime:Date.now(),
                       allocatedSize:positionSizeRef.current,multiplier:multiplierRef.current,peakPnl:0,
+                      confidence:aiResult.confidence,
                       tp:manualScaled?.tp??tpTargetRef.current, sl:manualScaled?.sl??slTargetRef.current};
                     setPositions(p=>[...p,pos]);
                     savePositionOpen(pos,aiResult.confidence);

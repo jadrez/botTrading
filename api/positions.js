@@ -21,6 +21,7 @@ export default async function handler(req, res) {
         entry: parseFloat(row.entry_price),
         allocatedSize: row.allocated_size != null ? parseFloat(row.allocated_size) : undefined,
         multiplier: row.multiplier ?? undefined,
+        confidence: row.confidence ?? undefined,
         tp: row.tp != null ? parseFloat(row.tp) : undefined,
         sl: row.sl != null ? parseFloat(row.sl) : undefined,
         derivContractId: row.deriv_contract_id ?? undefined,

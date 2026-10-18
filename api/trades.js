@@ -38,7 +38,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method === "GET") {
-    const limit = Math.min(500, parseInt(req.query?.limit, 10) || 200);
+    const limit = Math.min(5000, parseInt(req.query?.limit, 10) || 200);
     try {
       const r = await db.query(
         `SELECT symbol, type, entry_price, exit_price, pnl, confidence, patterns, reasons, close_reason, deriv_contract_id, commission, allocated_size, multiplier, opened_by, opened_at, closed_at
