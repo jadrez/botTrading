@@ -1842,6 +1842,15 @@ export default function TradingBot(){
     // watcher's only guard is priceVerified, which this call used to set
     // true unconditionally, real data or not.
     const applyForexCandles=(newCandles,rate,verified=true)=>{
+      // Guards against the SAME bug class as the verified=false note below,
+      // different trigger: an in-flight fetch for the symbol THIS effect was
+      // set up for can still resolve after the user switches symbols —
+      // clearInterval(iv) in the cleanup only stops FUTURE ticks, it can't
+      // cancel one already past its await. Verified live: a stale oil
+      // (XTI/USD, ~$97) price fetch resolved after switching to USD/JPY and
+      // got written in as USD/JPY's price (~$155), triggering a phantom SL
+      // close at a ~38% "loss" that was really just the wrong symbol's rate.
+      if(!wsAlive) return;
       if(!newCandles?.length) return;
       setCandles(newCandles);
       const closes=newCandles.map(c=>c.c);
@@ -1876,6 +1885,7 @@ export default function TradingBot(){
           const d=await r.json();
           const np=parseFloat(d.price);
           if(isNaN(np))return;
+          if(!wsAlive)return; // see the same guard/comment in applyForexCandles above
           priceRef.current=np;
           setPrice(np);
           setPriceVerified(true);
@@ -1954,6 +1964,7 @@ export default function TradingBot(){
             ?await fetchCommodityRateCached(cur.yahooTicker,5000)
             :await fetchForexRateCached(forexFrom,forexTo,2000);
           if(!np||isNaN(np)) return;
+          if(!wsAlive) return; // see the same guard/comment in applyForexCandles above
           _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
           setPrice(np); priceRef.current=np;
           setPriceVerified(true); setForexLive(true);
@@ -2056,6 +2067,7 @@ export default function TradingBot(){
                     ? await fetchCommodityRateCached(cur.yahooTicker,5000)
                     : await fetchForexRateCached(forexFrom,forexTo,5000);
                   if(!np||isNaN(np)) return;
+                  if(!wsAlive) return; // see the same guard/comment in applyForexCandles above
                   _fxCache[`${forexFrom}_${forexTo}`]={rate:np,ts:Date.now()};
                   setPrice(np); priceRef.current=np;
                   setPriceVerified(true); setForexLive(true);

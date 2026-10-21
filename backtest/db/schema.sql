@@ -63,6 +63,18 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS commission NUMERIC;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS allocated_size NUMERIC;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS multiplier INT;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS opened_by TEXT DEFAULT 'BOT';
+-- A real contract can only ever close once — but the client-side "Deriv
+-- portfolio sync" effect (runs in any open browser tab) and the server-side
+-- sync-deriv-positions.mjs cron (every ~5min via GitHub Actions) both do the
+-- exact same reconciliation independently, and can race: both see the same
+-- is_sold-but-still-tracked contract before either deletes it from
+-- open_positions, and both POST a closing row here. Found live: 20 real
+-- contracts double-logged (2 of them triple), inflating booked real P&L by
+-- -$20.10 beyond what actually happened on Deriv — same pattern
+-- open_positions already guards against (see its own partial unique index
+-- below), trades never had the equivalent.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_deriv_contract
+  ON trades (deriv_contract_id) WHERE deriv_contract_id IS NOT NULL;
 
 -- Rolling walk-forward folds: params are re-picked on a training window and
 -- then judged ONLY on the immediately-following, never-seen block. This is

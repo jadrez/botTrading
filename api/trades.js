@@ -21,9 +21,22 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "symbol, type, entryPrice, exitPrice, pnl are required" });
     }
     try {
+      // A real contract can only close once — the client-side portfolio-sync
+      // effect and the server-side sync-deriv-positions.mjs cron both run the
+      // same reconciliation independently and can race, each POSTing a
+      // closing row for the same contract before either deletes it from
+      // open_positions. Found live: 20 contracts double/triple-logged,
+      // inflating booked real P&L. ON CONFLICT DO NOTHING (the unique index
+      // in schema.sql) makes a duplicate POST a no-op instead of a second
+      // row — simulated trades have no contract id to collide on, so they're
+      // unaffected and keep inserting normally.
+      const conflictClause = derivContractId
+        ? `ON CONFLICT (deriv_contract_id) WHERE deriv_contract_id IS NOT NULL DO NOTHING`
+        : ``;
       const r = await db.query(
         `INSERT INTO trades (symbol, type, entry_price, exit_price, pnl, confidence, patterns, reasons, close_reason, deriv_contract_id, commission, allocated_size, multiplier, opened_by, opened_at, closed_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         ${conflictClause}
          RETURNING id`,
         [symbol, type, entryPrice, exitPrice, pnl, confidence,
          JSON.stringify(patterns), JSON.stringify(reasons), closeReason || null,
@@ -31,7 +44,7 @@ export default async function handler(req, res) {
          allocatedSize ?? null, multiplier ?? null, openedBy === "MANUAL" ? "MANUAL" : "BOT",
          openedAt ? new Date(openedAt) : new Date(), closedAt ? new Date(closedAt) : new Date()]
       );
-      return res.status(200).json({ ok: true, id: r.rows[0].id });
+      return res.status(200).json({ ok: true, id: r.rows[0]?.id ?? null, deduped: !r.rows.length });
     } catch (e) {
       return res.status(500).json({ error: e.message });
     }
