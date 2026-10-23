@@ -2804,6 +2804,21 @@ export default function TradingBot(){
           const openRealPositions=posRef.current.filter(p=>p.derivContractId);
           const realPositionsCount=openRealPositions.length;
           const dupSymbol=findCorrelatedRealDuplicate(activeSym,result.signal,openRealPositions);
+          // Computed BEFORE the Deriv order so the limit_order sent to Deriv
+          // itself matches activeSym's own validated tp/sl, not whatever the
+          // generic tpTarget/slTarget sliders happen to be set to (those
+          // default to ETH/USDT's numbers — see initTp/initSl — and are
+          // shared across every symbol). Found live: every real order's own
+          // Deriv-side stop was the SAME $2/$4ish figure regardless of
+          // symbol, so Deriv was closing positions at ITS generic target —
+          // never reaching the per-symbol validated one — while the app's
+          // own tracking (pos.tp/pos.sl below) showed the correct validated
+          // number the whole time. Across 102 real trades only ONE ever hit
+          // its own TP; the other ~35% that didn't match either target
+          // within tolerance landed as unexplained "MANUAL" closes instead
+          // of the TP/SL hits they actually were.
+          const mainScaled=scaledTpSl(activeSym,ps,multiplierRef.current);
+          const realTp=mainScaled?.tp??tpTargetRef.current, realSl=mainScaled?.sl??slTargetRef.current;
           if(autoRealRef.current && derivEnabledRef.current && activeAssetCheck?.type==="forex"){
             // Correlated duplicate is a confidence PENALTY, not a hard block
             // (was one — verified live it mathematically capped real trading
@@ -2823,7 +2838,7 @@ export default function TradingBot(){
             if(blockReasonReal){
               addLog(`🔴 Deriv: ${blockReasonReal} — posición registrada en simulación`,"sell");
             } else {
-              const dResult=await openDerivOrder(activeSym,result.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
+              const dResult=await openDerivOrder(activeSym,result.signal,ps,multiplierRef.current,realTp,realSl);
               if(dResult.ok){
                 derivContractId=dResult.contractId;
                 addLog(`🔴 Deriv orden REAL ${result.signal} abierta${dupSymbol?` [misma apuesta que ${dupSymbol}, confianza reforzada OK]`:""} | ContractID:${derivContractId} | Stake:$${ps} × ${multiplierRef.current}x @ ${dResult.buyPrice}`,"info");
@@ -2843,7 +2858,6 @@ export default function TradingBot(){
             setAnalyzing(false); pendingAnalysisRef.current=false; return;
           }
 
-          const mainScaled=scaledTpSl(activeSym,ps,multiplierRef.current);
           const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
             symbol:activeSym,openTime:Date.now(),allocatedSize:ps,multiplier:multiplierRef.current,peakPnl:0,
             confidence:result.confidence,
@@ -3002,8 +3016,13 @@ export default function TradingBot(){
       // concurrent real positions. A correlated duplicate already had to
       // clear the reinforced confidence bar above to get here.
       let derivContractId=null;
+      // Same fix as runAnalysis above: the Deriv-side limit_order must match
+      // sym's own validated tp/sl, not the generic tpTarget/slTarget
+      // sliders — see the comment there for what went wrong live.
+      const scaled=scaledTpSl(sym,ps,multiplierRef.current);
+      const realTp=scaled?.tp??tpTargetRef.current, realSl=scaled?.sl??slTargetRef.current;
       if(willBeReal){
-        const dResult=await openDerivOrder(sym,data.signal,ps,multiplierRef.current,tpTargetRef.current,slTargetRef.current);
+        const dResult=await openDerivOrder(sym,data.signal,ps,multiplierRef.current,realTp,realSl);
         if(dResult.ok){
           derivContractId=dResult.contractId;
           openRealPositions.push({symbol:sym,type:data.signal});
@@ -3019,7 +3038,6 @@ export default function TradingBot(){
       if(!derivContractId && !autoRef.current) continue;
       if(!derivContractId) simCount++; // aterrizó en Simulado — incluye el fallback cuando la orden real falló
 
-      const scaled=scaledTpSl(sym,ps,multiplierRef.current);
       const pos={
         type:data.signal, entry:data.price, id:Date.now()+Math.random(),
         symbol:sym, openTime:Date.now(), allocatedSize:ps, multiplier:multiplierRef.current, peakPnl:0,
