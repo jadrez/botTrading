@@ -5061,7 +5061,7 @@ export default function TradingBot(){
               </div>
               <div style={{marginTop:10,fontSize:9,color:T.muted}}>
                 P&amp;L de hoy: <span style={{color:todayPnl>=0?T.green:T.red,fontWeight:700}}>{fUSD(todayPnl)}</span>
-                {" "}· {consLosses} pérdida{consLosses!==1?"s":""} seguida{consLosses!==1?"s":""} ahora mismo
+                {" "}· {consecutiveLosses} pérdida{consecutiveLosses!==1?"s":""} seguida{consecutiveLosses!==1?"s":""} ahora mismo
               </div>
             </ConfigCard>
 
