@@ -3749,8 +3749,8 @@ export default function TradingBot(){
           </div>
         )}
 
-        {/* ══════════ VISTA: HOME — SEÑALES FOREX ══════════ */}
-        {activeView==="home"&&(()=>{
+        {/* ══════════ VISTA: SEÑALES — watchlist completo ══════════ */}
+        {activeView==="signals"&&(()=>{
           const FOREX_PAIRS=["EUR/USD","GBP/USD","AUD/USD","NZD/USD","USD/JPY","USD/CHF","USD/CAD","EUR/GBP"];
           const COMMODITY_PAIRS=["XAU/USD","XAG/USD","XTI/USD"];
           const uniquePairs=[...new Set(FOREX_PAIRS)];
@@ -3853,7 +3853,7 @@ export default function TradingBot(){
                 const confBar=Math.min(100,d.confidence||0);
                 return(
                   <div key={sym} className="fade-up"
-                    onClick={()=>{handleSymbolChange(sym);setActiveView("chart");}}
+                    onClick={()=>{handleSymbolChange(sym);setActiveView("home");}}
                     style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",minWidth:760,
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
@@ -3950,7 +3950,7 @@ export default function TradingBot(){
                 const confBar=Math.min(100,d.confidence||0);
                 return(
                   <div key={sym} className="fade-up"
-                    onClick={()=>{handleSymbolChange(sym);setActiveView("chart");}}
+                    onClick={()=>{handleSymbolChange(sym);setActiveView("home");}}
                     style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",minWidth:760,
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
@@ -4301,8 +4301,8 @@ export default function TradingBot(){
           );
         })()}
 
-        {/* ══════════ VISTA: GRÁFICO (por símbolo) ══════════ */}
-        {activeView==="chart"&&(<>
+        {/* ══════════ VISTA: HOME — gráfico del símbolo activo ══════════ */}
+        {activeView==="home"&&(<>
 
         <div className="split-panel" style={{display:"grid",gridTemplateColumns:"1fr 380px",gap:16,alignItems:"start"}}>
         <div style={{minWidth:0}}>
@@ -4969,7 +4969,7 @@ export default function TradingBot(){
           Las señales son educativas y no garantizan resultados en mercados reales. Opera siempre con responsabilidad.
         </div>
 
-        </>)}{/* end chart view */}
+        </>)}{/* end home (chart) view */}
 
         {/* ══════════ VISTA: CONFIGURACIÓN ══════════ */}
         {activeView==="config"&&(()=>{

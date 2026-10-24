@@ -3,10 +3,15 @@ import { T } from "../theme.js";
 // Wide labeled sidebar (Opción B, approved design) — logo, contract-type
 // switcher (Direccional is a visual placeholder only; Rise/Fall has no
 // backtest or Deriv wiring yet, see api/deriv-order.js), and page nav.
-// Replaces the old 3-tab bar (dashboard/signals/trading) with 4 real pages.
+// Replaces the old 3-tab bar (dashboard/signals/trading) with 5 real pages.
+// "home" IS the chart/dashboard (the symbol's candles + análisis técnico +
+// correlaciones) — it's the landing page, no click needed to see a chart.
+// "signals" is the full watchlist table (click a row → jumps to "home" with
+// that symbol loaded), kept as its own page per explicit request after the
+// first cut folded it into Home and that buried the chart behind a click.
 const NAV = [
   { id: "home", label: "Home", d: "M3 11l9-8 9 8M5 10v10h14V10M9 20v-6h6v6" },
-  { id: "chart", label: "Gráfico", d: null }, // rendered separately, not a sidebar nav row (reached via symbol click)
+  { id: "signals", label: "Señales", d: "M11 19a8 8 0 100-16 8 8 0 000 16zM21 21l-4.3-4.3" },
   { id: "historico", label: "Histórico", d: "M12 21a9 9 0 100-18 9 9 0 000 18zM12 7v5l3.5 2" },
   { id: "config", label: "Configuración", d: "M19.4 13a8 8 0 000-2l2.1-1.6-2-3.5-2.5 1a8 8 0 00-1.7-1L14.9 3h-4l-.4 2.9a8 8 0 00-1.7 1l-2.5-1-2 3.5L6.4 11a8 8 0 000 2l-2.1 1.6 2 3.5 2.5-1a8 8 0 001.7 1l.4 2.9h4l.4-2.9a8 8 0 001.7-1l2.5 1 2-3.5L19.4 13zM12 15a3 3 0 100-6 3 3 0 000 6z" },
 ];
@@ -21,7 +26,6 @@ function Icon({ d, size = 17 }) {
 }
 
 export default function Sidebar({ activeView, setActiveView, derivEnabled, derivBalance, derivLoginId, balance }) {
-  const navRows = NAV.filter(n => n.d); // "chart" has no sidebar row — reached by clicking a symbol
   const showingReal = derivEnabled && derivBalance != null;
   return (
     <nav aria-label="Navegación principal" className="app-sidebar"
@@ -55,8 +59,7 @@ export default function Sidebar({ activeView, setActiveView, derivEnabled, deriv
 
       <div className="sidebar-label" style={{ fontSize: 8, color: T.muted, letterSpacing: 1.5, fontWeight: 700, padding: "0 4px 8px" }}>NAVEGACIÓN</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-        {navRows.map(n => {
-          const active = activeView === n.id || (n.id === "home" && activeView === "chart");
+        {NAV.map(n => {
           return (
             <button key={n.id} onClick={() => setActiveView(n.id)} aria-current={activeView === n.id ? "page" : undefined}
               style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 9,
