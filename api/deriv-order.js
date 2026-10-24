@@ -30,6 +30,12 @@ const SYMBOL_MAP = {
   "USD/CAD": "frxUSDCAD", "EUR/GBP": "frxEURGBP",
 };
 const REVERSE_SYMBOL_MAP = Object.fromEntries(Object.entries(SYMBOL_MAP).map(([k, v]) => [v, k]));
+// Direccional (Rise/Fall) label-only map — kept SEPARATE from SYMBOL_MAP on
+// purpose: SYMBOL_MAP gates which symbols the Multipliers "open" action will
+// accept, and synthetic indices haven't gone through that flow. This is only
+// consulted for display (the "contract"/"history" read-only actions below),
+// so a Rise/Fall contract shows "Volatility 75 Index" instead of raw "R_75".
+const SYNTHETIC_LABELS = { "R_75": "Volatility 75 Index" };
 
 function authHeaders(token, appId) {
   return { "Authorization": `Bearer ${token}`, "Deriv-App-ID": String(appId), "Content-Type": "application/json" };
@@ -186,10 +192,16 @@ export default async function handler(req, res) {
       const { msg } = await derivAction(token, appId, accountType, { proposal_open_contract: 1, contract_id: Number(contractId) });
       const c = msg.proposal_open_contract;
       if (!c || !c.contract_id) return res.status(404).json({ error: "Contract not found" });
+      // BUY/SELL here is a Multipliers-vs-Direccional-agnostic "direction"
+      // label: MULTUP/CALL (Multiplicadores alcista / Rise) both read as
+      // BUY, MULTDOWN/PUT (bajista / Fall) as SELL — same convention the
+      // rest of the app already uses for Multipliers direction.
+      const isUpSide = c.contract_type === "MULTUP" || c.contract_type === "CALL";
       return res.status(200).json({
         contractId: c.contract_id,
-        symbol: REVERSE_SYMBOL_MAP[c.underlying_symbol] || c.underlying_symbol,
-        type: c.contract_type === "MULTUP" ? "BUY" : "SELL",
+        symbol: REVERSE_SYMBOL_MAP[c.underlying_symbol] || SYNTHETIC_LABELS[c.underlying_symbol] || c.underlying_symbol,
+        type: isUpSide ? "BUY" : "SELL",
+        contractType: c.contract_type,
         isSold: !!c.is_sold,
         entry: parseFloat(c.entry_spot),
         exitSpot: c.exit_spot != null ? parseFloat(c.exit_spot) : undefined,
@@ -202,6 +214,33 @@ export default async function handler(req, res) {
         openTime: c.purchase_time ? c.purchase_time * 1000 : undefined,
         closeTime: c.sell_time ? c.sell_time * 1000 : undefined,
       });
+    }
+
+    // ── HISTORY — Deriv's own settled-transaction ledger (profit_table),
+    // not a diff against "what's open right now". Exists because the
+    // open_positions-diff reconciliation (the "portfolio" action above,
+    // used by the client sync effect and sync-deriv-positions.mjs) can only
+    // catch a contract while it's still open at the moment a sync runs —
+    // verified live: two manual Volatility 75 Rise/Fall trades settled in
+    // 4s and 13s, both invisible to that approach no matter how often it
+    // polls. profit_table lists contracts by when they SOLD, so a contract
+    // that opened and fully closed between two polls still shows up here.
+    // Each entry only has buy/sell price + times, not symbol/direction —
+    // the caller fetches those per contract_id via the "contract" action.
+    if (action === "history") {
+      const account = await pickAccount(token, appId, accountType);
+      const wsUrl = await getOtpWsUrl(token, appId, account.account_id);
+      const msg = await derivWsCall(wsUrl, { profit_table: 1, limit: Math.min(100, parseInt(req.body?.limit, 10) || 50), sort: "DESC" });
+      const transactions = (msg.profit_table?.transactions || []).map(t => ({
+        contractId: t.contract_id,
+        buyPrice: t.buy_price,
+        sellPrice: t.sell_price,
+        payout: t.payout,
+        profit: t.sell_price - t.buy_price,
+        openTime: t.purchase_time * 1000,
+        closeTime: t.sell_time * 1000,
+      }));
+      return res.status(200).json({ transactions });
     }
 
     // ── OPEN (buy)

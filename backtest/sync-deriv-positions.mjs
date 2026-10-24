@@ -105,7 +105,42 @@ async function main() {
     await pool.query(`DELETE FROM open_positions WHERE client_id = $1`, [pos.client_id]);
   }
 
-  console.log(`\n${dryRun ? "[dry-run] " : ""}Listo: ${newOnes.length} nueva(s), ${missing.length} cerrada(s) reconciliada(s), ${derivPositions.length} reales abiertas en Deriv ahora mismo.`);
+  // ── Backfill from Deriv's own settled-transaction ledger (profit_table),
+  // not a diff against "what's open right now" — needed because the two
+  // loops above can only ever reconcile a contract that was open at the
+  // moment SOME sync ran. Verified live: two manual Volatility 75 Rise/Fall
+  // trades settled in 4s and 13s each — completely invisible to the
+  // open-vs-tracked diff no matter how tight the polling interval, since
+  // they were never "open" at any sync checkpoint. profit_table lists by
+  // when a contract SOLD, so this catches those on the next run regardless
+  // of how fast they closed.
+  const { transactions: history } = await callApi(apiBase, { action: "history", limit: 50 });
+  const historyIds = history.map(t => String(t.contractId));
+  const { rows: alreadyLogged } = historyIds.length
+    ? await pool.query(`SELECT deriv_contract_id FROM trades WHERE deriv_contract_id = ANY($1::text[])`, [historyIds])
+    : { rows: [] };
+  const loggedSet = new Set(alreadyLogged.map(r => r.deriv_contract_id));
+  const trackedOpenIds = new Set(tracked.map(p => String(p.deriv_contract_id))); // handled by the "missing" loop above if still tracked
+  const backfillCandidates = history.filter(t => !loggedSet.has(String(t.contractId)) && !trackedOpenIds.has(String(t.contractId)));
+  let backfilled = 0;
+  for (const t of backfillCandidates) {
+    const detail = await callApi(apiBase, { action: "contract", contractId: t.contractId }).catch(() => null);
+    if (!detail || !detail.isSold) continue;
+    console.log(`  ⟲ backfill: ${detail.symbol} ${detail.type} contractId=${t.contractId} → $${detail.profit?.toFixed(2)}`);
+    backfilled++;
+    if (dryRun) continue;
+    await pool.query(
+      `INSERT INTO trades (symbol, type, entry_price, exit_price, pnl, close_reason, deriv_contract_id, commission, opened_by, opened_at, closed_at)
+       VALUES ($1,$2,$3,$4,$5,'MANUAL',$6,$7,'MANUAL',$8,$9)
+       ON CONFLICT (deriv_contract_id) WHERE deriv_contract_id IS NOT NULL DO NOTHING`,
+      [detail.symbol, detail.type, detail.entry, detail.exitSpot ?? detail.entry, detail.profit ?? 0,
+       String(t.contractId), detail.commission ?? null,
+       detail.openTime ? new Date(detail.openTime) : new Date(t.openTime),
+       detail.closeTime ? new Date(detail.closeTime) : new Date(t.closeTime)]
+    );
+  }
+
+  console.log(`\n${dryRun ? "[dry-run] " : ""}Listo: ${newOnes.length} nueva(s), ${missing.length} cerrada(s) reconciliada(s), ${backfilled} del historial (profit_table), ${derivPositions.length} reales abiertas en Deriv ahora mismo.`);
   await pool.end();
 }
 
