@@ -35,7 +35,14 @@ const REVERSE_SYMBOL_MAP = Object.fromEntries(Object.entries(SYMBOL_MAP).map(([k
 // accept, and synthetic indices haven't gone through that flow. This is only
 // consulted for display (the "contract"/"history" read-only actions below),
 // so a Rise/Fall contract shows "Volatility 75 Index" instead of raw "R_75".
-const SYNTHETIC_LABELS = { "R_75": "Volatility 75 Index" };
+const SYNTHETIC_LABELS = {
+  "R_10": "Volatility 10 Index", "R_25": "Volatility 25 Index", "R_50": "Volatility 50 Index",
+  "R_75": "Volatility 75 Index", "R_100": "Volatility 100 Index",
+  "1HZ10V": "Volatility 10 (1s) Index", "1HZ15V": "Volatility 15 (1s) Index",
+  "1HZ25V": "Volatility 25 (1s) Index", "1HZ30V": "Volatility 30 (1s) Index",
+  "1HZ50V": "Volatility 50 (1s) Index", "1HZ75V": "Volatility 75 (1s) Index",
+  "1HZ90V": "Volatility 90 (1s) Index", "1HZ100V": "Volatility 100 (1s) Index",
+};
 
 function authHeaders(token, appId) {
   return { "Authorization": `Bearer ${token}`, "Deriv-App-ID": String(appId), "Content-Type": "application/json" };
