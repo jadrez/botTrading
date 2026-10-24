@@ -1,8 +1,8 @@
-/* ─── THEME ─────────────────────────────────────────────────────────────── */
+/* ─── THEME — Liju (crema + dorado) ───────────────────────────────────── */
 export const T = {
-  bg:"#F5EFDF", panel:"#FFFFFF", card:"#FFFFFF", border:"#D8CDB0",
-  accent:"#007A8A", green:"#00875A", red:"#D8112F", yellow:"#B98A00",
-  orange:"#C97A00", text:"#201A12", muted:"#8A7F68", dim:"#EAE0C5",
+  bg:"#F6EFDC", panel:"#FFFFFF", card:"#FFFFFF", border:"#D9B65C",
+  accent:"#9C7A1E", glow:"#E8B923", green:"#00875A", red:"#D8112F", yellow:"#B98A00",
+  orange:"#C97A00", text:"#1E1A10", muted:"#8A7F68", dim:"#F1E4BE",
 };
 
 export const STYLES = `
@@ -35,6 +35,8 @@ export const STYLES = `
     .g4{grid-template-columns:repeat(2,1fr)!important;}
     .g3{grid-template-columns:repeat(2,1fr)!important;}
     .split-panel{grid-template-columns:1fr!important;}
+    .app-sidebar{width:76px!important;}
+    .app-sidebar .sidebar-label,.app-sidebar .sidebar-desc,.app-sidebar .sidebar-wordmark{display:none!important;}
   }
   @media (max-width: 560px){
     .g6,.g5,.g4,.g3{grid-template-columns:repeat(2,1fr)!important;}

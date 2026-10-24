@@ -11,6 +11,7 @@ import SchedulePanel from "./components/SchedulePanel.jsx";
 import RangeBar from "./components/RangeBar.jsx";
 import TierLegend from "./components/TierLegend.jsx";
 import SignalDistribution from "./components/SignalDistribution.jsx";
+import Sidebar from "./components/Sidebar.jsx";
 
 /* ─── ASSETS CONFIG ─────────────────────────────────────────────────────── */
 const ASSETS = {
@@ -1335,6 +1336,43 @@ async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,tre
 /* ═══════════════════════════════════════════════════════════════════════════
    MAIN COMPONENT
 ═══════════════════════════════════════════════════════════════════════════ */
+// ── Config view presentational helpers — module-level so React keeps the
+// same component identity across renders (defining these INSIDE the config
+// view's render would remount every <input> on each render, e.g. dropping
+// focus after one keystroke while editing the Crecimiento TP/SL fields).
+function ConfigToggle({on,onClick}){
+  return(
+    <button onClick={onClick} style={{width:36,height:20,borderRadius:10,position:"relative",flex:"0 0 36px",
+      border:"none",cursor:"pointer",background:on?T.green:T.border}}>
+      <span style={{position:"absolute",top:2,width:16,height:16,borderRadius:"50%",background:"#fff",
+        left:on?18:2,transition:"left .15s"}}/>
+    </button>
+  );
+}
+function ConfigField({label,...props}){
+  return(
+    <label style={{display:"flex",flexDirection:"column",gap:3,flex:1}}>
+      <span style={{fontSize:7,color:T.muted,letterSpacing:1}}>{label}</span>
+      <input {...props} style={{background:props.readOnly?T.dim:"#fff",
+        border:`1px solid ${props.readOnly?T.border:T.glow}`,borderRadius:5,color:T.text,
+        fontSize:11,padding:"7px 9px",fontFamily:"'IBM Plex Mono',monospace",width:"100%",boxSizing:"border-box"}}/>
+    </label>
+  );
+}
+function ConfigRow({children}){
+  return(
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"11px 0",borderTop:`1px solid ${T.border}`}}>{children}</div>
+  );
+}
+function ConfigCard({title,icon,children,style}){
+  return(
+    <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:10,padding:18,...style}}>
+      <div style={{fontSize:8,color:T.muted,letterSpacing:2,fontWeight:700,marginBottom:10}}>{icon} {title}</div>
+      {children}
+    </div>
+  );
+}
+
 export default function TradingBot(){
   const [symbol,setSymbol]       = useState("ETH/USDT");
   const asset                    = ASSETS[symbol];
@@ -1410,7 +1448,7 @@ export default function TradingBot(){
   const [corrSignals,setCorrSignals]      = useState({});
   const [forexWatch,setForexWatch]        = useState({});
   const [commodityWatch,setCommodityWatch]= useState({});
-  const [activeView,setActiveView]        = useState("dashboard");
+  const [activeView,setActiveView]        = useState("home");
   // v3: seeded from SYMBOL_STRATEGY (walk-forward-validated per-symbol TP/SL),
   // scaled to the initial stake/multiplier — see scaledTpSl() for why this
   // scaling matters (raw SYMBOL_STRATEGY values assume $10×100x).
@@ -1422,6 +1460,20 @@ export default function TradingBot(){
   const [slTarget,setSlTarget]            = useState(()=>parseFloat(localStorage.getItem("bot_sl_v3")||String(initSl)));
   const tpTargetRef = useRef(parseFloat(localStorage.getItem("bot_tp_v3")||String(initTp)));
   const slTargetRef = useRef(parseFloat(localStorage.getItem("bot_sl_v3")||String(initSl)));
+  // Crecimiento (real) TP/SL override — null means "automatic", i.e. keep
+  // using scaledTpSl()'s per-symbol walk-forward-validated value (the fix
+  // that made Deriv's own limit_order match the app's own number). A
+  // non-null value here takes priority for REAL orders only — Simulado
+  // never reads this, it always stays on the automatic validated value so
+  // the learning data it generates doesn't get muddied by manual tweaks.
+  const [realTpOverride,setRealTpOverride] = useState(()=>{
+    const v=localStorage.getItem("bot_real_tp_override"); return v?parseFloat(v):null;
+  });
+  const [realSlOverride,setRealSlOverride] = useState(()=>{
+    const v=localStorage.getItem("bot_real_sl_override"); return v?parseFloat(v):null;
+  });
+  const realTpOverrideRef = useRef(realTpOverride);
+  const realSlOverrideRef = useRef(realSlOverride);
   const [derivEnabled,setDerivEnabled]    = useState(()=>localStorage.getItem("derivEnabled")==="true");
   // Deliberately separate from derivEnabled: derivEnabled ARMS/DISARMS real
   // money (it's the trading gate — see runAnalysis/runAutoScan), so it must
@@ -1453,6 +1505,15 @@ export default function TradingBot(){
   const consLossesRef  = useRef(0);
   const shortTrendRef  = useRef({pct:0,bullish:0,bearish:0,direction:"NEUTRAL"});
   const skipCyclesRef  = useRef(0);
+  // Gestión de riesgo (Configuración) — consecutiveLossLimit replaces the
+  // old hardcoded "3" in closePosition's pause logic; dailyMaxLoss +
+  // riskStopEnabled are read by the daily-loss-stop effect below (near
+  // totalProfit), which force-disables both AUTO switches when crossed.
+  const [consecutiveLossLimit,setConsecutiveLossLimit] = useState(()=>parseInt(localStorage.getItem("bot_cons_loss_limit")||"3",10));
+  const [dailyMaxLoss,setDailyMaxLoss] = useState(()=>parseFloat(localStorage.getItem("bot_daily_max_loss")||"25"));
+  const [riskStopEnabled,setRiskStopEnabled] = useState(()=>localStorage.getItem("bot_risk_stop_enabled")!=="false");
+  const consecutiveLossLimitRef = useRef(consecutiveLossLimit);
+  const riskStoppedTodayRef = useRef(false); // one trip per calendar day, re-armed below
   const ema200Ref      = useRef(0);
   const srRef          = useRef({supports:[],resistances:[],all:[]});
 
@@ -1503,6 +1564,15 @@ export default function TradingBot(){
   useEffect(()=>{multiplierRef.current=multiplier;localStorage.setItem("bot_mult",String(multiplier));},[multiplier]);
   useEffect(()=>{tpTargetRef.current=tpTarget;localStorage.setItem("bot_tp_v3",String(tpTarget));},[tpTarget]);
   useEffect(()=>{slTargetRef.current=slTarget;localStorage.setItem("bot_sl_v3",String(slTarget));},[slTarget]);
+  useEffect(()=>{realTpOverrideRef.current=realTpOverride;
+    if(realTpOverride==null) localStorage.removeItem("bot_real_tp_override");
+    else localStorage.setItem("bot_real_tp_override",String(realTpOverride));},[realTpOverride]);
+  useEffect(()=>{realSlOverrideRef.current=realSlOverride;
+    if(realSlOverride==null) localStorage.removeItem("bot_real_sl_override");
+    else localStorage.setItem("bot_real_sl_override",String(realSlOverride));},[realSlOverride]);
+  useEffect(()=>{consecutiveLossLimitRef.current=consecutiveLossLimit;localStorage.setItem("bot_cons_loss_limit",String(consecutiveLossLimit));},[consecutiveLossLimit]);
+  useEffect(()=>{localStorage.setItem("bot_daily_max_loss",String(dailyMaxLoss));},[dailyMaxLoss]);
+  useEffect(()=>{localStorage.setItem("bot_risk_stop_enabled",String(riskStopEnabled));},[riskStopEnabled]);
   useEffect(()=>{stakeAutoScaleRef.current=stakeAutoScale;localStorage.setItem("bot_stake_autoscale",String(stakeAutoScale));},[stakeAutoScale]);
   useEffect(()=>{stakeStepRef.current=stakeStep;localStorage.setItem("bot_stake_step_v2",String(stakeStep));},[stakeStep]);
   useEffect(()=>{stakeGrowthTriggerRef.current=stakeGrowthTrigger;localStorage.setItem("bot_stake_trigger",String(stakeGrowthTrigger));},[stakeGrowthTrigger]);
@@ -1561,8 +1631,8 @@ export default function TradingBot(){
         for(const s of d.strategies){
           if(!s.symbol) continue;
           SYMBOL_STRATEGY[s.symbol]=s.tier==="SIN-EDGE"
-            ? {tier:"SIN-EDGE"}
-            : {tier:s.tier, tp:s.tp, sl:s.sl, minConf:s.minConf};
+            ? {tier:"SIN-EDGE", updatedAt:s.updatedAt}
+            : {tier:s.tier, tp:s.tp, sl:s.sl, minConf:s.minConf, updatedAt:s.updatedAt};
           updated++;
         }
         if(updated) addLog(`📊 Estrategia por símbolo actualizada desde re-validación automática (${updated} símbolos)`,"info");
@@ -1657,6 +1727,29 @@ export default function TradingBot(){
   const addLog=useCallback((msg,type="info")=>{
     setLog(p=>[{msg,type,time:now()},...p.slice(0,99)]);
   },[]);
+
+  // Pérdida máxima diaria — re-checked every time a trade closes (trades
+  // changes). Re-arms once today's realized PnL is no longer past the
+  // limit, which in practice only happens when the date rolls over since
+  // trades only accumulate through the day.
+  useEffect(()=>{
+    if(!riskStopEnabled) return;
+    const todayStr=new Date().toDateString();
+    const todayPnl=trades
+      .filter(t=>t.closeTime&&new Date(t.closeTime).toDateString()===todayStr)
+      .reduce((s,t)=>s+(t.pnl||0),0);
+    if(todayPnl<=-dailyMaxLoss){
+      if(!riskStoppedTodayRef.current){
+        riskStoppedTodayRef.current=true;
+        if(autoRef.current||autoRealRef.current){
+          setAutoMode(false); setAutoRealMode(false);
+          addLog(`🛑 Pérdida máxima diaria alcanzada (${fUSD(todayPnl)} ≤ -${fUSD(dailyMaxLoss,false)}) — AUTO detenido. Reactívalo manualmente en Configuración.`,"sell");
+        }
+      }
+    } else {
+      riskStoppedTodayRef.current=false;
+    }
+  },[trades,riskStopEnabled,dailyMaxLoss,addLog]);
 
   /* ── Deriv balance polling ──────────────────────────────────────────── */
   useEffect(()=>{
@@ -2518,7 +2611,7 @@ export default function TradingBot(){
         const newLosses=consLossesRef.current+1;
         consLossesRef.current=newLosses;
         setConsLosses(newLosses);
-        if(newLosses>=3){
+        if(newLosses>=consecutiveLossLimitRef.current){
           // Pause 2 analysis cycles to avoid revenge trading
           skipCyclesRef.current=2; setSkipCycles(2);
           addLog(`⚠️ ${newLosses} SL consecutivos — pausando 2 ciclos para reevaluar tendencia`,"sell");
@@ -2818,7 +2911,7 @@ export default function TradingBot(){
           // within tolerance landed as unexplained "MANUAL" closes instead
           // of the TP/SL hits they actually were.
           const mainScaled=scaledTpSl(activeSym,ps,multiplierRef.current);
-          const realTp=mainScaled?.tp??tpTargetRef.current, realSl=mainScaled?.sl??slTargetRef.current;
+          const realTp=realTpOverrideRef.current??mainScaled?.tp??tpTargetRef.current, realSl=realSlOverrideRef.current??mainScaled?.sl??slTargetRef.current;
           if(autoRealRef.current && derivEnabledRef.current && activeAssetCheck?.type==="forex"){
             // Correlated duplicate is a confidence PENALTY, not a hard block
             // (was one — verified live it mathematically capped real trading
@@ -3020,7 +3113,7 @@ export default function TradingBot(){
       // sym's own validated tp/sl, not the generic tpTarget/slTarget
       // sliders — see the comment there for what went wrong live.
       const scaled=scaledTpSl(sym,ps,multiplierRef.current);
-      const realTp=scaled?.tp??tpTargetRef.current, realSl=scaled?.sl??slTargetRef.current;
+      const realTp=realTpOverrideRef.current??scaled?.tp??tpTargetRef.current, realSl=realSlOverrideRef.current??scaled?.sl??slTargetRef.current;
       if(willBeReal){
         const dResult=await openDerivOrder(sym,data.signal,ps,multiplierRef.current,realTp,realSl);
         if(dResult.ok){
@@ -3151,7 +3244,10 @@ export default function TradingBot(){
   return(
     <>
       <style>{STYLES}</style>
-      <div style={{position:"relative",zIndex:1,minHeight:"100vh",padding:"18px 28px"}}>
+      <div style={{display:"flex",minHeight:"100vh",width:"100%"}}>
+      <Sidebar activeView={activeView} setActiveView={setActiveView}
+        derivEnabled={derivEnabled} derivBalance={derivBalance} derivLoginId={derivLoginId} balance={balance}/>
+      <div style={{position:"relative",zIndex:1,flex:1,minWidth:0,padding:"18px 28px"}}>
 
         {/* HEADER */}
         <div className="header-row" style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:12,paddingBottom:12,borderBottom:`1px solid ${T.border}`}}>
@@ -3653,39 +3749,8 @@ export default function TradingBot(){
           </div>
         )}
 
-        {/* ── NAVIGATION ── */}
-        {(()=>{
-          // Tab badge counts whichever mode Operaciones Trading is currently
-          // VIEWING (tradingViewFilter) — independent of derivEnabled, which
-          // only arms/disarms real money and must not change from browsing.
-          const modePositions=positions.filter(p=>tradingViewFilter?!!p.derivContractId:!p.derivContractId);
-          return(
-        <div style={{display:"flex",gap:0,marginBottom:12,borderBottom:`1px solid ${T.border}`,paddingBottom:0}}>
-          {[
-            {id:"dashboard", label:"📊 Dashboard"},
-            {id:"signals", label:"🔍 Señales"},
-            {id:"trading", label:`💼 Operaciones Trading${modePositions.length>0?` (${modePositions.length})`:""}`,
-              badge:modePositions.length},
-          ].map(tab=>(
-            <button key={tab.id} onClick={()=>setActiveView(tab.id)}
-              style={{
-                background:"transparent",
-                border:"none",
-                borderBottom:`2px solid ${activeView===tab.id?T.accent:"transparent"}`,
-                color:activeView===tab.id?T.accent:T.muted,
-                padding:"8px 20px",cursor:"pointer",
-                fontSize:12,fontWeight:activeView===tab.id?700:400,letterSpacing:.5,
-                transition:"all .15s",
-              }}>
-              {tab.label}
-            </button>
-          ))}
-        </div>
-          );
-        })()}
-
-        {/* ══════════ VISTA: SEÑALES — SEÑALES FOREX ══════════ */}
-        {activeView==="signals"&&(()=>{
+        {/* ══════════ VISTA: HOME — SEÑALES FOREX ══════════ */}
+        {activeView==="home"&&(()=>{
           const FOREX_PAIRS=["EUR/USD","GBP/USD","AUD/USD","NZD/USD","USD/JPY","USD/CHF","USD/CAD","EUR/GBP"];
           const COMMODITY_PAIRS=["XAU/USD","XAG/USD","XTI/USD"];
           const uniquePairs=[...new Set(FOREX_PAIRS)];
@@ -3788,7 +3853,7 @@ export default function TradingBot(){
                 const confBar=Math.min(100,d.confidence||0);
                 return(
                   <div key={sym} className="fade-up"
-                    onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
+                    onClick={()=>{handleSymbolChange(sym);setActiveView("chart");}}
                     style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",minWidth:760,
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
@@ -3885,7 +3950,7 @@ export default function TradingBot(){
                 const confBar=Math.min(100,d.confidence||0);
                 return(
                   <div key={sym} className="fade-up"
-                    onClick={()=>{handleSymbolChange(sym);setActiveView("dashboard");}}
+                    onClick={()=>{handleSymbolChange(sym);setActiveView("chart");}}
                     style={{display:"grid",gridTemplateColumns:"110px 84px 80px 70px 90px 200px 60px 60px",minWidth:760,
                       gap:6,padding:"10px",marginBottom:4,borderRadius:7,cursor:"pointer",
                       background:isHold?T.card:`${col}08`,
@@ -3960,8 +4025,8 @@ export default function TradingBot(){
           );
         })()}
 
-        {/* ══════════ VISTA: OPERACIONES TRADING — abiertas en vivo + histórico ══════════ */}
-        {activeView==="trading"&&(()=>{
+        {/* ══════════ VISTA: HISTÓRICO — abiertas en vivo + cerradas ══════════ */}
+        {activeView==="historico"&&(()=>{
           // Scope this whole view to tradingViewFilter — a VIEW-only choice,
           // independent of derivEnabled (which arms/disarms real money).
           // Simulado shows only paper trades, Deriv Real shows only trades
@@ -4236,8 +4301,8 @@ export default function TradingBot(){
           );
         })()}
 
-        {/* ══════════ VISTA: DASHBOARD ══════════ */}
-        {activeView==="dashboard"&&(<>
+        {/* ══════════ VISTA: GRÁFICO (por símbolo) ══════════ */}
+        {activeView==="chart"&&(<>
 
         <div className="split-panel" style={{display:"grid",gridTemplateColumns:"1fr 380px",gap:16,alignItems:"start"}}>
         <div style={{minWidth:0}}>
@@ -4548,27 +4613,15 @@ export default function TradingBot(){
           );
         })()}
 
-        {/* CONTROLS — AUTO split into two independent switches: Simulado and
-            Deriv Real used to share ONE button, so there was no way to run
-            one without the other (a signal either went real when eligible or
-            fell back to Simulado). Requested live right after discovering
-            that AUTO OFF — not "esperando el mes de Simulado" or Deriv being
-            cautious — was the whole reason nothing was opening. */}
-        <div className="g4" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:10}}>
+        {/* CONTROLS — per-symbol manual actions. AUTO Simulado/Deriv Real
+            toggles, el inicio programado y la gestión de capital viven ahora
+            en Configuración (una sola fuente de verdad para "¿está prendido
+            el bot?", en vez de repetirlo por cada símbolo). */}
+        <div className="g2" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
           <button onClick={()=>runAnalysis("Análisis manual")} disabled={analyzing}
             style={{background:analyzing?T.dim:`${T.accent}14`,border:`1px solid ${analyzing?T.border:T.accent}`,
               color:analyzing?T.muted:T.accent,borderRadius:8,padding:"11px 8px",cursor:analyzing?"not-allowed":"pointer",fontSize:12,fontWeight:700}}>
             {analyzing?"⏳ Analizando...":"🔍 Analizar IA"}
-          </button>
-          <button onClick={()=>setAutoMode(p=>{if(p&&!autoRealMode){setAutoPhase("idle");setNextAnalysis(null);}return!p;})}
-            style={{background:autoMode?`${T.green}14`:"transparent",border:`2px solid ${autoMode?T.green:T.border}`,
-              color:autoMode?T.green:T.muted,borderRadius:8,padding:"11px 8px",cursor:"pointer",fontSize:12,fontWeight:700}}>
-            {autoMode?"🟢 AUTO SIMULADO":"⚪ AUTO SIMULADO"}
-          </button>
-          <button onClick={()=>setAutoRealMode(p=>{if(p&&!autoMode){setAutoPhase("idle");setNextAnalysis(null);}return!p;})}
-            style={{background:autoRealMode?`${T.red}14`:"transparent",border:`2px solid ${autoRealMode?T.red:T.border}`,
-              color:autoRealMode?T.red:T.muted,borderRadius:8,padding:"11px 8px",cursor:"pointer",fontSize:12,fontWeight:700}}>
-            {autoRealMode?"🔴 AUTO DERIV REAL":"⚪ AUTO DERIV REAL"}
           </button>
           <button onClick={()=>loadNews(symbol)} disabled={loadingNews}
             style={{background:loadingNews?T.dim:`${T.yellow}10`,border:`1px solid ${loadingNews?T.border:T.yellow}`,
@@ -4576,19 +4629,11 @@ export default function TradingBot(){
             {loadingNews?"⏳ Cargando...":"📰 Actualizar Noticias"}
           </button>
         </div>
-
-        {/* PROGRAMAR INICIO AUTOMÁTICO */}
-        <SchedulePanel scheduledStart={scheduledStart} setScheduledStart={setScheduledStart}
-          scheduleInput={scheduleInput} setScheduleInput={setScheduleInput}
-          scheduleRemainingMs={scheduleRemainingMs} autoMode={autoMode} addLog={addLog}/>
-
-        {/* GESTIÓN DE CAPITAL — stake y escalado */}
-        <CapitalPanel initialCapital={initialCapital} setInitialCapital={setInitialCapital}
-          positionSize={positionSize} setPositionSize={setPositionSize}
-          stakeAutoScale={stakeAutoScale} setStakeAutoScale={setStakeAutoScale}
-          stakeStep={stakeStep} setStakeStep={setStakeStep}
-          stakeGrowthTrigger={stakeGrowthTrigger} setStakeGrowthTrigger={setStakeGrowthTrigger}
-          minStake={minStake} setMinStake={setMinStake}/>
+        {!autoMode&&!autoRealMode&&(
+          <div style={{fontSize:9,color:T.orange,marginBottom:10}}>
+            ⚪ AUTO está apagado — actívalo en Configuración → Automatización para que el bot opere solo.
+          </div>
+        )}
 
         {/* SEÑAL DE TRADING — guía para operar manualmente */}
         {aiResult&&(()=>{
@@ -4924,8 +4969,228 @@ export default function TradingBot(){
           Las señales son educativas y no garantizan resultados en mercados reales. Opera siempre con responsabilidad.
         </div>
 
-        </>)}{/* end dashboard view */}
+        </>)}{/* end chart view */}
 
+        {/* ══════════ VISTA: CONFIGURACIÓN ══════════ */}
+        {activeView==="config"&&(()=>{
+          const todayStr=new Date().toDateString();
+          const todayPnl=trades.filter(t=>t.closeTime&&new Date(t.closeTime).toDateString()===todayStr).reduce((s,t)=>s+(t.pnl||0),0);
+          const openRealPositions=positions.filter(p=>p.derivContractId);
+          // Mismo cálculo de trailing que ya corre en Histórico (isProtected/
+          // floorUsd) — aquí solo se muestra, no se recalcula la lógica.
+          const trailingRows=openRealPositions.map(pos=>{
+            const posSym=pos.symbol||symbol;
+            const cfg=ASSETS[posSym];
+            const livePrice=pos.derivSpot??(posSym===symbol?price:(livePrices[posSym]??cfg?.basePrice));
+            const ps=pos.allocatedSize||positionSize;
+            const pnl=effectivePnL(pos,livePrice,ps);
+            const posTp=pos.tp??tpTarget, posSl=pos.sl??slTarget;
+            const peakPnl=Math.max(pos.peakPnl||0,pnl);
+            const isProtected=peakPnl>=posTp*TRAIL_BREAKEVEN_AT;
+            const floorUsd=isProtected?extendedStopLevel(peakPnl,posTp,posSl):null;
+            const progressPct=Math.max(0,Math.min(100,(peakPnl/(posTp*TRAIL_BREAKEVEN_AT))*100));
+            return{pos,posSym,pnl,posTp,posSl,isProtected,floorUsd,progressPct};
+          });
+          // Calibración — ¿la confianza reportada predice el resultado real?
+          // Requiere confidence persistido en trades (ver api/trades.js).
+          const confBuckets=[{l:"60–69%",lo:60,hi:70},{l:"70–79%",lo:70,hi:80},{l:"80%+",lo:80,hi:101}];
+          const calibRows=confBuckets.map(b=>{
+            const sub=trades.filter(t=>t.confidence!=null&&t.confidence>=b.lo&&t.confidence<b.hi);
+            const wins=sub.filter(t=>t.pnl>0).length;
+            return{...b,n:sub.length,wr:sub.length?Math.round(wins/sub.length*100):null};
+          });
+          const lastUpdated=Object.values(SYMBOL_STRATEGY).map(s=>s.updatedAt).filter(Boolean).sort().at(-1);
+
+          return(
+          <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1320}}>
+
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}} className="g2">
+
+              {/* AUTOMATIZACIÓN */}
+              <ConfigCard title="AUTOMATIZACIÓN">
+                <div style={{borderTop:`1px solid ${T.border}`,marginTop:-1}}/>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"11px 0"}}>
+                  <div><div style={{fontSize:12,fontWeight:600}}>AUTO Simulado</div>
+                    <div style={{fontSize:9,color:T.muted}}>Opera en papel en todos los símbolos validados</div></div>
+                  <ConfigToggle on={autoMode} onClick={()=>setAutoMode(p=>{if(p&&!autoRealMode){setAutoPhase("idle");setNextAnalysis(null);}return!p;})}/>
+                </div>
+                <ConfigRow>
+                  <div><div style={{fontSize:12,fontWeight:600}}>AUTO Crecimiento (real)</div>
+                    <div style={{fontSize:9,color:T.muted}}>Multiplicadores con dinero en Deriv</div></div>
+                  <ConfigToggle on={autoRealMode} onClick={()=>setAutoRealMode(p=>{if(p&&!autoMode){setAutoPhase("idle");setNextAnalysis(null);}return!p;})}/>
+                </ConfigRow>
+                <ConfigRow>
+                  <div><div style={{fontSize:12,fontWeight:600,color:T.muted}}>AUTO Direccional (real)</div>
+                    <div style={{fontSize:9,color:T.muted}}>Rise/Fall — aún sin construir</div></div>
+                  <ConfigToggle on={false} onClick={()=>{}}/>
+                </ConfigRow>
+                <div style={{marginTop:10}}>
+                  <SchedulePanel scheduledStart={scheduledStart} setScheduledStart={setScheduledStart}
+                    scheduleInput={scheduleInput} setScheduleInput={setScheduleInput}
+                    scheduleRemainingMs={scheduleRemainingMs} autoMode={autoMode} addLog={addLog}/>
+                </div>
+              </ConfigCard>
+
+              {/* CONEXIÓN DERIV */}
+              <ConfigCard title="CONEXIÓN DERIV">
+                <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:8}}>Una sola cuenta — Crecimiento y Direccional comparten este saldo real.</div>
+                <ConfigRow><span style={{fontSize:12,color:T.muted}}>Cuenta</span><span className="mono" style={{fontSize:11,fontWeight:700}}>{derivLoginId||"—"}</span></ConfigRow>
+                <ConfigRow><span style={{fontSize:12,color:T.muted}}>Balance (API Deriv)</span><span className="mono" style={{fontSize:12,fontWeight:700}}>{derivBalance!=null?`$${derivBalance.toFixed(2)}`:"—"}</span></ConfigRow>
+                <ConfigRow><span style={{fontSize:12,color:T.muted}}>Estado</span>
+                  <span style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:derivEnabled?T.green:T.muted,fontWeight:600}}>
+                    <span style={{width:7,height:7,borderRadius:"50%",background:derivEnabled?T.green:T.border}}/>
+                    {derivEnabled?"Armado (dinero real)":"Desarmado (Simulado activo)"}
+                  </span>
+                </ConfigRow>
+                {derivConnectErr&&<ConfigRow><span style={{fontSize:10,color:T.red}}>{derivConnectErr}</span></ConfigRow>}
+              </ConfigCard>
+            </div>
+
+            {/* GESTIÓN DE RIESGO */}
+            <ConfigCard title="GESTIÓN DE RIESGO">
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:18,alignItems:"end"}} className="g3">
+                <ConfigField label="PÉRDIDA MÁXIMA DIARIA (USD)" type="number" step="1" value={dailyMaxLoss}
+                  onChange={e=>setDailyMaxLoss(parseFloat(e.target.value)||0)}/>
+                <ConfigField label="PÉRDIDAS SEGUIDAS ANTES DE PAUSAR" type="number" step="1" min="1" value={consecutiveLossLimit}
+                  onChange={e=>setConsecutiveLossLimit(Math.max(1,parseInt(e.target.value,10)||1))}/>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div><div style={{fontSize:11,fontWeight:600}}>Detener AUTO al llegar al límite</div>
+                    <div style={{fontSize:8,color:T.muted}}>Aplica a Crecimiento y Direccional</div></div>
+                  <ConfigToggle on={riskStopEnabled} onClick={()=>setRiskStopEnabled(p=>!p)}/>
+                </div>
+              </div>
+              <div style={{marginTop:10,fontSize:9,color:T.muted}}>
+                P&amp;L de hoy: <span style={{color:todayPnl>=0?T.green:T.red,fontWeight:700}}>{fUSD(todayPnl)}</span>
+                {" "}· {consLosses} pérdida{consLosses!==1?"s":""} seguida{consLosses!==1?"s":""} ahora mismo
+              </div>
+            </ConfigCard>
+
+            {/* GESTIÓN DE CAPITAL */}
+            <div>
+              <div style={{fontSize:8,color:T.muted,letterSpacing:2,fontWeight:700,marginBottom:11}}>💰 GESTIÓN DE CAPITAL</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14}} className="g3">
+
+                <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:10,padding:16,display:"flex",flexDirection:"column",gap:11}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <b style={{fontSize:11}}>SIMULADO</b>
+                    <span style={{fontSize:9,fontWeight:700,padding:"3px 8px",borderRadius:5,background:T.dim,color:T.muted}}>LOCAL · SIN API</span>
+                  </div>
+                  <div style={{fontSize:9,color:T.muted}}>Aquí el bot aprende sobre papel — TP/SL 100% automáticos, sin edición manual, para no ensuciar el aprendizaje.</div>
+                  <CapitalPanel initialCapital={initialCapital} setInitialCapital={setInitialCapital}
+                    positionSize={positionSize} setPositionSize={setPositionSize}
+                    stakeAutoScale={stakeAutoScale} setStakeAutoScale={setStakeAutoScale}
+                    stakeStep={stakeStep} setStakeStep={setStakeStep}
+                    stakeGrowthTrigger={stakeGrowthTrigger} setStakeGrowthTrigger={setStakeGrowthTrigger}
+                    minStake={minStake} setMinStake={setMinStake}/>
+                </div>
+
+                <div style={{background:T.card,border:`1px solid ${T.border}`,borderTop:`2px solid ${T.glow}`,borderRadius:10,padding:16,display:"flex",flexDirection:"column",gap:11}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <b style={{fontSize:11}}>CRECIMIENTO</b>
+                    <span style={{fontSize:9,fontWeight:700,padding:"3px 8px",borderRadius:5,background:`linear-gradient(135deg,${T.glow},#C9962B)`,color:"#1E1A10"}}>🔗 API DERIV</span>
+                  </div>
+                  <div style={{fontSize:9,color:T.muted}}>Multiplicadores — usa el saldo real de Deriv. Deja TP/SL vacío para que siga el valor validado por símbolo.</div>
+                  <ConfigField label="BALANCE (DERIV, EN VIVO)" value={derivBalance!=null?`$${derivBalance.toFixed(2)}`:"—"} readOnly/>
+                  <div style={{display:"flex",gap:8}}>
+                    <ConfigField label="TAKE PROFIT (USD)" type="number" step="0.5" placeholder="auto"
+                      value={realTpOverride??""} onChange={e=>setRealTpOverride(e.target.value===""?null:parseFloat(e.target.value))}/>
+                    <ConfigField label="STOP LOSS (USD)" type="number" step="0.5" placeholder="auto"
+                      value={realSlOverride??""} onChange={e=>setRealSlOverride(e.target.value===""?null:parseFloat(e.target.value))}/>
+                  </div>
+                  {(realTpOverride!=null||realSlOverride!=null)&&(
+                    <button onClick={()=>{setRealTpOverride(null);setRealSlOverride(null);}}
+                      style={{background:"transparent",border:`1px solid ${T.border}`,borderRadius:5,color:T.muted,fontSize:9,padding:"5px 9px",cursor:"pointer",alignSelf:"flex-start"}}>
+                      ✕ Volver a automático
+                    </button>
+                  )}
+                  <ConfigField label="STAKE POR OPERACIÓN" value={`$${positionSize.toFixed(2)}`} readOnly/>
+                </div>
+
+                <div style={{background:T.card,border:`1px solid ${T.border}`,borderTop:`2px solid ${T.glow}`,borderRadius:10,padding:16,display:"flex",flexDirection:"column",gap:11}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <b style={{fontSize:11}}>DIRECCIONAL</b>
+                    <span style={{fontSize:9,fontWeight:700,padding:"3px 8px",borderRadius:5,background:`linear-gradient(135deg,${T.glow},#C9962B)`,color:"#1E1A10"}}>🔗 API DERIV</span>
+                  </div>
+                  <div style={{fontSize:9,color:T.muted}}>Rise/Fall — mismo saldo real, duración fija por operación.</div>
+                  <ConfigField label="BALANCE (DERIV, EN VIVO)" value={derivBalance!=null?`$${derivBalance.toFixed(2)}`:"—"} readOnly/>
+                  <div style={{display:"flex",gap:8}}>
+                    <ConfigField label="STAKE POR OPERACIÓN" value="$5.00" readOnly/>
+                    <ConfigField label="DURACIÓN" value="15 min" readOnly/>
+                  </div>
+                  <ConfigRow>
+                    <div><div style={{fontSize:11,fontWeight:600}}>Habilitar Direccional</div>
+                      <div style={{fontSize:8,color:T.muted}}>Pendiente de validar — aún sin backtest propio</div></div>
+                    <ConfigToggle on={false} onClick={()=>{}}/>
+                  </ConfigRow>
+                </div>
+              </div>
+            </div>
+
+            {/* TRAILING EN VIVO — solo Crecimiento */}
+            <ConfigCard title="TRAILING EN VIVO · CRECIMIENTO">
+              <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:12}}>
+                Al llegar al {Math.round(TRAIL_BREAKEVEN_AT*100)}% del TP el SL sube a breakeven y ya no puede volver a pérdida — esto siempre corrió automático, ahora lo ves en vivo.
+              </div>
+              {trailingRows.length===0?(
+                <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>Sin posiciones reales de Crecimiento abiertas ahora mismo.</div>
+              ):(
+                <div className="table-scroll">
+                <div style={{display:"flex",flexDirection:"column",gap:6,minWidth:620}}>
+                  <div style={{display:"grid",gridTemplateColumns:"90px 90px 1fr 140px 170px",gap:10,fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700,padding:"0 4px"}}>
+                    <div>PAR</div><div>PNL ACTUAL</div><div>PROGRESO A BREAKEVEN</div><div>SL BASE → ACTUAL</div><div>ESTADO</div>
+                  </div>
+                  {trailingRows.map(({pos,posSym,pnl,posSl,isProtected,floorUsd,progressPct})=>(
+                    <div key={pos.id} style={{display:"grid",gridTemplateColumns:"90px 90px 1fr 140px 170px",gap:10,alignItems:"center",
+                      background:`${pnl>=0?T.green:T.red}08`,border:`1px solid ${pnl>=0?T.green:T.red}30`,borderRadius:7,padding:"8px 10px"}}>
+                      <span style={{fontSize:11,fontWeight:700}}>{posSym}</span>
+                      <span className="mono" style={{fontSize:11,fontWeight:700,color:pnl>=0?T.green:T.red}}>{fUSD(pnl)}</span>
+                      <div style={{height:5,borderRadius:3,background:T.dim,overflow:"hidden"}}>
+                        <div style={{width:`${progressPct}%`,height:"100%",background:`linear-gradient(90deg,${T.glow},#C9962B)`}}/>
+                      </div>
+                      <span className="mono" style={{fontSize:10}}>-{fUSD(posSl,false)} → {isProtected?<span style={{color:T.green}}>{fUSD(floorUsd)}</span>:`-${fUSD(posSl,false)}`}</span>
+                      {isProtected?(
+                        <span style={{fontSize:9,fontWeight:700,color:T.green,background:`${T.green}18`,padding:"3px 8px",borderRadius:4,width:"fit-content"}}>🔒 BREAKEVEN ACTIVADO</span>
+                      ):(
+                        <span style={{fontSize:9,color:T.muted}}>{Math.round(progressPct)}% del camino</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                </div>
+              )}
+            </ConfigCard>
+
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}} className="g2">
+
+              {/* CALIBRACIÓN Y APRENDIZAJE */}
+              <ConfigCard title="CALIBRACIÓN Y APRENDIZAJE">
+                <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:8}}>¿La confianza que reporta la IA predice el resultado real?</div>
+                {calibRows.map(r=>(
+                  <ConfigRow key={r.l}>
+                    <span style={{fontSize:11}}>{r.l} confianza</span>
+                    <span className="mono" style={{fontSize:11}}>
+                      {r.wr==null?"sin datos":<><span style={{color:r.wr>=55?T.green:T.red,fontWeight:700}}>{r.wr}% aciertos</span> <span style={{color:T.muted}}>(n={r.n})</span></>}
+                    </span>
+                  </ConfigRow>
+                ))}
+                <ConfigRow><span style={{fontSize:11,color:T.muted}}>Última revalidación (walk-forward)</span>
+                  <span style={{fontSize:11,fontWeight:600}}>{lastUpdated?new Date(lastUpdated).toLocaleDateString("es"):"—"}</span></ConfigRow>
+              </ConfigCard>
+
+              {/* NOTICIAS Y SEÑALES */}
+              <ConfigCard title="NOTICIAS Y SEÑALES">
+                <ConfigRow><span style={{fontSize:12,color:T.muted}}>Fuente de noticias</span><span style={{fontSize:11,fontWeight:600}}>Alpha Vantage</span></ConfigRow>
+                <ConfigRow><span style={{fontSize:12,color:T.muted}}>Modelo de análisis</span><span style={{fontSize:11,fontWeight:600}}>Groq · openai/gpt-oss-120b</span></ConfigRow>
+                <ConfigRow><span style={{fontSize:12,color:T.muted}}>Símbolos validados (no SIN-EDGE)</span>
+                  <span style={{fontSize:11,fontWeight:600}}>{Object.values(SYMBOL_STRATEGY).filter(s=>s.tier!=="SIN-EDGE").length}/{Object.keys(SYMBOL_STRATEGY).length}</span></ConfigRow>
+              </ConfigCard>
+            </div>
+
+          </div>
+          );
+        })()}
+
+      </div>
       </div>
     </>
   );
