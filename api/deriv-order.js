@@ -250,6 +250,20 @@ export default async function handler(req, res) {
       return res.status(200).json({ transactions });
     }
 
+    // ── TICK — current spot for ANY Deriv symbol (synthetic indices aren't
+    // on Yahoo/Binance like forex/commodities/crypto, so this is their only
+    // live-price source). Read-only, same authenticated WS connection as
+    // everything else here — verified live against R_75 (Volatility 75
+    // Index) while diagnosing the Direccional profit_table gap above.
+    if (action === "tick") {
+      const derivSymbol = req.body?.derivSymbol;
+      if (!derivSymbol) return res.status(400).json({ error: "derivSymbol required" });
+      const { msg } = await derivAction(token, appId, accountType, { ticks_history: derivSymbol, count: 1, end: "latest", style: "ticks" });
+      const price = msg.history?.prices?.at(-1);
+      if (price == null) return res.status(404).json({ error: "No price returned" });
+      return res.status(200).json({ price, time: msg.history?.times?.at(-1) });
+    }
+
     // ── OPEN (buy)
     if (action === "open") {
       const derivSymbol = SYMBOL_MAP[symbol];

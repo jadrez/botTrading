@@ -44,6 +44,13 @@ const ASSETS = {
     yahooTicker:"SI=F",  correlations:{} },
   "XTI/USD":  { label:"PETRÓLEO",  type:"commodity", binance:null, forexFrom:"XTI", forexTo:"USD", precision:2, basePrice:80,
     yahooTicker:"CL=F",  correlations:{} },
+  // ── Sintéticos (Deriv exclusivo — no existen en Yahoo/Binance, el único
+  // feed de precio es Deriv mismo vía /api/deriv-order action:"tick"). Punto
+  // de partida para Direccional (Rise/Fall) — solo precio/gráfico por ahora,
+  // sin backtest ni auto-trading todavía. derivSymbol: "R_75" verificado en
+  // vivo contra la API de Deriv.
+  "VOL75":    { label:"Volatility 75 Index", type:"synthetic", binance:null, derivSymbol:"R_75", precision:2, basePrice:37700,
+    correlations:{} },
 };
 
 // SYMBOL_STRATEGY / scaledTpSl now live in ./lib/symbolStrategy.js (imported
@@ -2017,6 +2024,60 @@ export default function TradingBot(){
       fetchPrice();
       iv=setInterval(fetchPrice,3000);
 
+    } else if(cur.type==="synthetic"){
+      // ── SINTÉTICOS (Volatility Index, etc.) — Deriv-exclusive, no
+      // Yahoo/Binance feed exists for these. Same incremental-candle polling
+      // shape as the crypto branch above, just sourced from our own
+      // /api/deriv-order action:"tick" (which authenticates to Deriv
+      // server-side) instead of a public REST endpoint. Groundwork for
+      // Direccional only — no AUTO/trading logic reads this yet.
+      const fetchPrice=async()=>{
+        try{
+          const r=await fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({action:"tick",derivSymbol:cur.derivSymbol})});
+          if(!r.ok)return;
+          const d=await r.json();
+          const np=parseFloat(d.price);
+          if(isNaN(np))return;
+          if(!wsAlive)return;
+          priceRef.current=np;
+          setPrice(np);
+          setPriceVerified(true);
+          setCandles(prev=>{
+            const updated=[...prev];
+            const last={...updated[updated.length-1]};
+            const nowSec=Math.floor(Date.now()/1000);
+            last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
+            const cSecs={"1m":60,"5m":300,"15m":900,"1h":3600,"4h":14400}[chartIntervalRef.current]||60;
+            if(nowSec-last.time>=cSecs){
+              updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
+            } else {
+              updated[updated.length-1]=last;
+            }
+            const closes=updated.map(c=>c.c);
+            const newBB=calcBB(closes);
+            const e9=calcEMA(closes,9), e21=calcEMA(closes,21);
+            const t1h=calcTrend1h(closes);
+            const pts=detectPatterns(updated);
+            const cpats=detectCandlePatterns(updated);
+            const allPats=[...pts,...cpats];
+            const st=calcShortTrend(updated,5);
+            const e200=calcEMA(closes,200);
+            setRsi(calcRSI(closes)); setMacd(calcMACD(closes));
+            setBB(newBB); bbRef.current=newBB;
+            setEma9(e9); ema9Ref.current=e9;
+            setEma21(e21); ema21Ref.current=e21;
+            setTrend1h(t1h); trend1hRef.current=t1h;
+            setPatterns(allPats); patternsRef.current=allPats;
+            setShortTrend(st); shortTrendRef.current=st;
+            setEma200(e200); ema200Ref.current=e200;
+            return updated;
+          });
+        }catch{}
+      };
+      fetchPrice();
+      iv=setInterval(fetchPrice,3000);
+
     } else {
       // ── FOREX: Deriv WebSocket for zero-delay real-time candles
       const {forexFrom,forexTo}=cur;
@@ -3354,6 +3415,28 @@ export default function TradingBot(){
                     </span>
                   ):null;
                 })()}
+              </div>
+
+              {/* ── SINTÉTICOS dropdown — Direccional groundwork, solo precio/gráfico por ahora ── */}
+              <div style={{display:"flex",alignItems:"center",gap:5,
+                background:ASSETS[symbol]?.type==="synthetic"?`${T.glow}14`:T.dim,
+                border:`1px solid ${ASSETS[symbol]?.type==="synthetic"?T.glow:T.border}`,
+                borderRadius:7,padding:"4px 8px"}}>
+                <span style={{fontSize:7,color:ASSETS[symbol]?.type==="synthetic"?T.accent:T.muted,letterSpacing:2,fontWeight:700}}>◎ SINTÉTICOS</span>
+                <select
+                  value={ASSETS[symbol]?.type==="synthetic"?symbol:""}
+                  onChange={e=>e.target.value&&handleSymbolChange(e.target.value)}
+                  style={{
+                    background:"transparent",border:"none",
+                    color:ASSETS[symbol]?.type==="synthetic"?T.accent:T.muted,
+                    cursor:"pointer",fontSize:11,fontWeight:700,outline:"none",
+                    minWidth:120,
+                  }}>
+                  {ASSETS[symbol]?.type!=="synthetic"&&<option value="">Seleccionar...</option>}
+                  {Object.entries(ASSETS).filter(([,v])=>v.type==="synthetic").map(([s,v])=>(
+                    <option key={s} value={s}>{v.label}</option>
+                  ))}
+                </select>
               </div>
 
               <button onClick={()=>setMultiMonitor(p=>!p)}
