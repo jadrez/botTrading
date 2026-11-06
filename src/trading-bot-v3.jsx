@@ -2447,6 +2447,12 @@ export default function TradingBot(){
               expHedgePosRef.current=live.hedge??null; setExpHedgePos(live.hedge??null);
             }catch{}
           }
+          // El precio en vivo TAMBIÉN viene del dueño real (Deriv, vía el
+          // servidor) en vez de que esta pestaña pida el suyo propio a
+          // Binance — si no, "ACTUAL" nunca iba a coincidir con lo que
+          // muestra Deriv, aunque se actualizara seguido. Reportado en vivo.
+          const dp=parseFloat(d.exp_live_price);
+          if(dp&&!isNaN(dp)){ expPriceRef.current=dp; setExpPrice(dp); }
           fetch("/api/exp-trades?limit=50").then(rr=>rr.ok?rr.json():null).then(dd=>{
             if(dd?.trades&&alive) setExpTrades(dd.trades);
           }).catch(()=>{});
@@ -2481,7 +2487,13 @@ export default function TradingBot(){
       // piso se pasaba de largo. Reportado en vivo ("porque deja llegar a
       // esto -$19 ... es por la tardía de yahoo?" — no era eso, era este
       // desfase de refresco).
-      claimOrCheckOwnership();
+      await claimOrCheckOwnership();
+      // Si no somos dueños, el precio YA se actualizó arriba (desde
+      // exp_live_price, lo que el dueño real está viendo) — no hay nada que
+      // decidir (evaluateStack/onCandleClosed chequean isOwner igual, pero
+      // ni siquiera vale la pena pedirle su propio precio a Binance: sería
+      // otra fuente distinta peleando por mostrarse en "ACTUAL").
+      if(!expIsOwnerRef.current){ return; }
       const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${EXP_BINANCE}`);
       const d=await r.json();
       const np=parseFloat(d.price);
@@ -6094,7 +6106,20 @@ export default function TradingBot(){
           // vez de nuestro estimado local — reportado en vivo: nuestra tabla
           // mostraba +$9.52 mientras Deriv mostraba -$0.33 para el MISMO
           // contrato. El servidor sincroniza esto cada ~5s en derivProfit.
-          const effExpPnL=(p,livePrice)=>p.derivProfit!=null?p.derivProfit:posPnL(p,livePrice,p.allocatedSize);
+          // derivProfit/derivSpot son el "ancla real" (incluye comisión) pero
+          // solo se refrescan cada ~3-5s — usarlos DIRECTO como el número en
+          // pantalla se sentía "congelado" frente al precio en vivo de 1s
+          // (reportado: "no refresca... que se mueva el actual igual que
+          // Deriv"). En vez de eso, el precio EN VIVO (expPrice, que ya viene
+          // de Deriv cada 1s) sigue moviendo la pantalla cada segundo, y el
+          // PNL se corrige con el movimiento ocurrido DESDE ese ancla real —
+          // mismo número base de Deriv (con su comisión), interpolado en vivo.
+          const effExpPnL=(p,livePrice)=>{
+            if(p.derivProfit==null||livePrice==null) return posPnL(p,livePrice??p.entry,p.allocatedSize);
+            const anchorSpot=p.derivSpot??livePrice;
+            const drift=posPnL({...p,entry:anchorSpot},livePrice,p.allocatedSize);
+            return p.derivProfit+drift;
+          };
           const stackPnl=expPrice!=null?expPositions.reduce((s,p)=>s+effExpPnL(p,expPrice),0):0;
           const volumen=expPositions.reduce((s,p)=>s+p.allocatedSize*(p.multiplier||DEFAULT_MULTIPLIER),0)
             +(expHedgePos?expHedgePos.allocatedSize*(expHedgePos.multiplier||DEFAULT_MULTIPLIER):0);
@@ -6248,12 +6273,13 @@ export default function TradingBot(){
                         <div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div><div>OBJETIVO PILA</div><div>STOP PILA</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div><div>PATRONES</div><div>ACCIÓN</div>
                       </div>
                       {expPositions.map(pos=>{
-                        // Si es real (contractId), usa el spot/profit que Deriv
-                        // reportó de verdad la última vez que se sincronizó, en
-                        // vez de nuestro estimado local — ver nota de effExpPnL.
-                        const livePrice=pos.derivSpot??(expPrice??pos.entry);
+                        // El precio EN VIVO manda (se actualiza cada 1s, ya
+                        // viene de Deriv) — derivSpot es solo el ancla real
+                        // que usa effExpPnL para corregir el PNL, no para
+                        // "congelar" lo que se ve en pantalla.
+                        const livePrice=expPrice??pos.derivSpot??pos.entry;
                         const dir=pos.type==="BUY"?1:-1;
-                        const pnl=effExpPnL(pos,expPrice??pos.entry);
+                        const pnl=effExpPnL(pos,livePrice);
                         const pctChange=dir*(livePrice-pos.entry)/pos.entry*100;
                         const col=pnl>=0?T.green:T.red;
                         const dirCol=pos.type==="BUY"?T.green:T.red;
@@ -6300,9 +6326,9 @@ export default function TradingBot(){
                         <span></span><span></span><span></span><span></span>
                       </div>
                       {expHedgePos&&(()=>{
-                        const hLive=expHedgePos.derivSpot??(expPrice??expHedgePos.entry);
+                        const hLive=expPrice??expHedgePos.derivSpot??expHedgePos.entry;
                         const hDir=expHedgePos.type==="BUY"?1:-1;
-                        const hPnl=effExpPnL(expHedgePos,expPrice??expHedgePos.entry);
+                        const hPnl=effExpPnL(expHedgePos,hLive);
                         const hPct=hDir*(hLive-expHedgePos.entry)/expHedgePos.entry*100;
                         const hCol=hPnl>=0?T.green:T.red;
                         return(

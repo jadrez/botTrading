@@ -503,7 +503,8 @@ export function startExpEngine() {
     try {
       if (!bootstrapped) { await bootstrap(); return; }
       tickCount++;
-      if (tickCount % 5 === 0) { await reloadConfig(); await claimOrCheckOwnership(); await syncDerivProfits(); }
+      if (tickCount % 5 === 0) { await reloadConfig(); await claimOrCheckOwnership(); }
+      if (tickCount % 3 === 0) await syncDerivProfits(); // ancla real más fresca para la interpolación en vivo del cliente
       // El precio se actualiza SIEMPRE (lo necesita el cierre manual aunque
       // el experimento esté pausado) — lo que si se salta cuando está
       // apagado es la lógica automática de entrada/apilado/volteo. Antes
@@ -513,6 +514,13 @@ export function startExpEngine() {
       const np = await fetchDerivGoldPrice();
       if (np && !isNaN(np)) {
         price = np;
+        // Clave aparte de exp_live_state (que solo escribe cuando floor/
+        // positions cambian) — el precio cambia casi en cada tick, así que
+        // necesita su propio canal de solo-precio para que el cliente (en
+        // modo no-dueño) pueda mostrar el MISMO precio que usa el servidor
+        // para decidir, en vez de pedirle su propio feed a otra fuente.
+        // Reportado en vivo: "el actual" no se movía igual que Deriv.
+        setConfigValue(db, "exp_live_price", String(np)).catch(() => {});
         if (cfg.enabled) {
           const nowSec = Math.floor(Date.now() / 1000);
           if (candles.length) {
