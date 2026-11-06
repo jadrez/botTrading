@@ -69,6 +69,7 @@ export function startExpEngine() {
   let addLevel = 0;
   let peak = 0;
   let lastPosPeak = 0; // pico propio de la ÚLTIMA posición apilada (canario)
+  let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let isOwner = false;
   let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
@@ -87,6 +88,7 @@ export function startExpEngine() {
     const pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now() };
     positions = [...positions, pos];
     lastPosPeak = 0; // nueva "última" posición — el canario arranca de cero para ella
+    lastAddPrice = price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
     log(`${type} XAU/USD @ ${price.toFixed(2)} — pila ${positions.length}/${cfg.maxStack}`);
     await persistLive(true);
   };
@@ -150,12 +152,18 @@ export function startExpEngine() {
     }
     await persistLive();
     if (stackPnl <= floor) { await flip(price); return; }
-    // "if", no "while" — como máximo UNA posición nueva por tick (1s), para
-    // que cada apilada quede a un precio distinto en vez de varias de golpe
-    // al mismo precio cuando el agregado salta más de un addStep en un tick
-    // (ver nota idéntica en trading-bot-v3.jsx).
-    if (stackPnl >= addLevel + cfg.addStep && positions.length < cfg.maxStack) {
-      addLevel += cfg.addStep;
+    // Apilar otra posición exige que el PRECIO se haya movido de verdad
+    // desde la entrada de la ÚLTIMA apilada, no que la SUMA agregada haya
+    // cruzado otro escalón (ver nota completa en trading-bot-v3.jsx) — con
+    // posiciones viejas ya ganando fuerte, el agregado sigue creciendo
+    // aunque el precio esté quieto, así que el chequeo por suma seguía
+    // apilando varias al mismo precio en ticks separados.
+    const priceStepPct = cfg.addStep / (cfg.stake * DEFAULT_MULTIPLIER);
+    const movedEnough = lastAddPrice != null && (
+      direction === "BUY" ? price >= lastAddPrice * (1 + priceStepPct) : price <= lastAddPrice * (1 - priceStepPct)
+    );
+    if (movedEnough && positions.length < cfg.maxStack) {
+      addLevel += cfg.addStep; // solo informativo para la UI (OBJETIVO PILA)
       await addExpPos(direction);
     }
   };

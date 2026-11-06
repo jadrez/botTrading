@@ -1775,6 +1775,7 @@ export default function TradingBot(){
   const expAddLevelRef   = useRef(0); // último múltiplo de expAddStep ya usado para apilar otra posición
   const expStackPeakRef  = useRef(0); // máximo histórico del P&L agregado de la pila ACTUAL (se resetea en cada entrada/volteo)
   const expLastPosPeakRef= useRef(0); // pico propio de la ÚLTIMA posición apilada (canario de reversión, ver EXP_CANARY_*)
+  const expLastAddPriceRef= useRef(null); // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra, ver nota en evaluateStack)
   // Identidad de esta pestaña/dispositivo + si es la que actualmente "maneja"
   // el motor (ver efecto de abajo) — necesario desde que el estado se
   // sincroniza por DB: si dos pestañas/dispositivos tuvieran el experimento
@@ -2138,6 +2139,7 @@ export default function TradingBot(){
         multiplier:DEFAULT_MULTIPLIER, openTime:Date.now()};
       expPositionsRef.current=[...expPositionsRef.current,pos];
       expLastPosPeakRef.current=0; // nueva "última" posición — el canario arranca de cero para ella
+      expLastAddPriceRef.current=price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
       setExpPositions(expPositionsRef.current);
       persistLive();
       addLog(`🧪 Experimento ${type} XAU/USD @ ${fP(price,2)} — pila ${expPositionsRef.current.length}/${expMaxStackRef.current}`,type==="BUY"?"buy":"sell");
@@ -2225,21 +2227,27 @@ export default function TradingBot(){
       }
       persistLive(); // guarda el pico/piso actualizado en cada tick, no solo al apilar/cerrar
       if(stackPnl<=expFloorRef.current){ flip(price); return; }
-      // Apilar otra posición cada $expAddStep de más (editable) —
-      // independiente del piso de arriba, solo gobierna CUÁNTAS posiciones
-      // hay en la pila. BUG encontrado en vivo ("abriendo todas en
-      // conjunto"): esto era un "while", así que si el agregado saltaba
-      // MÁS de un expAddStep en un solo tick de 1s (muy fácil con stake
-      // alto), apilaba varias posiciones de GOLPE, todas al MISMO precio
-      // — no eran entradas escalonadas de verdad, eran casi la misma
-      // apuesta repetida, así que se movían juntas como si fueran una
-      // sola posición más grande en vez de diversificar. Cambiado a "if":
-      // como máximo UNA posición nueva por tick: si el agregado saltó
-      // varios escalones de una, los demás se van agregando en los
-      // SIGUIENTES ticks (1s después cada uno), donde el precio ya avanzó
-      // de verdad — así cada apilada queda a un precio distinto.
-      if(stackPnl>=(expAddLevelRef.current+expAddStepRef.current) && expPositionsRef.current.length<expMaxStackRef.current){
-        expAddLevelRef.current+=expAddStepRef.current;
+      // Apilar otra posición: exige que el PRECIO se haya movido de verdad
+      // desde la entrada de la ÚLTIMA posición apilada — no que la SUMA
+      // agregada haya cruzado otro escalón. BUG encontrado en vivo dos
+      // veces: la primera versión ("while") apilaba varias de golpe en el
+      // MISMO tick; cambiar a "if" (una por tick) ayudó pero no arregló la
+      // causa real — con varias posiciones VIEJAS ya ganando fuerte, el
+      // AGREGADO sigue creciendo aunque el precio esté quieto (el peso de
+      // las viejas solo, sin que la nueva aporte nada), así que seguía
+      // apilando varias al MISMO precio en ticks separados. Ahora el
+      // umbral se mide en PRECIO desde la última entrada (la misma % que
+      // ya se le explica al usuario arriba: expAddStep/(stake×100)), así
+      // que apilar de verdad requiere que el precio avance, no que la
+      // suma crezca por el peso de las posiciones anteriores.
+      const priceStepPct=expAddStepRef.current/(expStakeRef.current*DEFAULT_MULTIPLIER);
+      const movedEnough=expLastAddPriceRef.current!=null && (
+        expDirectionRef.current==="BUY"
+          ? price>=expLastAddPriceRef.current*(1+priceStepPct)
+          : price<=expLastAddPriceRef.current*(1-priceStepPct)
+      );
+      if(movedEnough && expPositionsRef.current.length<expMaxStackRef.current){
+        expAddLevelRef.current+=expAddStepRef.current; // solo informativo para la UI (OBJETIVO PILA)
         addExpPos(expDirectionRef.current);
       }
     };
