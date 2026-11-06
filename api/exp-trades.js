@@ -21,7 +21,7 @@ export default async function handler(req, res) {
     const limit = Math.min(500, parseInt(req.query?.limit, 10) || 200);
     try {
       const r = await db.query(
-        `SELECT symbol, type, entry_price, exit_price, pnl, reason, pattern, allocated_size, multiplier, opened_at, closed_at
+        `SELECT symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at
          FROM exp_trades ORDER BY closed_at DESC LIMIT $1`,
         [limit]
       );
@@ -29,6 +29,8 @@ export default async function handler(req, res) {
         symbol: row.symbol, type: row.type,
         entry: parseFloat(row.entry_price), exit: parseFloat(row.exit_price),
         pnl: parseFloat(row.pnl), reason: row.reason, pattern: row.pattern,
+        objetivoPila: row.objetivo_pila != null ? parseFloat(row.objetivo_pila) : undefined,
+        stopPila: row.stop_pila != null ? parseFloat(row.stop_pila) : undefined,
         allocatedSize: row.allocated_size != null ? parseFloat(row.allocated_size) : undefined,
         multiplier: row.multiplier ?? undefined,
         time: row.closed_at ? new Date(row.closed_at).toLocaleTimeString("es") : "",
@@ -43,15 +45,16 @@ export default async function handler(req, res) {
   }
 
   if (req.method === "POST") {
-    const { symbol, type, entryPrice, exitPrice, pnl, reason, pattern, allocatedSize, multiplier, openedAt, closedAt } = req.body || {};
+    const { symbol, type, entryPrice, exitPrice, pnl, reason, pattern, objetivoPila, stopPila, allocatedSize, multiplier, openedAt, closedAt } = req.body || {};
     if (!type || entryPrice == null || exitPrice == null || pnl == null) {
       return res.status(400).json({ error: "type, entryPrice, exitPrice, pnl are required" });
     }
     try {
       await db.query(
-        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, allocated_size, multiplier, opened_at, closed_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [symbol || "XAU/USD", type, entryPrice, exitPrice, pnl, reason || null, pattern || null,
+         objetivoPila ?? null, stopPila ?? null,
          allocatedSize ?? null, multiplier ?? null,
          openedAt ? new Date(openedAt) : null, closedAt ? new Date(closedAt) : new Date()]
       );

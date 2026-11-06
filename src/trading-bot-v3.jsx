@@ -2165,9 +2165,14 @@ export default function TradingBot(){
     };
 
     const closeAllExpPos=(exitPrice,reason)=>{
+      // objetivo/stop de la pila en el momento EXACTO del cierre — hay que
+      // leerlos ANTES de resetStackTracking (que se llama justo después en
+      // flip()), si no quedarían en 0/piso-inicial para el histórico.
+      const objetivo=expAddLevelRef.current+expAddStepRef.current;
+      const stop=expFloorRef.current;
       const closed=expPositionsRef.current.map(pos=>({
         ...pos, symbol:EXP_SYMBOL, exit:exitPrice, pnl:posPnL(pos,exitPrice,pos.allocatedSize),
-        reason, time:now(), closeTime:Date.now(), tradeTime:Math.floor(Date.now()/1000),
+        reason, objetivo, stop, time:now(), closeTime:Date.now(), tradeTime:Math.floor(Date.now()/1000),
       }));
       expPositionsRef.current=[];
       setExpPositions([]);
@@ -2179,7 +2184,7 @@ export default function TradingBot(){
         fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({
             symbol:c.symbol, type:c.type, entryPrice:c.entry, exitPrice:c.exit, pnl:c.pnl, reason:c.reason,
-            pattern:c.pattern, allocatedSize:c.allocatedSize, multiplier:c.multiplier,
+            pattern:c.pattern, objetivoPila:c.objetivo, stopPila:c.stop, allocatedSize:c.allocatedSize, multiplier:c.multiplier,
             openedAt:c.openTime?new Date(c.openTime).toISOString():undefined,
             closedAt:new Date(c.closeTime).toISOString(),
           })}).catch(()=>{});
@@ -2198,18 +2203,23 @@ export default function TradingBot(){
       const hedge=expHedgePosRef.current;
       if(!hedge) return 0;
       const pnl=posPnL(hedge,exitPrice,hedge.allocatedSize);
+      // La cobertura no tiene objetivo/stop propio (ver nota arriba) — se
+      // deja constancia del de LA PILA en ese momento, igual que se hace
+      // para cada posición normal al cerrar.
+      const objetivo=expAddLevelRef.current+expAddStepRef.current;
+      const stop=expFloorRef.current;
       expHedgePosRef.current=null;
       setExpHedgePos(null);
       const closedAt=Date.now();
       setExpTrades(prev=>{
-        const next=[{...hedge,symbol:EXP_SYMBOL,exit:exitPrice,pnl,reason:"HEDGE",time:now(),
+        const next=[{...hedge,symbol:EXP_SYMBOL,exit:exitPrice,pnl,reason:"HEDGE",objetivo,stop,time:now(),
           closeTime:closedAt,tradeTime:Math.floor(closedAt/1000)},...prev].slice(0,200);
         saveExpTrades(next); return next;
       });
       fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
           symbol:EXP_SYMBOL, type:hedge.type, entryPrice:hedge.entry, exitPrice, pnl, reason:"HEDGE",
-          pattern:"COBERTURA", allocatedSize:hedge.allocatedSize, multiplier:hedge.multiplier,
+          pattern:"COBERTURA", objetivoPila:objetivo, stopPila:stop, allocatedSize:hedge.allocatedSize, multiplier:hedge.multiplier,
           openedAt:hedge.openTime?new Date(hedge.openTime).toISOString():undefined,
           closedAt:new Date(closedAt).toISOString(),
         })}).catch(()=>{});
@@ -2374,6 +2384,22 @@ export default function TradingBot(){
         const stale=!hbAt||(Date.now()-hbAt)>15000;
         const mine=owner===expSessionIdRef.current;
         if(!owner||mine||stale){
+          if(!expIsOwnerRef.current && d.exp_live_state){
+            // Otra sesión pudo haber mutado positions/floor/peak/hedge mientras
+            // nosotros no éramos dueños — si seguimos con lo que teníamos en
+            // memoria de ANTES de perder el control, evaluamos contra un
+            // estado viejo y la pila puede pasar de largo su piso real.
+            // Resincroniza desde la DB antes de volver a evaluar.
+            try{
+              const live=JSON.parse(d.exp_live_state);
+              expPositionsRef.current=live.positions||[]; setExpPositions(live.positions||[]);
+              expDirectionRef.current=live.direction??null; setExpDirection(live.direction??null);
+              if(live.floor!=null) expFloorRef.current=live.floor;
+              if(live.addLevel!=null) expAddLevelRef.current=live.addLevel;
+              if(live.peak!=null) expStackPeakRef.current=live.peak;
+              expHedgePosRef.current=live.hedge??null; setExpHedgePos(live.hedge??null);
+            }catch{}
+          }
           expIsOwnerRef.current=true;
           fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
             body:JSON.stringify({key:"exp_engine_owner",value:`${expSessionIdRef.current}:${Date.now()}`})}).catch(()=>{});
@@ -6233,20 +6259,25 @@ export default function TradingBot(){
               )}
 
               {/* HISTÓRICO — mismas columnas que la tabla de Histórico del bot
-                  principal (APERTURA/CIERRE/PAR/TIPO/ENTRADA/SALIDA/PNL/
-                  MOTIVO/VOL-COMISIÓN/ORIGEN/PATRONES), pedido explícitamente.
-                  PATRONES aquí es el motivo de APERTURA de la posición
-                  (VELA ANTERIOR/PIRÁMIDE/VOLTEO/COBERTURA) — distinto de
-                  MOTIVO, que es el motivo de CIERRE (FLIP/HEDGE). Pedido
-                  explícito para poder verificar en vivo si la cobertura
-                  (COBERTURA) está disparando. */}
+                  principal (APERTURA/CIERRE/PAR/TIPO/ENTRADA/SALIDA/%/
+                  OBJETIVO PILA/STOP PILA/PNL/MOTIVO/VOL-COMISIÓN/ORIGEN/
+                  PATRONES), pedido explícitamente. %/OBJETIVO PILA/STOP
+                  PILA son los mismos datos que ya muestra la tabla de
+                  POSICIONES ABIERTAS EN VIVO, pero congelados al momento
+                  del cierre (para ver qué tanto se movió el oro y contra
+                  qué objetivo/piso cerró esa posición). PATRONES aquí es
+                  el motivo de APERTURA de la posición (VELA ANTERIOR/
+                  PIRÁMIDE/VOLTEO/COBERTURA) — distinto de MOTIVO, que es
+                  el motivo de CIERRE (FLIP/HEDGE). */}
               <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:8}}>HISTÓRICO</div>
               {expTrades.length>0&&(
                 <div className="table-scroll">
-                  <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:950}}>
-                    <div style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 90px 90px 100px 100px 1fr",
+                  <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:1220}}>
+                    <div style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 70px 100px 100px 90px 90px 100px 100px 1fr",
                       gap:8,padding:"0 10px 4px",fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700}}>
-                      <div>APERTURA</div><div>CIERRE</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>PATRONES</div>
+                      <div>APERTURA</div><div>CIERRE</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div>
+                      <div>%</div><div>OBJETIVO PILA</div><div>STOP PILA</div>
+                      <div>PNL</div><div>MOTIVO</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>PATRONES</div>
                     </div>
                     {(()=>{
                       // Agrupa filas consecutivas del MISMO cierre (misma salida +
@@ -6268,8 +6299,10 @@ export default function TradingBot(){
                           <div key={gi} style={{display:"flex",flexDirection:"column",gap:4,marginBottom:g.items.length>1?8:4}}>
                             {g.items.map((t,i)=>{
                               const volumen=(t.allocatedSize||0)*(t.multiplier||0);
+                              const tDir=t.type==="BUY"?1:-1;
+                              const tPct=t.entry?tDir*(t.exit-t.entry)/t.entry*100:0;
                               return(
-                                <div key={i} style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 90px 90px 100px 100px 1fr",
+                                <div key={i} style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 70px 100px 100px 90px 90px 100px 100px 1fr",
                                   gap:8,alignItems:"center",background:`${t.pnl>=0?T.green:T.red}08`,border:`1px solid ${t.pnl>=0?T.green:T.red}25`,borderRadius:6,padding:"6px 10px"}}>
                                   <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.openTime)}</span>
                                   <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime)}</span>
@@ -6277,6 +6310,9 @@ export default function TradingBot(){
                                   <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:T.red}}>{t.type}</span>
                                   <span className="mono" style={{fontSize:9}}>{fP(t.entry,2)}</span>
                                   <span className="mono" style={{fontSize:9}}>{fP(t.exit,2)}</span>
+                                  <span className="mono" style={{fontSize:9,fontWeight:700,color:tPct>=0?T.green:T.red}}>{fPct(tPct)}</span>
+                                  <span className="mono" style={{fontSize:9,color:T.green}}>{t.objetivoPila!=null?fUSD(t.objetivoPila,false):"—"}</span>
+                                  <span className="mono" style={{fontSize:9,color:t.stopPila>=0?T.green:T.red}}>{t.stopPila!=null?fUSD(t.stopPila):"—"}</span>
                                   <span className="mono" style={{fontSize:10,fontWeight:700,color:t.pnl>=0?T.green:T.red}}>{fUSD(t.pnl)}</span>
                                   <span style={{fontSize:8,fontWeight:700,color:t.pnl>=0?T.green:T.red,background:`${t.pnl>=0?T.green:T.red}18`,padding:"2px 7px",borderRadius:4,textAlign:"center"}}>{t.reason||"—"}</span>
                                   <div>
@@ -6289,9 +6325,9 @@ export default function TradingBot(){
                               );
                             })}
                             {g.items.length>1&&(
-                              <div style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 90px 90px 100px 100px 1fr",
+                              <div style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 70px 100px 100px 90px 90px 100px 100px 1fr",
                                 gap:8,alignItems:"center",background:T.dim,border:`2px solid ${groupTotal>=0?T.green:T.red}`,borderRadius:6,padding:"5px 10px"}}>
-                                <span style={{fontSize:8,fontWeight:700,color:T.muted,gridColumn:"1 / 7"}}>TOTAL de este cierre ({g.items.length} posiciones)</span>
+                                <span style={{fontSize:8,fontWeight:700,color:T.muted,gridColumn:"1 / 10"}}>TOTAL de este cierre ({g.items.length} posiciones)</span>
                                 <span className="mono" style={{fontSize:10,fontWeight:700,color:groupTotal>=0?T.green:T.red}}>{fUSD(groupTotal)}</span>
                               </div>
                             )}

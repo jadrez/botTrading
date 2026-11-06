@@ -96,17 +96,22 @@ export function startExpEngine() {
   };
 
   const closeAllExpPos = async (exitPrice, reason) => {
+    // objetivo/stop de la pila en el momento EXACTO del cierre — hay que
+    // leerlos ANTES de resetStackTracking (que se llama justo después en
+    // flip()), si no quedarían en 0/piso-inicial para el histórico.
+    const objetivo = addLevel + cfg.addStep;
+    const stop = floor;
     const closed = positions.map(pos => ({
-      ...pos, symbol: EXP_SYMBOL, exit: exitPrice, pnl: posPnL(pos, exitPrice), reason, closeTime: Date.now(),
+      ...pos, symbol: EXP_SYMBOL, exit: exitPrice, pnl: posPnL(pos, exitPrice), reason, objetivo, stop, closeTime: Date.now(),
     }));
     positions = [];
     await persistLive(true);
     for (const c of closed) {
       try {
         await db.query(
-          `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, allocated_size, multiplier, opened_at, closed_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-          [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime)]
+          `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.objetivo, c.stop, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime)]
         );
       } catch (e) { log(`error writing exp_trades: ${e.message}`); }
     }
@@ -122,13 +127,17 @@ export function startExpEngine() {
     if (!hedge) return 0;
     const h = hedge;
     const pnl = posPnL(h, exitPrice);
+    // La cobertura no tiene objetivo/stop propio — se deja constancia del
+    // de LA PILA en ese momento, igual que para cada posición normal.
+    const objetivo = addLevel + cfg.addStep;
+    const stop = floor;
     const closedAt = Date.now();
     hedge = null;
     try {
       await db.query(
-        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, allocated_size, multiplier, opened_at, closed_at)
-         VALUES ($1,$2,$3,$4,$5,'HEDGE','COBERTURA',$6,$7,$8,$9)`,
-        [EXP_SYMBOL, h.type, h.entry, exitPrice, pnl, h.allocatedSize, h.multiplier, new Date(h.openTime || closedAt), new Date(closedAt)]
+        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at)
+         VALUES ($1,$2,$3,$4,$5,'HEDGE','COBERTURA',$6,$7,$8,$9,$10,$11)`,
+        [EXP_SYMBOL, h.type, h.entry, exitPrice, pnl, objetivo, stop, h.allocatedSize, h.multiplier, new Date(h.openTime || closedAt), new Date(closedAt)]
       );
     } catch (e) { log(`error writing hedge trade: ${e.message}`); }
     log(`cobertura cerrada en ${pnl.toFixed(2)}`);
@@ -217,7 +226,25 @@ export function startExpEngine() {
       const stale = !hbAt || (Date.now() - hbAt) > 15000;
       const mine = owner === SESSION_ID;
       if (!owner || mine || stale) {
-        if (!isOwner) log("tomando el control del motor");
+        if (!isOwner) {
+          log("tomando el control del motor");
+          // Otra sesión pudo haber mutado positions/floor/peak/hedge mientras
+          // nosotros no éramos dueños — si seguimos con lo que teníamos en
+          // memoria de ANTES de perder el control, evaluamos contra un
+          // estado viejo (piso/pila que ya no son los reales) y la pila
+          // puede pasar de largo su piso real. Resincroniza desde la DB
+          // antes de volver a evaluar.
+          try {
+            const live = JSON.parse((await getConfigValue(db, "exp_live_state", "null")) || "null");
+            if (live) {
+              positions = live.positions || []; direction = live.direction ?? null;
+              if (live.floor != null) floor = live.floor;
+              if (live.addLevel != null) addLevel = live.addLevel;
+              if (live.peak != null) peak = live.peak;
+              hedge = live.hedge ?? null;
+            }
+          } catch {}
+        }
         isOwner = true;
         await setConfigValue(db, "exp_engine_owner", `${SESSION_ID}:${Date.now()}`);
       } else {

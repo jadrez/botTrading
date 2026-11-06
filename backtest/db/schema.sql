@@ -179,6 +179,8 @@ CREATE TABLE IF NOT EXISTS exp_trades (
   pnl              NUMERIC NOT NULL,
   reason           TEXT,                    -- 'FLIP' | 'HEDGE' (motivo de CIERRE)
   pattern          TEXT,                    -- 'VELA ANTERIOR' | 'PIRÁMIDE' | 'VOLTEO' | 'COBERTURA' (motivo de APERTURA)
+  objetivo_pila    NUMERIC,                 -- objetivo/piso de LA PILA (no de esta posición) en el momento del cierre
+  stop_pila        NUMERIC,
   allocated_size   NUMERIC,
   multiplier       INT,
   opened_at        TIMESTAMPTZ,
