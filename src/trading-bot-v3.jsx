@@ -403,7 +403,17 @@ function loadTrades(){ try{return JSON.parse(localStorage.getItem(LS_TRADES)||"[
    POSITIVA de un pico ya positivo, una vez que la pila tocó positivo
    cualquier cierre posterior por este piso queda garantizado en positivo
    — "siempre vamos a requerir en cerrar en positivo". */
-const EXP_SYMBOL="XAU/USD";
+const EXP_SYMBOL="XAU/USD"; // valor por defecto — ver expSymbol más abajo (editable en vivo, mismo patrón que expAddStep/expFloorStart)
+// Símbolos soportados para el Experimento + su ticker de Binance (precio en
+// vivo cuando esta pestaña es la dueña del motor) y su símbolo de Deriv
+// (REST+OTP, usado por el servidor y por "open"/"close" cuando Operar en
+// vivo está activo — ver api/deriv-order.js SYMBOL_MAP). BTC/USD agregado
+// explícitamente para poder seguir probando el motor (simulado) mientras
+// XAU/USD está cerrado por fin de semana/feriado — cripto opera 24/7.
+const EXP_SYMBOLS={
+  "XAU/USD":{binance:"PAXGUSDT",deriv:"frxXAUUSD"},
+  "BTC/USD":{binance:"BTCUSDT",deriv:"cryBTCUSD"},
+};
 // Fuente de precio EN VIVO del motor: PAXG/USDT en Binance (oro tokenizado,
 // respaldado 1:1 por una onza de oro físico), NO el GC=F de Yahoo de arriba.
 // Verificado en vivo: Yahoo's commodity quote (usado en el resto de la app
@@ -500,6 +510,7 @@ const EXP_HEDGE_STOP_PCT=1;
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
 const LS_EXP_MAXSTACK="bot_exp_maxstack_v1";
+const LS_EXP_SYMBOL="bot_exp_symbol_v1";
 // La pila/dirección/piso EN VIVO también se persisten (no solo el
 // historial cerrado) — verificado en vivo: sin esto, recargar la página
 // (o cualquier remount) perdía la pila activa de golpe, el panel volvía a
@@ -1802,6 +1813,8 @@ export default function TradingBot(){
   const [expPrice,setExpPrice]         = useState(null);
   const [expPositions,setExpPositions] = useState([]);
   const [expDirection,setExpDirection] = useState(null);
+  const [expSymbol,setExpSymbol]       = useState(()=>localStorage.getItem(LS_EXP_SYMBOL)||EXP_SYMBOL);
+  const expSymbolRef = useRef(expSymbol);
   const [expHedgePos,setExpHedgePos] = useState(null); // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   // Deliberadamente SIN localStorage (a diferencia de los demás exp_*): no
   // queremos que un navegador muestre "en vivo" por una caché vieja antes de
@@ -1862,6 +1875,9 @@ export default function TradingBot(){
   useEffect(()=>{expDerivLiveRef.current=expDerivLive;
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_deriv_live",value:expDerivLive?"1":"0"})}).catch(()=>{});
   },[expDerivLive]);
+  useEffect(()=>{expSymbolRef.current=expSymbol; try{localStorage.setItem(LS_EXP_SYMBOL,expSymbol);}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_symbol",value:expSymbol})}).catch(()=>{});
+  },[expSymbol]);
 
   // ── Sincronización inicial desde la DB (una sola vez al montar) — esto es
   // lo que hace que abrir la app desde OTRO navegador/celular muestre la
@@ -1885,6 +1901,7 @@ export default function TradingBot(){
           if(d.exp_floor_start!=null) setExpFloorStart(parseFloat(d.exp_floor_start));
           if(d.exp_max_stack!=null) setExpMaxStack(parseInt(d.exp_max_stack,10));
           if(d.exp_deriv_live!=null) setExpDerivLive(d.exp_deriv_live==="1");
+          if(d.exp_symbol && EXP_SYMBOLS[d.exp_symbol]) setExpSymbol(d.exp_symbol);
           if(d.exp_live_state){
             try{
               const live=JSON.parse(d.exp_live_state);
@@ -2215,7 +2232,7 @@ export default function TradingBot(){
       const objetivo=expAddLevelRef.current+expAddStepRef.current;
       const stop=expFloorRef.current;
       const closed=expPositionsRef.current.map(pos=>({
-        ...pos, symbol:EXP_SYMBOL, exit:exitPrice, pnl:posPnL(pos,exitPrice,pos.allocatedSize),
+        ...pos, symbol:expSymbolRef.current, exit:exitPrice, pnl:posPnL(pos,exitPrice,pos.allocatedSize),
         reason, objetivo, stop, time:now(), closeTime:Date.now(), tradeTime:Math.floor(Date.now()/1000),
       }));
       expPositionsRef.current=[];
@@ -2257,13 +2274,13 @@ export default function TradingBot(){
       persistLive();
       const closedAt=Date.now();
       setExpTrades(prev=>{
-        const next=[{...hedge,symbol:EXP_SYMBOL,exit:exitPrice,pnl,reason:"HEDGE",objetivo,stop,time:now(),
+        const next=[{...hedge,symbol:expSymbolRef.current,exit:exitPrice,pnl,reason:"HEDGE",objetivo,stop,time:now(),
           closeTime:closedAt,tradeTime:Math.floor(closedAt/1000)},...prev].slice(0,200);
         saveExpTrades(next); return next;
       });
       fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
-          symbol:EXP_SYMBOL, type:hedge.type, entryPrice:hedge.entry, exitPrice, pnl, reason:"HEDGE",
+          symbol:expSymbolRef.current, type:hedge.type, entryPrice:hedge.entry, exitPrice, pnl, reason:"HEDGE",
           pattern:"COBERTURA", objetivoPila:objetivo, stopPila:stop, allocatedSize:hedge.allocatedSize, multiplier:hedge.multiplier,
           openedAt:hedge.openTime?new Date(hedge.openTime).toISOString():undefined,
           closedAt:new Date(closedAt).toISOString(),
@@ -2424,7 +2441,8 @@ export default function TradingBot(){
     // Binance klines → {time(seg), o,h,l,c,v} — mismo shape que usa el resto
     // de la app, solo que la fuente es Binance en vez de Yahoo.
     const fetchBinanceKlines=async(interval,limit)=>{
-      const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${EXP_BINANCE}&interval=${interval}&limit=${limit}`);
+      const binanceSym=EXP_SYMBOLS[expSymbolRef.current]?.binance||"PAXGUSDT";
+      const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${interval}&limit=${limit}`);
       const raw=await r.json();
       if(!Array.isArray(raw)) return null;
       return raw.map(k=>({time:Math.floor(k[0]/1000),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
@@ -2548,7 +2566,8 @@ export default function TradingBot(){
       // ni siquiera vale la pena pedirle su propio precio a Binance: sería
       // otra fuente distinta peleando por mostrarse en "ACTUAL").
       if(!expIsOwnerRef.current){ return; }
-      const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${EXP_BINANCE}`);
+      const binanceSym=EXP_SYMBOLS[expSymbolRef.current]?.binance||"PAXGUSDT";
+      const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${binanceSym}`);
       const d=await r.json();
       const np=parseFloat(d.price);
       if(!np||isNaN(np)||!alive) return;
@@ -6196,7 +6215,7 @@ export default function TradingBot(){
           return(
           <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1600}}>
 
-            <ConfigCard title="EXPERIMENTO · PIRÁMIDE XAU/USD" style={{borderTop:`2px solid ${T.yellow}`}}>
+            <ConfigCard title={`EXPERIMENTO · PIRÁMIDE ${expSymbol}`} style={{borderTop:`2px solid ${T.yellow}`}}>
               <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:12}}>
                 Solo Simulado, aislado del resto del bot: entra en la dirección de la vela de 1m que acaba de cerrar,
                 apila otra posición cada +${expAddStep} de la pila. El piso protector es independiente del apilado:
@@ -6207,19 +6226,32 @@ export default function TradingBot(){
                 ({fUSD(expFloorStart*EXP_QUICK_REVERSAL_FRACTION)} en vez de {fUSD(expFloorStart)}) — si resulta ser
                 un error, vuelve rápido a la dirección que sí funcionaba en vez de esperar el piso completo otra vez.
                 El stake es lo que determina qué tan rápido se mueven estos $: PnL($) = %movimiento_del_precio × stake × 100 —
-                con este stake, el oro necesita moverse <b>{((expAddStep/(expStake*DEFAULT_MULTIPLIER))*100).toFixed(3)}%</b> para
+                con este stake, {expSymbol} necesita moverse <b>{((expAddStep/(expStake*DEFAULT_MULTIPLIER))*100).toFixed(3)}%</b> para
                 el próximo apilado/volteo (sube el stake si lo quieres más rápido, es solo Simulado).
-                <br/>Precio en vivo cada 1s vía Binance PAXG/USDT (oro tokenizado, respaldado 1:1 por oro físico) —
-                Yahoo/Deriv no dan movimiento real más seguido que ~15s para oro, PAXG sí tiene ticks genuinos; puede
-                diferir ~0.5-1% del spot exacto de XAU/USD por ser un instrumento distinto, no spot puro.
+                <br/>Precio en vivo cada 1s vía Binance {EXP_SYMBOLS[expSymbol]?.binance} — Yahoo/Deriv no dan movimiento
+                real más seguido que ~15s para la mayoría de estos símbolos, Binance sí tiene ticks genuinos; puede
+                diferir un poco del spot exacto de {expSymbol} según el instrumento.
                 <br/>Cobertura: si la pila nunca estuvo en positivo y su pérdida llega al {Math.round(EXP_HEDGE_TRIGGER_PCT*100)}%
                 de {fUSD(expFloorStart)} ({fUSD(expFloorStart*EXP_HEDGE_TRIGGER_PCT)}), abre una posición contraria aparte
-                (mismo stake) — la pila sigue con su piso normal; la cobertura cierra junto con ella cuando resuelve.
+                (mismo stake) — la pila sigue con su piso normal; si su propia pérdida llega al 100% de {fUSD(expFloorStart)}
+                se cierra sola (SL propio); si en cambio gana, se absorbe como la nueva pila en vez de cerrarse al voltear.
+              </div>
+
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
+                <div><div style={{fontSize:12,fontWeight:600}}>Símbolo</div>
+                  <div style={{fontSize:8,color:T.muted}}>
+                    {(expPositions.length>0||expHedgePos)?"No se puede cambiar con la pila abierta — ciérrala primero."
+                      :"Cuál instrumento opera el Experimento (afecta precio en vivo y, si aplica, el contrato real en Deriv)."}</div></div>
+                <select value={expSymbol} disabled={expPositions.length>0||!!expHedgePos}
+                  onChange={e=>setExpSymbol(e.target.value)}
+                  style={{background:T.dim,color:T.text,border:`1px solid ${T.border}`,borderRadius:5,padding:"6px 10px",fontSize:11,fontWeight:600}}>
+                  {Object.keys(EXP_SYMBOLS).map(s=><option key={s} value={s}>{s}</option>)}
+                </select>
               </div>
 
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
                 <div><div style={{fontSize:12,fontWeight:600}}>Activar experimento</div>
-                  <div style={{fontSize:8,color:T.muted}}>Corre en segundo plano con su propio feed de XAU/USD</div></div>
+                  <div style={{fontSize:8,color:T.muted}}>Corre en segundo plano con su propio feed de {expSymbol}</div></div>
                 <ConfigToggle on={expEnabled} onClick={()=>setExpEnabled(p=>!p)}/>
               </div>
 
@@ -6236,10 +6268,10 @@ export default function TradingBot(){
                 <div><div style={{fontSize:12,fontWeight:600,color:expDerivLive?T.red:T.text}}>
                   {expDerivLive?"🔴 EN VIVO — Deriv demo (dinero demo real)":"Operar en vivo (Deriv demo)"}</div>
                   <div style={{fontSize:8,color:T.muted}}>
-                    {expDerivLive?"Cada apertura/cierre es un contrato REAL en tu cuenta demo de Deriv (Gold/USD)."
+                    {expDerivLive?`Cada apertura/cierre es un contrato REAL en tu cuenta demo de Deriv (${expSymbol}).`
                       :"Apagado: solo simula. Al activar, abre/cierra contratos reales de Multiplicadores en tu cuenta DEMO de Deriv."}</div></div>
                 <ConfigToggle on={expDerivLive} onClick={()=>{
-                  if(!expDerivLive && !window.confirm("Esto hace que el Experimento abra y cierre contratos REALES (Multiplicadores, Gold/USD) en tu cuenta DEMO de Deriv, usando saldo demo real. ¿Continuar?")) return;
+                  if(!expDerivLive && !window.confirm(`Esto hace que el Experimento abra y cierre contratos REALES (Multiplicadores, ${expSymbol}) en tu cuenta DEMO de Deriv, usando saldo demo real. ¿Continuar?`)) return;
                   setExpDerivLive(p=>!p);
                 }}/>
               </div>
@@ -6460,7 +6492,7 @@ export default function TradingBot(){
                                   gap:8,alignItems:"center",background:`${t.pnl>=0?T.green:T.red}08`,border:`1px solid ${t.pnl>=0?T.green:T.red}25`,borderRadius:6,padding:"6px 10px"}}>
                                   <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.openTime)}</span>
                                   <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime)}</span>
-                                  <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||EXP_SYMBOL}</span>
+                                  <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||expSymbol}</span>
                                   <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:T.red}}>{t.type}</span>
                                   <span className="mono" style={{fontSize:9}}>{fP(t.entry,2)}</span>
                                   <span className="mono" style={{fontSize:9}}>{fP(t.exit,2)}</span>

@@ -17,7 +17,14 @@
 // changes were needed for this, the protocol is identity-agnostic by design.
 import pg from "pg";
 
-const EXP_SYMBOL = "XAU/USD";
+const EXP_SYMBOL_DEFAULT = "XAU/USD"; // ver cfg.symbol (editable en vivo vía exp_symbol) — reemplaza al antiguo EXP_SYMBOL fijo
+// Símbolo soportado -> symbol de Deriv para la acción "tick" (precio) y para
+// "open"/"close" (ver SYMBOL_MAP en api/deriv-order.js, que debe tener la
+// misma entrada). BTC/USD agregado explícitamente para poder seguir
+// probando el motor (simulado) mientras XAU/USD está cerrado por fin de
+// semana/feriado — cripto opera 24/7, el símbolo verificado en vivo vía
+// "tick" antes de registrarlo (cryBTCUSD devolvió un precio real).
+const EXP_SYMBOL_TICK = { "XAU/USD": "frxXAUUSD", "BTC/USD": "cryBTCUSD" };
 const DEFAULT_MULTIPLIER = 100;
 const EXP_RETAIN_PCT = 0.8;
 const EXP_FLOOR_ARM_AT = 10;
@@ -110,7 +117,7 @@ export function startExpEngine() {
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, derivLive: false };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, derivLive: false, symbol: EXP_SYMBOL_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
   let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
@@ -139,7 +146,7 @@ export function startExpEngine() {
     if (cfg.derivLive) {
       try {
         const r = await derivOrderCall("open", {
-          symbol: EXP_SYMBOL, side: type, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
+          symbol: cfg.symbol, side: type, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
           tpTarget: DERIV_SAFETY_TP, slTarget: derivSafetySL(cfg.stake),
         });
         pos = { ...pos, contractId: r.contractId, derivBuyPrice: r.buyPrice };
@@ -207,7 +214,7 @@ export function startExpEngine() {
     // cerrar (5 × ~0.5-0.7s cada llamada a Deriv), justo el "bajonazo"
     // reportado en vivo durante un volteo con la pila llena.
     const results = await Promise.all(
-      positions.map(pos => closeOnePosition(pos, exitPrice, { symbol: EXP_SYMBOL, reason, objetivo, stop }))
+      positions.map(pos => closeOnePosition(pos, exitPrice, { symbol: cfg.symbol, reason, objetivo, stop }))
     );
     const remaining = [], closedRecords = [];
     results.forEach(({ ok, record }, i) => { if (ok) closedRecords.push(record); else remaining.push(positions[i]); });
@@ -226,7 +233,7 @@ export function startExpEngine() {
     if (!hedge) return { pnl: 0, ok: true };
     const objetivo = addLevel + cfg.addStep;
     const stop = floor;
-    const { ok, record } = await closeOnePosition(hedge, exitPrice, { symbol: EXP_SYMBOL, reason: "HEDGE", pattern: "COBERTURA", objetivo, stop });
+    const { ok, record } = await closeOnePosition(hedge, exitPrice, { symbol: cfg.symbol, reason: "HEDGE", pattern: "COBERTURA", objetivo, stop });
     if (!ok) { log("Deriv: no se pudo confirmar el cierre de la cobertura — se reintenta"); return { pnl: 0, ok: false }; }
     hedge = null;
     // persistLive() normal solo detecta cambios de floor/cantidad de
@@ -314,7 +321,7 @@ export function startExpEngine() {
     const pos = positions.find(p => p.id === posId);
     if (!pos) { log(`cierre manual: posición ${posId} ya no está en la pila`); return true; }
     const objetivo = addLevel + cfg.addStep, stop = floor;
-    const { ok, record } = await closeOnePosition(pos, exitPrice, { symbol: EXP_SYMBOL, reason: "MANUAL", objetivo, stop });
+    const { ok, record } = await closeOnePosition(pos, exitPrice, { symbol: cfg.symbol, reason: "MANUAL", objetivo, stop });
     if (!ok) return false;
     positions = positions.filter(p => p.id !== posId);
     await persistLive(true);
@@ -337,7 +344,7 @@ export function startExpEngine() {
       if (cfg.derivLive) {
         try {
           const r = await derivOrderCall("open", {
-            symbol: EXP_SYMBOL, side: hedgeType, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
+            symbol: cfg.symbol, side: hedgeType, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
             tpTarget: DERIV_SAFETY_TP, slTarget: derivSafetySL(cfg.stake),
           });
           h = { ...h, contractId: r.contractId, derivBuyPrice: r.buyPrice };
@@ -450,22 +457,34 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack, derivLive] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol] = await Promise.all([
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
       getConfigValue(db, "exp_add_step", "50"),
       getConfigValue(db, "exp_floor_start", "-50"),
       getConfigValue(db, "exp_max_stack", "10"),
       getConfigValue(db, "exp_deriv_live", "0"),
+      getConfigValue(db, "exp_symbol", EXP_SYMBOL_DEFAULT),
     ]);
     const wasLive = cfg.derivLive;
+    const wasSymbol = cfg.symbol;
+    // El símbolo NO se cambia si hay algo abierto (posición u hedge) — mezclar
+    // el precio de un símbolo nuevo con la entrada de una posición abierta en
+    // OTRO símbolo daría un PnL/piso basura (ej. entrada ~4065 de oro contra
+    // un precio ~76000 de BTC). Se ignora el pedido hasta que la pila quede
+    // vacía (el usuario debe cerrarla/esperar a que resuelva primero).
+    const requestedSymbol = EXP_SYMBOL_TICK[symbol] ? symbol : EXP_SYMBOL_DEFAULT;
+    const symbolChangeBlocked = requestedSymbol !== wasSymbol && (positions.length > 0 || hedge);
     cfg = {
       enabled: enabled === "1", stake: parseFloat(stake) || 1, addStep: parseFloat(addStep) || 50,
       floorStart: parseFloat(floorStart) || -50, maxStack: parseInt(maxStack, 10) || 10,
       derivLive: derivLive === "1",
+      symbol: symbolChangeBlocked ? wasSymbol : requestedSymbol,
     };
     if (cfg.derivLive && !wasLive) log("⚠️ MODO EN VIVO (Deriv demo) activado — las próximas posiciones serán contratos reales");
     if (!cfg.derivLive && wasLive) log("Modo en vivo (Deriv) desactivado — vuelve a simulado");
+    if (symbolChangeBlocked) log(`⚠️ exp_symbol pide cambiar de ${wasSymbol} a ${requestedSymbol} pero hay posiciones/cobertura abiertas — se ignora hasta que la pila esté vacía`);
+    else if (cfg.symbol !== wasSymbol) log(`símbolo del Experimento cambiado a ${cfg.symbol}`);
   };
 
   // El pnl/precio que YA mostramos para una posición real se calculaba 100%
@@ -523,18 +542,20 @@ export function startExpEngine() {
     if (ok) lastManualCloseAt = req.requestedAt;
   };
 
-  // Precio: Deriv (frxXAUUSD vía el mismo canal REST+OTP autenticado que ya
-  // usa el Experimento para operar), NO Binance. Binance empezó a bloquear
-  // la IP de esta máquina de Fly.io ("Service unavailable from a restricted
+  // Precio: Deriv (vía el mismo canal REST+OTP autenticado que ya usa el
+  // Experimento para operar), NO Binance. Binance empezó a bloquear la IP de
+  // esta máquina de Fly.io ("Service unavailable from a restricted
   // location" — dfw/Dallas cae bajo la restricción geográfica de
   // Binance.com) — el motor entero quedó congelado en silencio (price
   // nunca se seteaba, ni el auto-trading ni el cierre manual podían
   // evaluar nada) hasta diagnosticarlo con logs explícitos. Deriv no tiene
   // ese bloqueo desde esta misma máquina (ya verificado en vivo), y de
   // paso unifica la fuente de precio de DECISIÓN con la de EJECUCIÓN real.
-  const fetchDerivGoldPrice = async () => {
+  // Símbolo dinámico (cfg.symbol vía EXP_SYMBOL_TICK) — ya no fijo a oro.
+  const fetchExpTickPrice = async () => {
     try {
-      const r = await derivOrderCall("tick", { derivSymbol: "frxXAUUSD" });
+      const derivSymbol = EXP_SYMBOL_TICK[cfg.symbol] || EXP_SYMBOL_TICK[EXP_SYMBOL_DEFAULT];
+      const r = await derivOrderCall("tick", { derivSymbol });
       return typeof r.price === "number" ? r.price : null;
     } catch { return null; }
   };
@@ -551,7 +572,7 @@ export function startExpEngine() {
         log(`pila restaurada al iniciar (${positions.length}/${cfg.maxStack} ${direction}, piso ${floor.toFixed(2)}${hedge?" · cobertura "+hedge.type:""})`);
       }
     } catch {}
-    const p = await fetchDerivGoldPrice();
+    const p = await fetchExpTickPrice();
     if (p) {
       const nowSec = Math.floor(Date.now() / 1000);
       candles = [{ time: nowSec, o: p, c: p, h: p, l: p, v: 0 }];
@@ -577,7 +598,7 @@ export function startExpEngine() {
       // esto estaba todo detrás de "if (!cfg.enabled) return", lo que
       // dejaba el botón "Cerrar"/"Cerrar todo" sin efecto mientras el
       // experimento estuviera apagado — reportado en vivo.
-      const np = await fetchDerivGoldPrice();
+      const np = await fetchExpTickPrice();
       if (np && !isNaN(np)) {
         price = np;
         // Clave aparte de exp_live_state (que solo escribe cuando floor/
