@@ -2445,7 +2445,14 @@ export default function TradingBot(){
       ticking=true; tickStartedAt=now;
       try{
       tickCount++;
-      if(tickCount%5===0) claimOrCheckOwnership(); // cada ~5s, no cada tick
+      // Cada tick (1s), no cada 5: con el chequeo cada 5s, un visor que NO
+      // es dueño podía seguir mostrando una posición YA cerrada por el
+      // dueño real hasta 5s de más — el precio seguía actualizándose cada
+      // 1s sin parar mientras tanto, dando la falsa impresión de que el
+      // piso se pasaba de largo. Reportado en vivo ("porque deja llegar a
+      // esto -$19 ... es por la tardía de yahoo?" — no era eso, era este
+      // desfase de refresco).
+      claimOrCheckOwnership();
       const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${EXP_BINANCE}`);
       const d=await r.json();
       const np=parseFloat(d.price);
@@ -6074,7 +6081,7 @@ export default function TradingBot(){
           const expWr=expTrades.length?Math.round(expWins/expTrades.length*100):null;
           const expTotalPnl=expTrades.reduce((s,t)=>s+t.pnl,0);
           return(
-          <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1320}}>
+          <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1600}}>
 
             <ConfigCard title="EXPERIMENTO · PIRÁMIDE XAU/USD" style={{borderTop:`2px solid ${T.yellow}`}}>
               <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:12}}>
