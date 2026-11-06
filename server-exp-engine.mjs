@@ -24,7 +24,7 @@ const EXP_RETAIN_PCT = 0.8;
 const EXP_FLOOR_ARM_AT = 10;
 const EXP_MAX_STACK_DEFAULT = 10; // overridden live by cfg.maxStack (exp_max_stack)
 const EXP_QUICK_REVERSAL_FRACTION = 0.3;
-const EXP_CANARY_PEAK = 5, EXP_CANARY_DROP = -5; // ver nota en trading-bot-v3.jsx junto a estas mismas constantes
+const EXP_CANARY_PEAK = 5, EXP_CANARY_MIN_STACK = 3; // ver nota en trading-bot-v3.jsx junto a estas mismas constantes (v2: % de EXP_RETAIN_PCT, no rango fijo)
 const SESSION_ID = `server:${process.env.FLY_MACHINE_ID || "local"}:${Math.random().toString(36).slice(2)}`;
 
 let pool = null;
@@ -130,17 +130,22 @@ export function startExpEngine() {
     const stackPnl = positions.reduce((s, p) => s + posPnL(p, price), 0);
     peak = Math.max(peak, stackPnl);
     if (peak >= EXP_FLOOR_ARM_AT) floor = Math.max(floor, peak * EXP_RETAIN_PCT);
-    // Canario: la ÚLTIMA posición apilada se revisa por separado — si ella
-    // sola tocó +$5 y cayó a -$5, voltea TODA la pila ya, sin esperar al
-    // piso agregado (más lento porque las posiciones viejas, ya muy en
+    // Canario: la ÚLTIMA posición apilada se revisa por separado (solo con
+    // EXP_CANARY_MIN_STACK+ abiertas) — si su propio pico llega a
+    // EXP_CANARY_PEAK y retrocede al mismo % de retención que ya usa el
+    // piso agregado (EXP_RETAIN_PCT), voltea TODA la pila ya, sin esperar
+    // al piso agregado (más lento porque las posiciones viejas, ya muy en
     // positivo, lo arrastran hacia arriba).
-    const lastPos = positions.at(-1);
-    if (lastPos) {
+    if (positions.length >= EXP_CANARY_MIN_STACK) {
+      const lastPos = positions.at(-1);
       const lastPnl = posPnL(lastPos, price);
       lastPosPeak = Math.max(lastPosPeak, lastPnl);
-      if (lastPosPeak >= EXP_CANARY_PEAK && lastPnl <= EXP_CANARY_DROP) {
-        log(`canario — última posición tocó +${lastPosPeak.toFixed(2)} y cayó a ${lastPnl.toFixed(2)}`);
-        await flip(price); return;
+      if (lastPosPeak >= EXP_CANARY_PEAK) {
+        const canaryFloor = lastPosPeak * EXP_RETAIN_PCT;
+        if (lastPnl <= canaryFloor) {
+          log(`canario — última posición tocó +${lastPosPeak.toFixed(2)} y cayó a ${lastPnl.toFixed(2)} (piso propio ${canaryFloor.toFixed(2)})`);
+          await flip(price); return;
+        }
       }
     }
     await persistLive();

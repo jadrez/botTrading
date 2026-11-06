@@ -457,13 +457,25 @@ const EXP_QUICK_REVERSAL_FRACTION=0.3; // 30% del piso inicial normal
 // las posiciones VIEJAS de la pila ya están profundamente en positivo y
 // su P&L domina la suma agregada, así que el piso de TODA la pila puede
 // tardar en reaccionar cuando la tendencia realmente ya se dio vuelta —
-// la posición más nueva es la primera en sentirlo. Si esa última llega a
-// tocar +$5 de pico propio y luego cae a -$5 (un giro de $10 solo en
-// ELLA), se cierra y voltea TODA la pila de inmediato, sin esperar a que
-// el piso agregado (más lento, protegido por las posiciones viejas) se
-// active. Es un gatillo ADICIONAL, no reemplaza el piso — lo que dispare
-// primero.
-const EXP_CANARY_PEAK=5, EXP_CANARY_DROP=-5;
+// la posición más nueva es la primera en sentirlo. Es un gatillo
+// ADICIONAL al piso agregado, no lo reemplaza — lo que dispare primero.
+//
+// v2 (en %, no rango fijo): la v1 usaba un rango fijo (+$5 de pico, luego
+// -$5) — encontrado en vivo que esto deja un hueco real: un pico de +$30
+// que retrocede a +$2 (un 93% de giveback) NUNCA disparaba porque +$2
+// sigue siendo positivo, no cruza a -$5. Ahora reusa EXACTAMENTE el mismo
+// % de retención que ya protege la pila entera (EXP_RETAIN_PCT): una vez
+// el pico propio de la última posición llega a EXP_CANARY_PEAK, su propio
+// piso pasa a ser pico×EXP_RETAIN_PCT — a pico=$30 dispara si cae a $24;
+// a pico=$6 dispara si cae a $4.80 (equivalente al -$5 original en picos
+// chicos, pero ahora también atrapa el caso de pico grande).
+//
+// Solo vigila a partir de EXP_CANARY_MIN_STACK posiciones abiertas — con
+// 1-2 posiciones el canario y el piso de la pila casi se superponen (la
+// "última" ES casi toda la pila), así que no aporta nada ahí; se vuelve
+// útil justo cuando ya hay varias posiciones viejas que podrían estar
+// escondiendo una reversión reciente detrás de su propio P&L grande.
+const EXP_CANARY_PEAK=5, EXP_CANARY_MIN_STACK=3;
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
 const LS_EXP_MAXSTACK="bot_exp_maxstack_v1";
@@ -2194,16 +2206,21 @@ export default function TradingBot(){
         expFloorRef.current=Math.max(expFloorRef.current, expStackPeakRef.current*EXP_RETAIN_PCT);
       }
       // Canario: la ÚLTIMA posición apilada se revisa POR SEPARADO de la
-      // pila — si ella sola tocó +$5 y cayó a -$5, voltea TODA la pila de
-      // una vez, sin esperar a que el piso agregado (más lento porque las
+      // pila (solo con EXP_CANARY_MIN_STACK+ posiciones abiertas) — si su
+      // propio pico llega a EXP_CANARY_PEAK y luego retrocede al mismo %
+      // de retención que ya usa el piso agregado, voltea TODA la pila de
+      // una vez, sin esperar a que ese piso agregado (más lento porque las
       // posiciones viejas, ya muy en positivo, lo arrastran) reaccione.
-      const lastPos=expPositionsRef.current.at(-1);
-      if(lastPos){
+      if(expPositionsRef.current.length>=EXP_CANARY_MIN_STACK){
+        const lastPos=expPositionsRef.current.at(-1);
         const lastPnl=posPnL(lastPos,price,lastPos.allocatedSize);
         expLastPosPeakRef.current=Math.max(expLastPosPeakRef.current,lastPnl);
-        if(expLastPosPeakRef.current>=EXP_CANARY_PEAK && lastPnl<=EXP_CANARY_DROP){
-          addLog(`🐤 Experimento: canario — última posición tocó +${fUSD(expLastPosPeakRef.current,false)} y cayó a ${fUSD(lastPnl)}`,"info");
-          flip(price); return;
+        if(expLastPosPeakRef.current>=EXP_CANARY_PEAK){
+          const canaryFloor=expLastPosPeakRef.current*EXP_RETAIN_PCT;
+          if(lastPnl<=canaryFloor){
+            addLog(`🐤 Experimento: canario — última posición tocó +${fUSD(expLastPosPeakRef.current,false)} y cayó a ${fUSD(lastPnl)} (piso propio ${fUSD(canaryFloor)})`,"info");
+            flip(price); return;
+          }
         }
       }
       persistLive(); // guarda el pico/piso actualizado en cada tick, no solo al apilar/cerrar
