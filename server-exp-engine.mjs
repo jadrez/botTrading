@@ -562,16 +562,25 @@ export function startExpEngine() {
 
   let bootstrapped = false;
   const bootstrap = async () => {
-    await reloadConfig();
+    // Restaura ANTES de reloadConfig() — el guard de cambio de símbolo ahí
+    // decide mirando `positions`/`hedge` en memoria, y en el arranque siguen
+    // vacíos (los valores iniciales de las variables del módulo) hasta que
+    // esto corre. Si reloadConfig() fuera primero, el guard vería la pila
+    // vacía y dejaría pasar un cambio de símbolo aunque hubiera una posición
+    // real abierta en OTRO símbolo esperando a ser restaurada — pasó en
+    // vivo: cfg.symbol saltó a BTC/USD con una posición de ORO real todavía
+    // por restaurar, y evaluateStack calculó PnL mezclando precio de BTC
+    // contra entrada de ORO (número absurdo que disparó flip() en bucle).
     try {
       const live = JSON.parse((await getConfigValue(db, "exp_live_state", "null")) || "null");
       if (live?.positions?.length) {
         positions = live.positions; direction = live.direction ?? null;
-        floor = live.floor ?? cfg.floorStart; addLevel = live.addLevel ?? 0; peak = live.peak ?? 0;
+        floor = live.floor ?? -50; addLevel = live.addLevel ?? 0; peak = live.peak ?? 0;
         hedge = live.hedge ?? null;
-        log(`pila restaurada al iniciar (${positions.length}/${cfg.maxStack} ${direction}, piso ${floor.toFixed(2)}${hedge?" · cobertura "+hedge.type:""})`);
       }
     } catch {}
+    await reloadConfig();
+    if (positions.length) log(`pila restaurada al iniciar (${positions.length}/${cfg.maxStack} ${direction}, piso ${floor.toFixed(2)}${hedge?" · cobertura "+hedge.type:""})`);
     const p = await fetchExpTickPrice();
     if (p) {
       const nowSec = Math.floor(Date.now() / 1000);
