@@ -13,5 +13,6 @@ RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 COPY api ./api
 COPY server.mjs ./server.mjs
+COPY server-exp-engine.mjs ./server-exp-engine.mjs
 EXPOSE 8080
 CMD ["node", "server.mjs"]

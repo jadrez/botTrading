@@ -11,7 +11,12 @@ primary_region = "dfw"
   force_https = true
   auto_stop_machines = true
   auto_start_machines = true
-  min_machines_running = 0
+  # 1, not 0: the Experimento XAU/USD pyramid now runs as a 24/7 background
+  # loop inside server.mjs (server-exp-engine.mjs) — a machine idled by
+  # auto_stop_machines would freeze that loop along with the HTTP server.
+  # Costs ~$3.50-4.50/mo extra for the one always-on machine (shared-cpu-1x,
+  # 512mb, dfw) — explicitly approved given that trade-off.
+  min_machines_running = 1
   processes = ["app"]
 
 [[vm]]

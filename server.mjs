@@ -18,6 +18,7 @@ import news from "./api/news.js";
 import positions from "./api/positions.js";
 import symbolStrategy from "./api/symbol-strategy.js";
 import trades from "./api/trades.js";
+import { startExpEngine } from "./server-exp-engine.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -45,3 +46,9 @@ app.get(/^(?!\/api\/).*/, (req, res) => res.sendFile(path.join(distDir, "index.h
 
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`listening on :${port}`));
+
+// Runs the Experimento XAU/USD pyramid 24/7 regardless of any browser tab
+// (see server-exp-engine.mjs) — requires min_machines_running=1 in
+// fly.toml, otherwise Fly suspends the machine on idle HTTP traffic and
+// this loop freezes right along with it.
+startExpEngine();
