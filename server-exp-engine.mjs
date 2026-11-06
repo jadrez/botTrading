@@ -243,14 +243,16 @@ export function startExpEngine() {
     return true;
   };
 
-  const manualCloseOne = async (contractId, exitPrice) => {
-    if (hedge?.contractId === contractId) return (await closeHedge(exitPrice)).ok;
-    const pos = positions.find(p => p.contractId === contractId);
-    if (!pos) { log(`cierre manual: contrato ${contractId} ya no está en la pila`); return true; }
+  // posId identifica la posición por su `id` local (toda posición lo tiene,
+  // simulada o real) — no por contractId, que solo existe para las reales.
+  const manualCloseOne = async (posId, exitPrice) => {
+    if (hedge?.id === posId) return (await closeHedge(exitPrice)).ok;
+    const pos = positions.find(p => p.id === posId);
+    if (!pos) { log(`cierre manual: posición ${posId} ya no está en la pila`); return true; }
     const objetivo = addLevel + cfg.addStep, stop = floor;
     const { ok, record } = await closeOnePosition(pos, exitPrice, { symbol: EXP_SYMBOL, reason: "MANUAL", objetivo, stop });
     if (!ok) return false;
-    positions = positions.filter(p => p.contractId !== contractId);
+    positions = positions.filter(p => p.id !== posId);
     await persistLive(true);
     await writeTradeRecord(record);
     log(`cierre manual de 1 posición — pnl ${record.pnl.toFixed(2)} — pila ${positions.length}/${cfg.maxStack}`);
@@ -267,7 +269,21 @@ export function startExpEngine() {
     // posición en la dirección contraria, mismo stake, aparte de la pila.
     if (!hedge && peak === 0 && stackPnl <= cfg.floorStart * EXP_HEDGE_TRIGGER_PCT) {
       const hedgeType = direction === "BUY" ? "SELL" : "BUY";
-      hedge = { id: Date.now() + Math.random(), type: hedgeType, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern: "COBERTURA" };
+      let h = { id: Date.now() + Math.random(), type: hedgeType, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern: "COBERTURA" };
+      if (cfg.derivLive) {
+        try {
+          const r = await derivOrderCall("open", {
+            symbol: EXP_SYMBOL, side: hedgeType, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
+            tpTarget: DERIV_SAFETY_TP, slTarget: Math.abs(cfg.floorStart) * DERIV_SAFETY_SL_MULT,
+          });
+          h = { ...h, contractId: r.contractId, derivBuyPrice: r.buyPrice };
+          log(`Deriv: contrato ${r.contractId} abierto (cobertura ${hedgeType}, stake ${cfg.stake})`);
+        } catch (e) {
+          log(`Deriv: ERROR abriendo cobertura — ${e.message} — se reintenta en el próximo tick`);
+          return; // sin cobertura local si Deriv falló — evita divergencia
+        }
+      }
+      hedge = h;
       log(`cobertura ${hedgeType} abierta @ ${price.toFixed(2)} (pila en ${stackPnl.toFixed(2)})`);
       await persistLive(true);
     }
@@ -387,9 +403,9 @@ export function startExpEngine() {
     if (Date.now() - req.requestedAt > 30000) { lastManualCloseAt = req.requestedAt; return; } // solicitud vieja, ignorar
     if (!price) return; // sin precio todavía no se puede valorar el cierre
     lastManualCloseAt = req.requestedAt;
-    log(`solicitud manual recibida: ${req.type === "all" ? "cerrar TODO" : `cerrar contrato ${req.contractId}`}`);
+    log(`solicitud manual recibida: ${req.type === "all" ? "cerrar TODO" : `cerrar posición ${req.posId}`}`);
     if (req.type === "all") await manualCloseAll(price);
-    else if (req.type === "one" && req.contractId) await manualCloseOne(req.contractId, price);
+    else if (req.type === "one" && req.posId != null) await manualCloseOne(req.posId, price);
   };
 
   const fetchBinanceKlines = async (interval, limit) => {
@@ -426,24 +442,32 @@ export function startExpEngine() {
       if (!bootstrapped) { await bootstrap(); return; }
       tickCount++;
       if (tickCount % 5 === 0) { await reloadConfig(); await claimOrCheckOwnership(); }
-      if (!cfg.enabled) return; // sin esto seguiría consultando Binance aunque el experimento esté apagado en la UI
+      // El precio se actualiza SIEMPRE (lo necesita el cierre manual aunque
+      // el experimento esté pausado) — lo que si se salta cuando está
+      // apagado es la lógica automática de entrada/apilado/volteo. Antes
+      // esto estaba todo detrás de "if (!cfg.enabled) return", lo que
+      // dejaba el botón "Cerrar"/"Cerrar todo" sin efecto mientras el
+      // experimento estuviera apagado — reportado en vivo.
       const r = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${EXP_BINANCE}`);
       const d = await r.json();
       const np = parseFloat(d.price);
-      if (!np || isNaN(np)) return;
-      price = np;
-      const nowSec = Math.floor(Date.now() / 1000);
-      if (candles.length) {
-        const last = { ...candles[candles.length - 1] };
-        if (nowSec - last.time >= 60) {
-          candles = [...candles.slice(0, -1), last, { time: nowSec, o: np, c: np, h: np, l: np, v: 0 }];
-          await onCandleClosed(last);
-        } else {
-          last.c = np; last.h = Math.max(last.h, np); last.l = Math.min(last.l, np);
-          candles = [...candles.slice(0, -1), last];
+      if (np && !isNaN(np)) {
+        price = np;
+        if (cfg.enabled) {
+          const nowSec = Math.floor(Date.now() / 1000);
+          if (candles.length) {
+            const last = { ...candles[candles.length - 1] };
+            if (nowSec - last.time >= 60) {
+              candles = [...candles.slice(0, -1), last, { time: nowSec, o: np, c: np, h: np, l: np, v: 0 }];
+              await onCandleClosed(last);
+            } else {
+              last.c = np; last.h = Math.max(last.h, np); last.l = Math.min(last.l, np);
+              candles = [...candles.slice(0, -1), last];
+            }
+          }
+          await evaluateStack();
         }
       }
-      await evaluateStack();
       await checkManualCloseRequest();
     } catch (e) {
       console.error("[exp-engine] tick error:", e.message);

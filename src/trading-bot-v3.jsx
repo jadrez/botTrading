@@ -6099,10 +6099,13 @@ export default function TradingBot(){
           // Deriv — ver nota en claimOrCheckOwnership) vía un comando en
           // bot_config que se revisa cada tick, igual que reloadConfig. No
           // cierra nada directamente desde aquí: solo dispara la solicitud.
-          const requestExpManualClose=(type,contractId)=>{
+          // posId identifica la posición por su `id` local (TODA posición lo
+          // tiene, sea simulada o real en Deriv) — no por contractId, que solo
+          // existe para las reales y dejaría sin forma de cerrar una simulada.
+          const requestExpManualClose=(type,posId)=>{
             fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
-              body:JSON.stringify({key:"exp_manual_close_request",value:JSON.stringify({type,contractId,requestedAt:Date.now()})})})
-              .then(()=>addLog(type==="all"?"🖐️ Cierre manual de TODA la pila solicitado…":`🖐️ Cierre manual solicitado (contrato ${contractId})…`,"info"))
+              body:JSON.stringify({key:"exp_manual_close_request",value:JSON.stringify({type,posId,requestedAt:Date.now()})})})
+              .then(()=>addLog(type==="all"?"🖐️ Cierre manual de TODA la pila solicitado…":`🖐️ Cierre manual solicitado…`,"info"))
               .catch(()=>{});
           };
           return(
@@ -6268,12 +6271,10 @@ export default function TradingBot(){
                               {isProtected?"🔒 protegida":`hace ${elapsedMin}m`}
                             </span>
                             <span style={{fontSize:8,fontWeight:700,color:T.text,background:T.dim,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>{pos.pattern||"—"}</span>
-                            <button onClick={()=>{if(window.confirm(`¿Cerrar esta posición ${pos.type}${pos.contractId?" (contrato real en Deriv)":""}?`)) requestExpManualClose("one",pos.contractId);}}
-                              disabled={!pos.contractId}
-                              title={pos.contractId?"Cerrar este contrato en Deriv":"Solo disponible para posiciones reales en Deriv"}
-                              style={{background:"transparent",border:`1px solid ${pos.contractId?T.red:T.border}50`,
-                                color:pos.contractId?T.red:T.muted,borderRadius:5,padding:"4px 8px",
-                                cursor:pos.contractId?"pointer":"not-allowed",fontSize:8,fontWeight:700,opacity:pos.contractId?1:0.5}}>
+                            <button onClick={()=>{if(window.confirm(`¿Cerrar esta posición ${pos.type}${pos.contractId?" (contrato real en Deriv)":""}?`)) requestExpManualClose("one",pos.id);}}
+                              title={pos.contractId?"Cerrar este contrato en Deriv":"Cerrar esta posición simulada"}
+                              style={{background:"transparent",border:`1px solid ${T.red}50`,
+                                color:T.red,borderRadius:5,padding:"4px 8px",cursor:"pointer",fontSize:8,fontWeight:700}}>
                               ✕ Cerrar
                             </button>
                           </div>
@@ -6308,12 +6309,10 @@ export default function TradingBot(){
                             <span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.accent,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>🛡️ COBERTURA</span>
                             <span style={{fontSize:8,color:T.muted}}>cierra con la pila</span>
                             <span style={{fontSize:8,fontWeight:700,color:T.text,background:T.dim,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>{expHedgePos.pattern||"COBERTURA"}</span>
-                            <button onClick={()=>{if(window.confirm(`¿Cerrar la cobertura ${expHedgePos.type}${expHedgePos.contractId?" (contrato real en Deriv)":""}?`)) requestExpManualClose("one",expHedgePos.contractId);}}
-                              disabled={!expHedgePos.contractId}
-                              title={expHedgePos.contractId?"Cerrar este contrato en Deriv":"Solo disponible para posiciones reales en Deriv"}
-                              style={{background:"transparent",border:`1px solid ${expHedgePos.contractId?T.red:T.border}50`,
-                                color:expHedgePos.contractId?T.red:T.muted,borderRadius:5,padding:"4px 8px",
-                                cursor:expHedgePos.contractId?"pointer":"not-allowed",fontSize:8,fontWeight:700,opacity:expHedgePos.contractId?1:0.5}}>
+                            <button onClick={()=>{if(window.confirm(`¿Cerrar la cobertura ${expHedgePos.type}${expHedgePos.contractId?" (contrato real en Deriv)":""}?`)) requestExpManualClose("one",expHedgePos.id);}}
+                              title={expHedgePos.contractId?"Cerrar este contrato en Deriv":"Cerrar esta cobertura simulada"}
+                              style={{background:"transparent",border:`1px solid ${T.red}50`,
+                                color:T.red,borderRadius:5,padding:"4px 8px",cursor:"pointer",fontSize:8,fontWeight:700}}>
                               ✕ Cerrar
                             </button>
                           </div>
