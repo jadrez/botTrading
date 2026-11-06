@@ -2022,13 +2022,18 @@ export default function TradingBot(){
       const stackPnl=expPositionsRef.current.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize),0);
       expStackPeakRef.current=Math.max(expStackPeakRef.current,stackPnl);
       // Piso continuo, DESACOPLADO del apilado: mientras el pico de la pila
-      // nunca haya sido positivo, el piso se queda en expFloorStart (editable,
-      // -50 por defecto). Apenas el pico es positivo, el piso pasa a ser una
-      // fracción de ESE pico (EXP_RETAIN_PCT) — nunca baja, solo sube con
-      // nuevos picos — así que, una vez tocó positivo, cualquier cierre por
-      // este piso queda garantizado en positivo. Reacciona cada tick, no
-      // solo al apilar.
-      if(expStackPeakRef.current>0){
+      // no haya alcanzado al menos un paso completo de apilado (expAddStep —
+      // el mismo "a pico=$50 → piso=$40" del ejemplo original), el piso se
+      // queda en expFloorStart (editable, -50 por defecto). BUG encontrado
+      // en vivo: antes esto arrancaba a proteger desde el primer centavo
+      // positivo (peak>0), así que un pico fugaz de $0.50 ya movía el piso a
+      // +$0.40 — a stake alto, el siguiente tick (que puede mover $50+ de
+      // un salto) pasaba de largo ese piso casi-cero y cerraba en pérdida
+      // chica, pareciendo "se repite/desaparece" cuando en realidad era un
+      // volteo real, solo que mal protegido. Con el piso de $0.40 por un
+      // pico de $0.50 esto nunca podía cumplir "una vez en positivo, siempre
+      // cierra en positivo" contra un movimiento de esa magnitud.
+      if(expStackPeakRef.current>=expAddStepRef.current){
         expFloorRef.current=Math.max(expFloorRef.current, expStackPeakRef.current*EXP_RETAIN_PCT);
       }
       persistLive(); // guarda el pico/piso actualizado en cada tick, no solo al apilar/cerrar
@@ -2082,8 +2087,19 @@ export default function TradingBot(){
       }catch{}
     })();
 
+    // Guard de reentrancia: setInterval dispara cada 5s SIN esperar a que
+    // el callback anterior termine — si fetchCommodityRateCached alguna vez
+    // tarda más de 5s (red lenta), dos ticks podían solaparse y evaluar/
+    // modificar expPositionsRef.current al mismo tiempo (dos apilados o dos
+    // volteos para el mismo cruce de umbral). Sin relación con el bug del
+    // piso de arriba, pero la misma pregunta del usuario ("validar que no
+    // se estén repitiendo") aplica aquí también, así que se cierra por las
+    // dos vías.
+    let ticking=false;
     const iv=setInterval(async()=>{
-      if(!alive) return;
+      if(!alive || ticking) return;
+      ticking=true;
+      try{
       const np=await fetchCommodityRateCached(EXP_YAHOO,5000);
       if(!np||isNaN(np)||!alive) return;
       expPriceRef.current=np; setExpPrice(np);
@@ -2118,6 +2134,7 @@ export default function TradingBot(){
         return updated;
       });
       evaluateStack();
+      }finally{ ticking=false; }
     },5000);
 
     return()=>{alive=false; clearInterval(iv);};
