@@ -36,7 +36,15 @@ const SESSION_ID = `server:${process.env.FLY_MACHINE_ID || "local"}:${Math.rando
 // cuándo abrir/apilar/voltear sigue siendo exactamente la misma lógica de
 // piso/pirámide/canario/cobertura de siempre; Deriv solo ejecuta la orden.
 const DERIV_SAFETY_SL_MULT = 3; // múltiplo de |floorStart|
-const DERIV_SAFETY_TP = 99999; // prácticamente nunca se alcanza por sí solo
+// $2500 es el tope DURO que Deriv acepta en limit_order (confirmado en vivo:
+// "LimitOrderAmountTooHigh: Enter an amount equal to or lower than 2500.00"
+// — con el TP en 99999 cada intento de abrir una posición real fallaba, así
+// que el modo en vivo nunca llegó a abrir NADA desde que se activó). Se
+// deja bien por debajo de ese tope — sigue siendo "prácticamente nunca se
+// alcanza por sí solo" para esta estrategia — y el SL también se recorta al
+// mismo tope por si |floorStart| alguna vez se configura muy grande.
+const DERIV_SAFETY_TP = 2000;
+const derivSafetySL = (floorStart) => Math.min(2000, Math.abs(floorStart) * DERIV_SAFETY_SL_MULT);
 
 let pool = null;
 function getPool() {
@@ -127,7 +135,7 @@ export function startExpEngine() {
       try {
         const r = await derivOrderCall("open", {
           symbol: EXP_SYMBOL, side: type, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
-          tpTarget: DERIV_SAFETY_TP, slTarget: Math.abs(cfg.floorStart) * DERIV_SAFETY_SL_MULT,
+          tpTarget: DERIV_SAFETY_TP, slTarget: derivSafetySL(cfg.floorStart),
         });
         pos = { ...pos, contractId: r.contractId, derivBuyPrice: r.buyPrice };
         log(`Deriv: contrato ${r.contractId} abierto (${type}, stake ${cfg.stake})`);
@@ -273,7 +281,7 @@ export function startExpEngine() {
         try {
           const r = await derivOrderCall("open", {
             symbol: EXP_SYMBOL, side: hedgeType, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
-            tpTarget: DERIV_SAFETY_TP, slTarget: Math.abs(cfg.floorStart) * DERIV_SAFETY_SL_MULT,
+            tpTarget: DERIV_SAFETY_TP, slTarget: derivSafetySL(cfg.floorStart),
           });
           h = { ...h, contractId: r.contractId, derivBuyPrice: r.buyPrice };
           log(`Deriv: contrato ${r.contractId} abierto (cobertura ${hedgeType}, stake ${cfg.stake})`);
