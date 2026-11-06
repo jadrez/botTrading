@@ -35,16 +35,20 @@ const SESSION_ID = `server:${process.env.FLY_MACHINE_ID || "local"}:${Math.rando
 // SEGURIDAD muy amplia (nunca debería dispararse primero) — quien decide
 // cuándo abrir/apilar/voltear sigue siendo exactamente la misma lógica de
 // piso/pirámide/canario/cobertura de siempre; Deriv solo ejecuta la orden.
-const DERIV_SAFETY_SL_MULT = 3; // múltiplo de |floorStart|
-// $2500 es el tope DURO que Deriv acepta en limit_order (confirmado en vivo:
-// "LimitOrderAmountTooHigh: Enter an amount equal to or lower than 2500.00"
-// — con el TP en 99999 cada intento de abrir una posición real fallaba, así
-// que el modo en vivo nunca llegó a abrir NADA desde que se activó). Se
-// deja bien por debajo de ese tope — sigue siendo "prácticamente nunca se
-// alcanza por sí solo" para esta estrategia — y el SL también se recorta al
-// mismo tope por si |floorStart| alguna vez se configura muy grande.
-const DERIV_SAFETY_TP = 2000;
-const derivSafetySL = (floorStart) => Math.min(2000, Math.abs(floorStart) * DERIV_SAFETY_SL_MULT);
+// Probado en vivo (binary search contra la cuenta demo real) para entender
+// los topes reales de Deriv en limit_order de Multiplicadores en Gold/USD —
+// NINGUNA combinación grande funcionaba, y el modo en vivo nunca llegó a
+// abrir nada desde que se activó:
+//   tp=1,  sl=1 (ambos = stake)         → OK
+//   tp=2000, sl=3 (stake=1)             → RECHAZADO: "equal to or lower than 50.00" (tope de TP)
+//   tp=50, sl=3 (stake=1)               → RECHAZADO: "equal to or lower than 1.00" (SL no puede superar el stake)
+// Conclusión: el SL no puede pasar del stake (tiene sentido — un
+// Multiplicador ya se detiene solo cerca del 100% de pérdida del stake,
+// pedirle un stop_loss más grande que eso no es válido) y el TP tiene un
+// tope aparte, fijo, de ~$50 (no depende del stake) — se deja bien por
+// debajo de ambos.
+const DERIV_SAFETY_TP = 40;
+const derivSafetySL = (stake) => stake;
 
 let pool = null;
 function getPool() {
@@ -135,7 +139,7 @@ export function startExpEngine() {
       try {
         const r = await derivOrderCall("open", {
           symbol: EXP_SYMBOL, side: type, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
-          tpTarget: DERIV_SAFETY_TP, slTarget: derivSafetySL(cfg.floorStart),
+          tpTarget: DERIV_SAFETY_TP, slTarget: derivSafetySL(cfg.stake),
         });
         pos = { ...pos, contractId: r.contractId, derivBuyPrice: r.buyPrice };
         log(`Deriv: contrato ${r.contractId} abierto (${type}, stake ${cfg.stake})`);
@@ -281,7 +285,7 @@ export function startExpEngine() {
         try {
           const r = await derivOrderCall("open", {
             symbol: EXP_SYMBOL, side: hedgeType, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
-            tpTarget: DERIV_SAFETY_TP, slTarget: derivSafetySL(cfg.floorStart),
+            tpTarget: DERIV_SAFETY_TP, slTarget: derivSafetySL(cfg.stake),
           });
           h = { ...h, contractId: r.contractId, derivBuyPrice: r.buyPrice };
           log(`Deriv: contrato ${r.contractId} abierto (cobertura ${hedgeType}, stake ${cfg.stake})`);
