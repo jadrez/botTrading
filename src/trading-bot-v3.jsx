@@ -37,9 +37,11 @@ const ASSETS = {
     correlations:{"EUR/USD":-1,"GBP/USD":-1,"AUD/USD":-1,"NZD/USD":-1,"USD/JPY":+1,"USD/CHF":+1} },
   "EUR/GBP":  { label:"EUR/GBP",  type:"forex", binance:null, forexFrom:"EUR", forexTo:"GBP", precision:5, basePrice:0.8450,
     correlations:{"EUR/USD":+1,"GBP/USD":-1,"USD/CHF":-1} },
-  // ── Commodities (via Deriv WebSocket; Yahoo Finance fallback for watchlist)
+  // ── Commodities. XAU/USD: precio real de Deriv (REST+OTP action:"tick",
+  // ver fetchCommodityRate/YAHOO_TO_DERIV_TICK), Yahoo como fallback. XAG/XTI
+  // siguen en Yahoo (no se verificó Deriv para esos — fuera de alcance).
   "XAU/USD":  { label:"ORO",       type:"commodity", binance:null, forexFrom:"XAU", forexTo:"USD", precision:2, basePrice:2700,
-    yahooTicker:"GC=F",  correlations:{} },
+    yahooTicker:"GC=F", derivTickSymbol:"frxXAUUSD", correlations:{} },
   "XAG/USD":  { label:"PLATA",     type:"commodity", binance:null, forexFrom:"XAG", forexTo:"USD", precision:3, basePrice:32,
     yahooTicker:"SI=F",  correlations:{} },
   "XTI/USD":  { label:"PETRÓLEO",  type:"commodity", binance:null, forexFrom:"XTI", forexTo:"USD", precision:2, basePrice:80,
@@ -1458,8 +1460,27 @@ async function fetchForexRateCached(from,to,ttlMs=15000){
   return rate||_fxCache[key]?.rate||null;
 }
 
+// Oro: precio REAL de Deriv (vía el canal autenticado REST+OTP que ya usa el
+// Experimento para operar — action:"tick") en vez de Yahoo. Pedido explícito
+// tras ver el precio de ORO desfasado ~$10 contra Deriv ($4071 vs $4061) —
+// Yahoo simplemente reporta un spot distinto/con más rezago. Yahoo queda
+// como fallback si la llamada a Deriv falla.
+const YAHOO_TO_DERIV_TICK={"GC=F":"frxXAUUSD"};
+async function fetchDerivTick(derivSymbol){
+  try{
+    const r=await fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"tick",derivSymbol})});
+    if(r.ok){const d=await r.json();if(typeof d.price==="number")return d.price;}
+  }catch{}
+  return null;
+}
 // Fetch commodity spot price via serverless proxy (Yahoo Finance GC=F / SI=F / CL=F)
 async function fetchCommodityRate(yahooTicker){
+  const derivSym=YAHOO_TO_DERIV_TICK[yahooTicker];
+  if(derivSym){
+    const dp=await fetchDerivTick(derivSym);
+    if(dp!=null) return dp;
+  }
   try{
     const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({yahooSym:yahooTicker})});
