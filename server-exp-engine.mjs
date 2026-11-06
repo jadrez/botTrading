@@ -163,8 +163,17 @@ export function startExpEngine() {
     if (pos.contractId) {
       try {
         const r = await derivOrderCall("close", { contractId: pos.contractId });
+        // r.sellPrice es "sold_for" — el VALOR EN DÓLARES del contrato (lo
+        // que se recupera, comparable a buyPrice/stake), NO el precio de
+        // mercado del oro. Usarlo como "exit" daba números como "691.94"
+        // en vez de "~4067" y un % sin sentido (-82%, +83%) — reportado en
+        // vivo. El pnl real (sold_for - buy_price) sí está bien así. El
+        // precio de mercado real usa exitPrice (nuestro propio feed de
+        // Deriv, el mismo que decidió cerrar) — consultarle a Deriv el
+        // exit_spot exacto añadiría otra llamada completa, justo la
+        // latencia que se está tratando de recortar.
         const realPnl = (r.sellPrice ?? 0) - (pos.derivBuyPrice ?? pos.allocatedSize);
-        return { ok: true, record: { ...pos, ...extra, exit: r.sellPrice ?? exitPrice, pnl: realPnl, closeTime: Date.now() } };
+        return { ok: true, record: { ...pos, ...extra, exit: exitPrice, pnl: realPnl, closeTime: Date.now() } };
       } catch (e) {
         // Pudo haberse cerrado ya (reintento tras un fallo de red del intento
         // anterior) — antes de darlo por fallido, revisa el estado real en
@@ -192,11 +201,15 @@ export function startExpEngine() {
     // flip()), si no quedarían en 0/piso-inicial para el histórico.
     const objetivo = addLevel + cfg.addStep;
     const stop = floor;
+    // EN PARALELO, no en serie — cerrarlas una por una (await dentro de un
+    // for) con una pila de 5 posiciones podía sumar 2.5-3.5s solo para
+    // cerrar (5 × ~0.5-0.7s cada llamada a Deriv), justo el "bajonazo"
+    // reportado en vivo durante un volteo con la pila llena.
+    const results = await Promise.all(
+      positions.map(pos => closeOnePosition(pos, exitPrice, { symbol: EXP_SYMBOL, reason, objetivo, stop }))
+    );
     const remaining = [], closedRecords = [];
-    for (const pos of positions) {
-      const { ok, record } = await closeOnePosition(pos, exitPrice, { symbol: EXP_SYMBOL, reason, objetivo, stop });
-      if (ok) closedRecords.push(record); else remaining.push(pos);
-    }
+    results.forEach(({ ok, record }, i) => { if (ok) closedRecords.push(record); else remaining.push(positions[i]); });
     positions = remaining;
     await persistLive(true);
     for (const c of closedRecords) await writeTradeRecord(c);
@@ -221,8 +234,9 @@ export function startExpEngine() {
   };
 
   const flip = async (exitPrice) => {
-    const hedgeResult = await closeHedge(exitPrice);
-    const stackResult = await closeAllExpPos(exitPrice, "FLIP");
+    // Cobertura y pila son independientes — cerrarlas en paralelo en vez de
+    // una tras otra ahorra otro medio segundo en el momento más crítico.
+    const [hedgeResult, stackResult] = await Promise.all([closeHedge(exitPrice), closeAllExpPos(exitPrice, "FLIP")]);
     if (!hedgeResult.ok || !stackResult.allClosed) {
       log("volteo incompleto (alguna posición no se pudo cerrar en Deriv) — se reintenta en el próximo tick, sin voltear todavía");
       return;
@@ -245,8 +259,7 @@ export function startExpEngine() {
   // plana y que onCandleClosed elija la próxima dirección con la siguiente
   // vela, como una intervención manual del usuario debe comportarse.
   const manualCloseAll = async (exitPrice) => {
-    const hedgeResult = await closeHedge(exitPrice);
-    const stackResult = await closeAllExpPos(exitPrice, "MANUAL");
+    const [hedgeResult, stackResult] = await Promise.all([closeHedge(exitPrice), closeAllExpPos(exitPrice, "MANUAL")]);
     if (!hedgeResult.ok || !stackResult.allClosed) { log("cierre manual incompleto — se reintenta"); return false; }
     resetStackTracking();
     direction = null;
