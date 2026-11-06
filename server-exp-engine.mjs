@@ -150,7 +150,11 @@ export function startExpEngine() {
     }
     await persistLive();
     if (stackPnl <= floor) { await flip(price); return; }
-    while (stackPnl >= addLevel + cfg.addStep && positions.length < cfg.maxStack) {
+    // "if", no "while" — como máximo UNA posición nueva por tick (1s), para
+    // que cada apilada quede a un precio distinto en vez de varias de golpe
+    // al mismo precio cuando el agregado salta más de un addStep en un tick
+    // (ver nota idéntica en trading-bot-v3.jsx).
+    if (stackPnl >= addLevel + cfg.addStep && positions.length < cfg.maxStack) {
       addLevel += cfg.addStep;
       await addExpPos(direction);
     }

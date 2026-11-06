@@ -2227,8 +2227,18 @@ export default function TradingBot(){
       if(stackPnl<=expFloorRef.current){ flip(price); return; }
       // Apilar otra posición cada $expAddStep de más (editable) —
       // independiente del piso de arriba, solo gobierna CUÁNTAS posiciones
-      // hay en la pila.
-      while(stackPnl>=(expAddLevelRef.current+expAddStepRef.current) && expPositionsRef.current.length<expMaxStackRef.current){
+      // hay en la pila. BUG encontrado en vivo ("abriendo todas en
+      // conjunto"): esto era un "while", así que si el agregado saltaba
+      // MÁS de un expAddStep en un solo tick de 1s (muy fácil con stake
+      // alto), apilaba varias posiciones de GOLPE, todas al MISMO precio
+      // — no eran entradas escalonadas de verdad, eran casi la misma
+      // apuesta repetida, así que se movían juntas como si fueran una
+      // sola posición más grande en vez de diversificar. Cambiado a "if":
+      // como máximo UNA posición nueva por tick: si el agregado saltó
+      // varios escalones de una, los demás se van agregando en los
+      // SIGUIENTES ticks (1s después cada uno), donde el precio ya avanzó
+      // de verdad — así cada apilada queda a un precio distinto.
+      if(stackPnl>=(expAddLevelRef.current+expAddStepRef.current) && expPositionsRef.current.length<expMaxStackRef.current){
         expAddLevelRef.current+=expAddStepRef.current;
         addExpPos(expDirectionRef.current);
       }
