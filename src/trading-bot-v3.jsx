@@ -402,11 +402,19 @@ function loadTrades(){ try{return JSON.parse(localStorage.getItem(LS_TRADES)||"[
    cualquier cierre posterior por este piso queda garantizado en positivo
    — "siempre vamos a requerir en cerrar en positivo". */
 const EXP_SYMBOL="XAU/USD", EXP_YAHOO="GC=F";
+// EXP_ADD_STEP/EXP_FLOOR_START son los valores por defecto — ambos quedaron
+// editables en vivo (ver expAddStep/expFloorStart más abajo) porque son en
+// realidad una función del STAKE: PnL($) = %movimiento_precio × stake × 100,
+// así que a qué tan rápido se dispara un apilado/volteo en $50 depende
+// totalmente de qué tan grande sea el stake (a $1 de stake, $50 requiere un
+// 50% de movimiento del oro — nunca pasa; a $500, solo 0.1%). Se dejan
+// ambos campos juntos al stake para que esto se pueda afinar en vivo.
 const EXP_ADD_STEP=50;    // $ — cada incremento de esto en el P&L de la pila apila otra posición
 const EXP_RETAIN_PCT=0.8; // una vez el pico de la pila es positivo, el piso = pico×este % (20% de giveback)
 const EXP_FLOOR_START=-50; // $ — piso inicial (antes de haber estado nunca en positivo)
 const EXP_MAX_STACK=10;  // límite de seguridad de posiciones apiladas a la vez
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
+const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
 // La pila/dirección/piso EN VIVO también se persisten (no solo el
 // historial cerrado) — verificado en vivo: sin esto, recargar la página
 // (o cualquier remount) perdía la pila activa de golpe, el panel volvía a
@@ -1669,6 +1677,10 @@ export default function TradingBot(){
   // aislado de Simulado/Crecimiento, su propio feed/estado/historial.
   const [expEnabled,setExpEnabled]     = useState(()=>localStorage.getItem(LS_EXP_ENABLED)==="1");
   const [expStake,setExpStake]         = useState(()=>parseFloat(localStorage.getItem(LS_EXP_STAKE)||"1"));
+  // Editables en vivo junto al stake — ver nota en la constante EXP_ADD_STEP
+  // arriba sobre por qué estos dos dependen directamente del stake elegido.
+  const [expAddStep,setExpAddStep]     = useState(()=>parseFloat(localStorage.getItem(LS_EXP_ADDSTEP)||String(EXP_ADD_STEP)));
+  const [expFloorStart,setExpFloorStart] = useState(()=>parseFloat(localStorage.getItem(LS_EXP_FLOORSTART)||String(EXP_FLOOR_START)));
   // expCandles: velas de 1m, SOLO para la lógica del motor (entrada por
   // color de la vela anterior) — nunca se muestran directamente. El
   // gráfico usa expChartCandles (1h) aparte, para que se vea movimiento
@@ -1686,11 +1698,15 @@ export default function TradingBot(){
   const expPriceRef      = useRef(null);
   const expPositionsRef  = useRef([]);
   const expDirectionRef  = useRef(null);
-  const expFloorRef      = useRef(EXP_FLOOR_START); // piso protector actual del agregado de la pila
-  const expAddLevelRef   = useRef(0); // último múltiplo de EXP_ADD_STEP ya usado para apilar otra posición
+  const expAddStepRef    = useRef(expAddStep);
+  const expFloorStartRef = useRef(expFloorStart);
+  const expFloorRef      = useRef(expFloorStart); // piso protector actual del agregado de la pila
+  const expAddLevelRef   = useRef(0); // último múltiplo de expAddStep ya usado para apilar otra posición
   const expStackPeakRef  = useRef(0); // máximo histórico del P&L agregado de la pila ACTUAL (se resetea en cada entrada/volteo)
   useEffect(()=>{expEnabledRef.current=expEnabled; try{localStorage.setItem(LS_EXP_ENABLED,expEnabled?"1":"0");}catch{}},[expEnabled]);
   useEffect(()=>{expStakeRef.current=expStake; try{localStorage.setItem(LS_EXP_STAKE,String(expStake));}catch{}},[expStake]);
+  useEffect(()=>{expAddStepRef.current=expAddStep; try{localStorage.setItem(LS_EXP_ADDSTEP,String(expAddStep));}catch{}},[expAddStep]);
+  useEffect(()=>{expFloorStartRef.current=expFloorStart; try{localStorage.setItem(LS_EXP_FLOORSTART,String(expFloorStart));}catch{}},[expFloorStart]);
 
   const posRef    = useRef([]);
   const priceRef  = useRef(ASSETS["ETH/USDT"].basePrice);
@@ -1955,7 +1971,7 @@ export default function TradingBot(){
       if(saved?.positions?.length){
         expPositionsRef.current=saved.positions;
         expDirectionRef.current=saved.direction;
-        expFloorRef.current=saved.floor??EXP_FLOOR_START;
+        expFloorRef.current=saved.floor??expFloorStartRef.current;
         expAddLevelRef.current=saved.addLevel??0;
         expStackPeakRef.current=saved.peak??0;
         setExpPositions(saved.positions);
@@ -1988,7 +2004,7 @@ export default function TradingBot(){
     };
 
     const resetStackTracking=()=>{
-      expFloorRef.current=EXP_FLOOR_START; expAddLevelRef.current=0; expStackPeakRef.current=0;
+      expFloorRef.current=expFloorStartRef.current; expAddLevelRef.current=0; expStackPeakRef.current=0;
     };
 
     const flip=(exitPrice)=>{
@@ -2006,21 +2022,22 @@ export default function TradingBot(){
       const stackPnl=expPositionsRef.current.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize),0);
       expStackPeakRef.current=Math.max(expStackPeakRef.current,stackPnl);
       // Piso continuo, DESACOPLADO del apilado: mientras el pico de la pila
-      // nunca haya sido positivo, el piso se queda en EXP_FLOOR_START (-50).
-      // Apenas el pico es positivo, el piso pasa a ser una fracción de ESE
-      // pico (EXP_RETAIN_PCT) — nunca baja, solo sube con nuevos picos — así
-      // que, una vez tocó positivo, cualquier cierre por este piso queda
-      // garantizado en positivo (a pico=$50 da piso=$40 exacto, luego
-      // escala en proporción). Reacciona cada tick, no solo al apilar.
+      // nunca haya sido positivo, el piso se queda en expFloorStart (editable,
+      // -50 por defecto). Apenas el pico es positivo, el piso pasa a ser una
+      // fracción de ESE pico (EXP_RETAIN_PCT) — nunca baja, solo sube con
+      // nuevos picos — así que, una vez tocó positivo, cualquier cierre por
+      // este piso queda garantizado en positivo. Reacciona cada tick, no
+      // solo al apilar.
       if(expStackPeakRef.current>0){
         expFloorRef.current=Math.max(expFloorRef.current, expStackPeakRef.current*EXP_RETAIN_PCT);
       }
       persistLive(); // guarda el pico/piso actualizado en cada tick, no solo al apilar/cerrar
       if(stackPnl<=expFloorRef.current){ flip(price); return; }
-      // Apilar otra posición cada $EXP_ADD_STEP de más — independiente del
-      // piso de arriba, solo gobierna CUÁNTAS posiciones hay en la pila.
-      while(stackPnl>=(expAddLevelRef.current+EXP_ADD_STEP) && expPositionsRef.current.length<EXP_MAX_STACK){
-        expAddLevelRef.current+=EXP_ADD_STEP;
+      // Apilar otra posición cada $expAddStep de más (editable) —
+      // independiente del piso de arriba, solo gobierna CUÁNTAS posiciones
+      // hay en la pila.
+      while(stackPnl>=(expAddLevelRef.current+expAddStepRef.current) && expPositionsRef.current.length<EXP_MAX_STACK){
+        expAddLevelRef.current+=expAddStepRef.current;
         addExpPos(expDirectionRef.current);
       }
     };
@@ -5696,10 +5713,13 @@ export default function TradingBot(){
             <ConfigCard title="EXPERIMENTO · PIRÁMIDE XAU/USD" style={{borderTop:`2px solid ${T.yellow}`}}>
               <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:12}}>
                 Solo Simulado, aislado del resto del bot: entra en la dirección de la vela de 1m que acaba de cerrar,
-                apila otra posición cada +${EXP_ADD_STEP} de la pila. El piso protector es independiente del apilado:
-                mientras nunca estuvo en positivo es {fUSD(EXP_FLOOR_START)} (tocarlo cierra todo y voltea de dirección);
+                apila otra posición cada +${expAddStep} de la pila. El piso protector es independiente del apilado:
+                mientras nunca estuvo en positivo es {fUSD(expFloorStart)} (tocarlo cierra todo y voltea de dirección);
                 apenas el pico de la pila es positivo, el piso pasa a ser el {Math.round(EXP_RETAIN_PCT*100)}% de ese pico
-                (a pico=$50 → piso=$40) y solo sube desde ahí — una vez en positivo, siempre cierra en positivo.
+                y solo sube desde ahí — una vez en positivo, siempre cierra en positivo. El stake es lo que determina
+                qué tan rápido se mueven estos $: PnL($) = %movimiento_del_precio × stake × 100 — con este stake,
+                el oro necesita moverse <b>{((expAddStep/(expStake*DEFAULT_MULTIPLIER))*100).toFixed(3)}%</b> para
+                el próximo apilado/volteo (sube el stake si lo quieres más rápido, es solo Simulado).
               </div>
 
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
@@ -5708,9 +5728,16 @@ export default function TradingBot(){
                 <ConfigToggle on={expEnabled} onClick={()=>setExpEnabled(p=>!p)}/>
               </div>
 
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}} className="g4">
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}} className="g3">
                 <ConfigField label="STAKE POR POSICIÓN (USD)" type="number" step="0.1" min="0.1" value={expStake}
                   onChange={e=>setExpStake(Math.max(0.1,parseFloat(e.target.value)||1))}/>
+                <ConfigField label="APILAR CADA (USD)" type="number" step="1" min="1" value={expAddStep}
+                  onChange={e=>setExpAddStep(Math.max(1,parseFloat(e.target.value)||50))}/>
+                <ConfigField label="PISO INICIAL (USD, negativo)" type="number" step="1" max="-1" value={expFloorStart}
+                  onChange={e=>setExpFloorStart(Math.min(-1,parseFloat(e.target.value)||-50))}/>
+              </div>
+
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}} className="g3">
                 <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>DIRECCIÓN ACTUAL</div>
                   <div className="mono" style={{fontSize:12,fontWeight:700,color:expDirection==="BUY"?T.green:expDirection==="SELL"?T.red:T.muted}}>
@@ -5778,7 +5805,7 @@ export default function TradingBot(){
                             <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(pos.entry,2)}</span>
                             <span className="mono" style={{fontSize:10,color:T.text}}>{fP(livePrice,2)}</span>
                             <span className="mono" style={{fontSize:10,fontWeight:700,color:col}}>{fPct(pctChange)}</span>
-                            <span className="mono" style={{fontSize:10,color:T.green}}>{fUSD(expAddLevelRef.current+EXP_ADD_STEP,false)}</span>
+                            <span className="mono" style={{fontSize:10,color:T.green}}>{fUSD(expAddLevelRef.current+expAddStepRef.current,false)}</span>
                             <span className="mono" style={{fontSize:10,color:isProtected?T.green:T.red}}>{fUSD(expFloorRef.current)}</span>
                             <span className="mono" style={{fontSize:11,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
                             <div>
@@ -5802,7 +5829,7 @@ export default function TradingBot(){
                 <div style={{height:520,border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:12}}>
                   <LWChart candles={expChartCandles} positions={expPositions} trades={expTrades}
                     symbol={EXP_SYMBOL} precision={2} srLevels={{supports:[],resistances:[],all:[]}}
-                    aiResult={null} tfInterval="1h" tpTarget={EXP_ADD_STEP} slTarget={Math.abs(EXP_FLOOR_START)}/>
+                    aiResult={null} tfInterval="1h" tpTarget={expAddStep} slTarget={Math.abs(expFloorStart)}/>
                 </div>
               ):(
                 <div style={{fontSize:10,color:T.muted,fontStyle:"italic",marginBottom:12}}>
