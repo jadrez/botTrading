@@ -5025,6 +5025,50 @@ export default function TradingBot(){
                   </div>
                 </div>
               )}
+              {/* Hour-of-day performance — mirrors getHourAdjustment's own formula/threshold
+                  (t>=10, ±1.5×(wr-50) capped at -10/+6) so what's drawn here is exactly what
+                  the bot is actually applying, not just a display-only stat. */}
+              {learningStats.byHour?.length>0&&(()=>{
+                const byH={}; learningStats.byHour.forEach(h=>{byH[h.hour]=h;});
+                const hours=Array.from({length:24},(_,h)=>{
+                  const s=byH[h]||{hour:h,wr:0,t:0,pnl:0};
+                  const delta=s.t>=10?Math.max(-10,Math.min(6,Math.round((s.wr-50)*1.5))):0;
+                  return {...s,delta};
+                });
+                const withDelta=hours.filter(h=>h.delta!==0);
+                const best=withDelta.length?withDelta.reduce((a,b)=>b.delta>a.delta?b:a):null;
+                const worst=withDelta.length?withDelta.reduce((a,b)=>b.delta<a.delta?b:a):null;
+                return (
+                  <div>
+                    <div style={{fontSize:8,color:T.muted,letterSpacing:2,marginBottom:5}}>RENDIMIENTO POR HORA (UTC)</div>
+                    <div style={{display:"flex",alignItems:"flex-end",gap:2,height:46}}>
+                      {hours.map(h=>{
+                        const hasData=h.t>=10;
+                        const barColor=!hasData?T.border:h.wr>=55?T.green:h.wr<=40?T.red:T.yellow;
+                        const heightPct=h.t>0?Math.max(8,h.wr):4;
+                        return (
+                          <div key={h.hour}
+                            title={`${h.hour}h UTC · ${h.t} trades · WR ${h.wr}% · PnL ${fUSD(h.pnl)}${h.delta?` · ajuste ${h.delta>0?"+":""}${h.delta}%`:h.t>0&&h.t<10?" · muestra insuficiente (<10)":""}`}
+                            style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2,cursor:"default"}}>
+                            <div style={{width:"100%",height:34,display:"flex",alignItems:"flex-end"}}>
+                              <div style={{width:"100%",height:`${heightPct}%`,background:barColor,borderRadius:2,
+                                opacity:hasData?1:0.35,transition:"height .4s"}}/>
+                            </div>
+                            <span style={{fontSize:6,color:T.muted}}>{h.hour}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {(best||worst)&&(
+                      <div style={{fontSize:8,color:T.muted,marginTop:4}}>
+                        {best&&<span style={{color:T.green}}>▲ mejor: {best.hour}h UTC ({best.delta>0?"+":""}{best.delta}% conf., {best.wr}% WR, {best.t} trades)</span>}
+                        {best&&worst&&"  ·  "}
+                        {worst&&<span style={{color:T.red}}>▼ peor: {worst.hour}h UTC ({worst.delta}% conf., {worst.wr}% WR, {worst.t} trades)</span>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               {learningStats.total===0&&(
                 <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>
                   Sin datos aún. El bot aprenderá automáticamente con cada trade cerrado.
