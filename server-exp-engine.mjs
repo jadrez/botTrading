@@ -22,8 +22,9 @@ const EXP_BINANCE = "PAXGUSDT";
 const DEFAULT_MULTIPLIER = 100;
 const EXP_RETAIN_PCT = 0.8;
 const EXP_FLOOR_ARM_AT = 10;
-const EXP_MAX_STACK = 10;
+const EXP_MAX_STACK_DEFAULT = 10; // overridden live by cfg.maxStack (exp_max_stack)
 const EXP_QUICK_REVERSAL_FRACTION = 0.3;
+const EXP_CANARY_PEAK = 5, EXP_CANARY_DROP = -5; // ver nota en trading-bot-v3.jsx junto a estas mismas constantes
 const SESSION_ID = `server:${process.env.FLY_MACHINE_ID || "local"}:${Math.random().toString(36).slice(2)}`;
 
 let pool = null;
@@ -67,8 +68,9 @@ export function startExpEngine() {
   let floor = -50;
   let addLevel = 0;
   let peak = 0;
+  let lastPosPeak = 0; // pico propio de la ÚLTIMA posición apilada (canario)
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50 };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
 
   const log = (msg) => console.log(`[exp-engine] ${msg}`);
@@ -81,10 +83,11 @@ export function startExpEngine() {
   };
 
   const addExpPos = async (type) => {
-    if (!price || positions.length >= EXP_MAX_STACK) return;
+    if (!price || positions.length >= cfg.maxStack) return;
     const pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now() };
     positions = [...positions, pos];
-    log(`${type} XAU/USD @ ${price.toFixed(2)} — pila ${positions.length}/${EXP_MAX_STACK}`);
+    lastPosPeak = 0; // nueva "última" posición — el canario arranca de cero para ella
+    log(`${type} XAU/USD @ ${price.toFixed(2)} — pila ${positions.length}/${cfg.maxStack}`);
     await persistLive(true);
   };
 
@@ -127,9 +130,22 @@ export function startExpEngine() {
     const stackPnl = positions.reduce((s, p) => s + posPnL(p, price), 0);
     peak = Math.max(peak, stackPnl);
     if (peak >= EXP_FLOOR_ARM_AT) floor = Math.max(floor, peak * EXP_RETAIN_PCT);
+    // Canario: la ÚLTIMA posición apilada se revisa por separado — si ella
+    // sola tocó +$5 y cayó a -$5, voltea TODA la pila ya, sin esperar al
+    // piso agregado (más lento porque las posiciones viejas, ya muy en
+    // positivo, lo arrastran hacia arriba).
+    const lastPos = positions.at(-1);
+    if (lastPos) {
+      const lastPnl = posPnL(lastPos, price);
+      lastPosPeak = Math.max(lastPosPeak, lastPnl);
+      if (lastPosPeak >= EXP_CANARY_PEAK && lastPnl <= EXP_CANARY_DROP) {
+        log(`canario — última posición tocó +${lastPosPeak.toFixed(2)} y cayó a ${lastPnl.toFixed(2)}`);
+        await flip(price); return;
+      }
+    }
     await persistLive();
     if (stackPnl <= floor) { await flip(price); return; }
-    while (stackPnl >= addLevel + cfg.addStep && positions.length < EXP_MAX_STACK) {
+    while (stackPnl >= addLevel + cfg.addStep && positions.length < cfg.maxStack) {
       addLevel += cfg.addStep;
       await addExpPos(direction);
     }
@@ -167,13 +183,17 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack] = await Promise.all([
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
       getConfigValue(db, "exp_add_step", "50"),
       getConfigValue(db, "exp_floor_start", "-50"),
+      getConfigValue(db, "exp_max_stack", "10"),
     ]);
-    cfg = { enabled: enabled === "1", stake: parseFloat(stake) || 1, addStep: parseFloat(addStep) || 50, floorStart: parseFloat(floorStart) || -50 };
+    cfg = {
+      enabled: enabled === "1", stake: parseFloat(stake) || 1, addStep: parseFloat(addStep) || 50,
+      floorStart: parseFloat(floorStart) || -50, maxStack: parseInt(maxStack, 10) || 10,
+    };
   };
 
   const fetchBinanceKlines = async (interval, limit) => {
@@ -191,7 +211,7 @@ export function startExpEngine() {
       if (live?.positions?.length) {
         positions = live.positions; direction = live.direction ?? null;
         floor = live.floor ?? cfg.floorStart; addLevel = live.addLevel ?? 0; peak = live.peak ?? 0;
-        log(`pila restaurada al iniciar (${positions.length}/${EXP_MAX_STACK} ${direction}, piso ${floor.toFixed(2)})`);
+        log(`pila restaurada al iniciar (${positions.length}/${cfg.maxStack} ${direction}, piso ${floor.toFixed(2)})`);
       }
     } catch {}
     const k = await fetchBinanceKlines("1m", 300).catch(() => null);

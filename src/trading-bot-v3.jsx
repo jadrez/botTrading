@@ -452,8 +452,21 @@ const EXP_MAX_STACK=10;  // límite de seguridad de posiciones apiladas a la vez
 // un ciclo ganador, así que usa el piso normal completo — evita que esto
 // se convierta en un zigzag infinito de pérdidas chicas en mercado picado.
 const EXP_QUICK_REVERSAL_FRACTION=0.3; // 30% del piso inicial normal
+// "Canario": la ÚLTIMA posición apilada (la más reciente, más cerca del
+// precio actual) como alerta temprana de reversión — pedido explícito:
+// las posiciones VIEJAS de la pila ya están profundamente en positivo y
+// su P&L domina la suma agregada, así que el piso de TODA la pila puede
+// tardar en reaccionar cuando la tendencia realmente ya se dio vuelta —
+// la posición más nueva es la primera en sentirlo. Si esa última llega a
+// tocar +$5 de pico propio y luego cae a -$5 (un giro de $10 solo en
+// ELLA), se cierra y voltea TODA la pila de inmediato, sin esperar a que
+// el piso agregado (más lento, protegido por las posiciones viejas) se
+// active. Es un gatillo ADICIONAL, no reemplaza el piso — lo que dispare
+// primero.
+const EXP_CANARY_PEAK=5, EXP_CANARY_DROP=-5;
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
+const LS_EXP_MAXSTACK="bot_exp_maxstack_v1";
 // La pila/dirección/piso EN VIVO también se persisten (no solo el
 // historial cerrado) — verificado en vivo: sin esto, recargar la página
 // (o cualquier remount) perdía la pila activa de golpe, el panel volvía a
@@ -1720,6 +1733,12 @@ export default function TradingBot(){
   // arriba sobre por qué estos dos dependen directamente del stake elegido.
   const [expAddStep,setExpAddStep]     = useState(()=>parseFloat(localStorage.getItem(LS_EXP_ADDSTEP)||String(EXP_ADD_STEP)));
   const [expFloorStart,setExpFloorStart] = useState(()=>parseFloat(localStorage.getItem(LS_EXP_FLOORSTART)||String(EXP_FLOOR_START)));
+  // Editable por separado — pedido explícito tras ver la pila llena (10/10,
+  // $1M de notional) toda al mismo precio: mientras más posiciones apiladas,
+  // más grande el salto en dólares por cada % de movimiento, y el piso se
+  // revisa cada 1s (no es una orden de stop real) — un salto violento en un
+  // solo segundo puede saltárselo. Bajar este número reduce esa concentración.
+  const [expMaxStack,setExpMaxStack]   = useState(()=>parseInt(localStorage.getItem(LS_EXP_MAXSTACK)||String(EXP_MAX_STACK),10));
   // expCandles: velas de 1m, SOLO para la lógica del motor (entrada por
   // color de la vela anterior) — nunca se muestran directamente. El
   // gráfico usa expChartCandles (1h) aparte, para que se vea movimiento
@@ -1739,9 +1758,11 @@ export default function TradingBot(){
   const expDirectionRef  = useRef(null);
   const expAddStepRef    = useRef(expAddStep);
   const expFloorStartRef = useRef(expFloorStart);
+  const expMaxStackRef   = useRef(expMaxStack);
   const expFloorRef      = useRef(expFloorStart); // piso protector actual del agregado de la pila
   const expAddLevelRef   = useRef(0); // último múltiplo de expAddStep ya usado para apilar otra posición
   const expStackPeakRef  = useRef(0); // máximo histórico del P&L agregado de la pila ACTUAL (se resetea en cada entrada/volteo)
+  const expLastPosPeakRef= useRef(0); // pico propio de la ÚLTIMA posición apilada (canario de reversión, ver EXP_CANARY_*)
   // Identidad de esta pestaña/dispositivo + si es la que actualmente "maneja"
   // el motor (ver efecto de abajo) — necesario desde que el estado se
   // sincroniza por DB: si dos pestañas/dispositivos tuvieran el experimento
@@ -1771,6 +1792,9 @@ export default function TradingBot(){
   useEffect(()=>{expFloorStartRef.current=expFloorStart; try{localStorage.setItem(LS_EXP_FLOORSTART,String(expFloorStart));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_floor_start",value:String(expFloorStart)})}).catch(()=>{});
   },[expFloorStart]);
+  useEffect(()=>{expMaxStackRef.current=expMaxStack; try{localStorage.setItem(LS_EXP_MAXSTACK,String(expMaxStack));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_max_stack",value:String(expMaxStack)})}).catch(()=>{});
+  },[expMaxStack]);
 
   // ── Sincronización inicial desde la DB (una sola vez al montar) — esto es
   // lo que hace que abrir la app desde OTRO navegador/celular muestre la
@@ -1792,6 +1816,7 @@ export default function TradingBot(){
           if(d.exp_stake!=null) setExpStake(parseFloat(d.exp_stake));
           if(d.exp_add_step!=null) setExpAddStep(parseFloat(d.exp_add_step));
           if(d.exp_floor_start!=null) setExpFloorStart(parseFloat(d.exp_floor_start));
+          if(d.exp_max_stack!=null) setExpMaxStack(parseInt(d.exp_max_stack,10));
           if(d.exp_live_state){
             try{
               const live=JSON.parse(d.exp_live_state);
@@ -2090,19 +2115,20 @@ export default function TradingBot(){
         expStackPeakRef.current=saved.peak??0;
         setExpPositions(saved.positions);
         setExpDirection(saved.direction);
-        addLog(`🧪 Experimento: pila restaurada (${saved.positions.length}/${EXP_MAX_STACK} ${saved.direction}, piso ${fUSD(expFloorRef.current)})`,"info");
+        addLog(`🧪 Experimento: pila restaurada (${saved.positions.length}/${expMaxStackRef.current} ${saved.direction}, piso ${fUSD(expFloorRef.current)})`,"info");
       }
     }catch{}
 
     const addExpPos=(type)=>{
       const price=expPriceRef.current;
-      if(!price || expPositionsRef.current.length>=EXP_MAX_STACK) return;
+      if(!price || expPositionsRef.current.length>=expMaxStackRef.current) return;
       const pos={id:Date.now()+Math.random(), type, entry:price, allocatedSize:expStakeRef.current,
         multiplier:DEFAULT_MULTIPLIER, openTime:Date.now()};
       expPositionsRef.current=[...expPositionsRef.current,pos];
+      expLastPosPeakRef.current=0; // nueva "última" posición — el canario arranca de cero para ella
       setExpPositions(expPositionsRef.current);
       persistLive();
-      addLog(`🧪 Experimento ${type} XAU/USD @ ${fP(price,2)} — pila ${expPositionsRef.current.length}/${EXP_MAX_STACK}`,type==="BUY"?"buy":"sell");
+      addLog(`🧪 Experimento ${type} XAU/USD @ ${fP(price,2)} — pila ${expPositionsRef.current.length}/${expMaxStackRef.current}`,type==="BUY"?"buy":"sell");
     };
 
     const closeAllExpPos=(exitPrice,reason)=>{
@@ -2167,12 +2193,25 @@ export default function TradingBot(){
       if(expStackPeakRef.current>=EXP_FLOOR_ARM_AT){
         expFloorRef.current=Math.max(expFloorRef.current, expStackPeakRef.current*EXP_RETAIN_PCT);
       }
+      // Canario: la ÚLTIMA posición apilada se revisa POR SEPARADO de la
+      // pila — si ella sola tocó +$5 y cayó a -$5, voltea TODA la pila de
+      // una vez, sin esperar a que el piso agregado (más lento porque las
+      // posiciones viejas, ya muy en positivo, lo arrastran) reaccione.
+      const lastPos=expPositionsRef.current.at(-1);
+      if(lastPos){
+        const lastPnl=posPnL(lastPos,price,lastPos.allocatedSize);
+        expLastPosPeakRef.current=Math.max(expLastPosPeakRef.current,lastPnl);
+        if(expLastPosPeakRef.current>=EXP_CANARY_PEAK && lastPnl<=EXP_CANARY_DROP){
+          addLog(`🐤 Experimento: canario — última posición tocó +${fUSD(expLastPosPeakRef.current,false)} y cayó a ${fUSD(lastPnl)}`,"info");
+          flip(price); return;
+        }
+      }
       persistLive(); // guarda el pico/piso actualizado en cada tick, no solo al apilar/cerrar
       if(stackPnl<=expFloorRef.current){ flip(price); return; }
       // Apilar otra posición cada $expAddStep de más (editable) —
       // independiente del piso de arriba, solo gobierna CUÁNTAS posiciones
       // hay en la pila.
-      while(stackPnl>=(expAddLevelRef.current+expAddStepRef.current) && expPositionsRef.current.length<EXP_MAX_STACK){
+      while(stackPnl>=(expAddLevelRef.current+expAddStepRef.current) && expPositionsRef.current.length<expMaxStackRef.current){
         expAddLevelRef.current+=expAddStepRef.current;
         addExpPos(expDirectionRef.current);
       }
@@ -5937,13 +5976,15 @@ export default function TradingBot(){
                 <ConfigToggle on={expEnabled} onClick={()=>setExpEnabled(p=>!p)}/>
               </div>
 
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}} className="g3">
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:10}} className="g4">
                 <ConfigField label="STAKE POR POSICIÓN (USD)" type="number" step="0.1" min="0.1" value={expStake}
                   onChange={e=>setExpStake(Math.max(0.1,parseFloat(e.target.value)||1))}/>
                 <ConfigField label="APILAR CADA (USD)" type="number" step="1" min="1" value={expAddStep}
                   onChange={e=>setExpAddStep(Math.max(1,parseFloat(e.target.value)||50))}/>
                 <ConfigField label="PISO INICIAL (USD, negativo)" type="number" step="1" max="-1" value={expFloorStart}
                   onChange={e=>setExpFloorStart(Math.min(-1,parseFloat(e.target.value)||-50))}/>
+                <ConfigField label="MÁXIMO DE POSICIONES" type="number" step="1" min="1" max="10" value={expMaxStack}
+                  onChange={e=>setExpMaxStack(Math.max(1,Math.min(10,parseInt(e.target.value,10)||10)))}/>
               </div>
 
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}} className="g4">
@@ -5955,7 +5996,7 @@ export default function TradingBot(){
                 </div>
                 <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>PILA / PISO</div>
-                  <div className="mono" style={{fontSize:12,fontWeight:700}}>{expPositions.length}/{EXP_MAX_STACK} · {fUSD(expFloorRef.current)}</div>
+                  <div className="mono" style={{fontSize:12,fontWeight:700}}>{expPositions.length}/{expMaxStack} · {fUSD(expFloorRef.current)}</div>
                 </div>
                 <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>VOLUMEN (NOTIONAL)</div>
@@ -6040,6 +6081,16 @@ export default function TradingBot(){
                           </div>
                         );
                       })}
+                      {/* Fila de total — el STOP/OBJETIVO PILA se compara contra la
+                          SUMA de todas las filas, no contra una sola; esto evita
+                          tener que sumarlas a mano para saber si ya está cerca del
+                          piso o no (pedido explícito tras verlo confuso en vivo). */}
+                      <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px",
+                        gap:10,alignItems:"center",background:T.dim,border:`2px solid ${stackPnl>=0?T.green:T.red}`,borderRadius:7,padding:"8px 10px"}}>
+                        <span style={{fontSize:9,fontWeight:700,color:T.muted,gridColumn:"1 / 7"}}>TOTAL PILA ({expPositions.length}/{expMaxStack})</span>
+                        <span className="mono" style={{fontSize:12,fontWeight:700,color:stackPnl>=0?T.green:T.red}}>{fUSD(stackPnl)}</span>
+                        <span></span><span></span><span></span>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -6070,28 +6121,57 @@ export default function TradingBot(){
                       gap:8,padding:"0 10px 4px",fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700}}>
                       <div>APERTURA</div><div>CIERRE</div><div>PAR</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>PNL</div><div>MOTIVO</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>PATRONES</div>
                     </div>
-                    {expTrades.slice(0,50).map((t,i)=>{
-                      const volumen=(t.allocatedSize||0)*(t.multiplier||0);
-                      return(
-                        <div key={i} style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 90px 90px 100px 100px 1fr",
-                          gap:8,alignItems:"center",background:`${t.pnl>=0?T.green:T.red}08`,border:`1px solid ${t.pnl>=0?T.green:T.red}25`,borderRadius:6,padding:"6px 10px"}}>
-                          <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.openTime)}</span>
-                          <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime)}</span>
-                          <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||EXP_SYMBOL}</span>
-                          <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:T.red}}>{t.type}</span>
-                          <span className="mono" style={{fontSize:9}}>{fP(t.entry,2)}</span>
-                          <span className="mono" style={{fontSize:9}}>{fP(t.exit,2)}</span>
-                          <span className="mono" style={{fontSize:10,fontWeight:700,color:t.pnl>=0?T.green:T.red}}>{fUSD(t.pnl)}</span>
-                          <span style={{fontSize:8,fontWeight:700,color:t.pnl>=0?T.green:T.red,background:`${t.pnl>=0?T.green:T.red}18`,padding:"2px 7px",borderRadius:4,textAlign:"center"}}>{t.reason||"—"}</span>
-                          <div>
-                            <div className="mono" style={{fontSize:9,fontWeight:700,color:T.text}}>{volumen?`$${volumen.toFixed(0)}`:"—"}</div>
-                            <div style={{fontSize:7,color:T.muted}}>sin comisión</div>
+                    {(()=>{
+                      // Agrupa filas consecutivas del MISMO cierre (misma salida +
+                      // mismo motivo + dentro de la misma ventana de 2s) — una
+                      // pila de 10 posiciones cierra TODAS juntas en un solo
+                      // volteo, y sin esto se veían como 10 filas sueltas sin
+                      // forma de ver de un vistazo cuánto dio ESE cierre en total
+                      // (pedido explícito: "genera confusión").
+                      const groups=[];
+                      for(const t of expTrades.slice(0,50)){
+                        const key=`${t.closeTime?Math.floor(t.closeTime/2000):"x"}_${t.exit}_${t.reason}`;
+                        const last=groups[groups.length-1];
+                        if(last&&last.key===key) last.items.push(t);
+                        else groups.push({key,items:[t]});
+                      }
+                      return groups.map((g,gi)=>{
+                        const groupTotal=g.items.reduce((s,t)=>s+t.pnl,0);
+                        return(
+                          <div key={gi} style={{display:"flex",flexDirection:"column",gap:4,marginBottom:g.items.length>1?8:4}}>
+                            {g.items.map((t,i)=>{
+                              const volumen=(t.allocatedSize||0)*(t.multiplier||0);
+                              return(
+                                <div key={i} style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 90px 90px 100px 100px 1fr",
+                                  gap:8,alignItems:"center",background:`${t.pnl>=0?T.green:T.red}08`,border:`1px solid ${t.pnl>=0?T.green:T.red}25`,borderRadius:6,padding:"6px 10px"}}>
+                                  <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.openTime)}</span>
+                                  <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime)}</span>
+                                  <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||EXP_SYMBOL}</span>
+                                  <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:T.red}}>{t.type}</span>
+                                  <span className="mono" style={{fontSize:9}}>{fP(t.entry,2)}</span>
+                                  <span className="mono" style={{fontSize:9}}>{fP(t.exit,2)}</span>
+                                  <span className="mono" style={{fontSize:10,fontWeight:700,color:t.pnl>=0?T.green:T.red}}>{fUSD(t.pnl)}</span>
+                                  <span style={{fontSize:8,fontWeight:700,color:t.pnl>=0?T.green:T.red,background:`${t.pnl>=0?T.green:T.red}18`,padding:"2px 7px",borderRadius:4,textAlign:"center"}}>{t.reason||"—"}</span>
+                                  <div>
+                                    <div className="mono" style={{fontSize:9,fontWeight:700,color:T.text}}>{volumen?`$${volumen.toFixed(0)}`:"—"}</div>
+                                    <div style={{fontSize:7,color:T.muted}}>sin comisión</div>
+                                  </div>
+                                  <span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.yellow,padding:"2px 7px",borderRadius:4,textAlign:"center",width:"fit-content"}}>EXPERIMENTO</span>
+                                  <span style={{fontSize:9,color:T.muted}}>—</span>
+                                </div>
+                              );
+                            })}
+                            {g.items.length>1&&(
+                              <div style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 90px 90px 100px 100px 1fr",
+                                gap:8,alignItems:"center",background:T.dim,border:`2px solid ${groupTotal>=0?T.green:T.red}`,borderRadius:6,padding:"5px 10px"}}>
+                                <span style={{fontSize:8,fontWeight:700,color:T.muted,gridColumn:"1 / 7"}}>TOTAL de este cierre ({g.items.length} posiciones)</span>
+                                <span className="mono" style={{fontSize:10,fontWeight:700,color:groupTotal>=0?T.green:T.red}}>{fUSD(groupTotal)}</span>
+                              </div>
+                            )}
                           </div>
-                          <span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.yellow,padding:"2px 7px",borderRadius:4,textAlign:"center",width:"fit-content"}}>EXPERIMENTO</span>
-                          <span style={{fontSize:9,color:T.muted}}>—</span>
-                        </div>
-                      );
-                    })}
+                        );
+                      });
+                    })()}
                   </div>
                 </div>
               )}
