@@ -441,6 +441,17 @@ const EXP_FLOOR_START=-50; // $ — piso inicial (antes de haber estado nunca en
 // pedido original), independiente de qué tan grande sea expAddStep.
 const EXP_FLOOR_ARM_AT=10; // $ — pico mínimo antes de que el piso empiece a subir
 const EXP_MAX_STACK=10;  // límite de seguridad de posiciones apiladas a la vez
+// Piso de "volteo rápido": pedido explícito en vivo — se observó que, tras
+// voltear desde una dirección que venía GANANDO fuerte (ej. BUY +$101,
+// +$65, +$39...), la nueva dirección (SELL) se quedaba sola perdiendo
+// hasta tocar el piso inicial COMPLETO (ej. -$40/-$41.68) antes de volver
+// — mucho margen para una dirección que probablemente era un error, justo
+// cuando la dirección anterior SÍ estaba funcionando. Se aplica SOLO
+// cuando el ciclo que se acaba de cerrar fue ganador (ver flip() abajo) —
+// si el volteo rápido también pierde, el SIGUIENTE intento ya no viene de
+// un ciclo ganador, así que usa el piso normal completo — evita que esto
+// se convierta en un zigzag infinito de pérdidas chicas en mercado picado.
+const EXP_QUICK_REVERSAL_FRACTION=0.3; // 30% del piso inicial normal
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
 // La pila/dirección/piso EN VIVO también se persisten (no solo el
@@ -1731,10 +1742,75 @@ export default function TradingBot(){
   const expFloorRef      = useRef(expFloorStart); // piso protector actual del agregado de la pila
   const expAddLevelRef   = useRef(0); // último múltiplo de expAddStep ya usado para apilar otra posición
   const expStackPeakRef  = useRef(0); // máximo histórico del P&L agregado de la pila ACTUAL (se resetea en cada entrada/volteo)
-  useEffect(()=>{expEnabledRef.current=expEnabled; try{localStorage.setItem(LS_EXP_ENABLED,expEnabled?"1":"0");}catch{}},[expEnabled]);
-  useEffect(()=>{expStakeRef.current=expStake; try{localStorage.setItem(LS_EXP_STAKE,String(expStake));}catch{}},[expStake]);
-  useEffect(()=>{expAddStepRef.current=expAddStep; try{localStorage.setItem(LS_EXP_ADDSTEP,String(expAddStep));}catch{}},[expAddStep]);
-  useEffect(()=>{expFloorStartRef.current=expFloorStart; try{localStorage.setItem(LS_EXP_FLOORSTART,String(expFloorStart));}catch{}},[expFloorStart]);
+  // Identidad de esta pestaña/dispositivo + si es la que actualmente "maneja"
+  // el motor (ver efecto de abajo) — necesario desde que el estado se
+  // sincroniza por DB: si dos pestañas/dispositivos tuvieran el experimento
+  // activo a la vez, ambas podrían decidir apilar/voltear para el MISMO
+  // cruce de umbral y duplicar operaciones reales (bueno, simuladas, pero
+  // igual de confuso). Solo una "es dueña" en un momento dado.
+  const expSessionIdRef=useRef(null);
+  if(expSessionIdRef.current===null) expSessionIdRef.current=Math.random().toString(36).slice(2)+Date.now().toString(36);
+  const expIsOwnerRef=useRef(true);
+  // Evita la carrera: si estos 4 efectos escribieran a la DB desde el
+  // primer render, un cambio del usuario hecho ANTES de que termine la
+  // carga inicial (fetch async abajo) podía llegar a la DB primero, y
+  // luego esa misma carga inicial lo pisaba al aplicar el valor viejo que
+  // ya estaba guardado — verificado en vivo con dos pestañas: el stake
+  // escrito en la primera terminaba revertido a "1" por la propia carga.
+  // No se escribe nada a la DB hasta que expSyncedRef sea true.
+  const expSyncedRef=useRef(false);
+  useEffect(()=>{expEnabledRef.current=expEnabled; try{localStorage.setItem(LS_EXP_ENABLED,expEnabled?"1":"0");}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_enabled",value:expEnabled?"1":"0"})}).catch(()=>{});
+  },[expEnabled]);
+  useEffect(()=>{expStakeRef.current=expStake; try{localStorage.setItem(LS_EXP_STAKE,String(expStake));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_stake",value:String(expStake)})}).catch(()=>{});
+  },[expStake]);
+  useEffect(()=>{expAddStepRef.current=expAddStep; try{localStorage.setItem(LS_EXP_ADDSTEP,String(expAddStep));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_add_step",value:String(expAddStep)})}).catch(()=>{});
+  },[expAddStep]);
+  useEffect(()=>{expFloorStartRef.current=expFloorStart; try{localStorage.setItem(LS_EXP_FLOORSTART,String(expFloorStart));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_floor_start",value:String(expFloorStart)})}).catch(()=>{});
+  },[expFloorStart]);
+
+  // ── Sincronización inicial desde la DB (una sola vez al montar) — esto es
+  // lo que hace que abrir la app desde OTRO navegador/celular muestre la
+  // MISMA info en vez de "todo en 0": localStorage es por navegador, esto
+  // no. La config/estado-en-vivo gana sobre lo que haya en localStorage de
+  // este dispositivo si la DB tiene algo distinto (la DB es la fuente de
+  // verdad entre dispositivos); el historial de trades se reemplaza por
+  // completo con lo que haya en exp_trades.
+  useEffect(()=>{
+    (async()=>{
+      try{
+        const [stateRes,tradesRes]=await Promise.all([
+          fetch("/api/exp-state"),
+          fetch("/api/exp-trades?limit=200"),
+        ]);
+        if(stateRes.ok){
+          const d=await stateRes.json();
+          if(d.exp_enabled!=null) setExpEnabled(d.exp_enabled==="1");
+          if(d.exp_stake!=null) setExpStake(parseFloat(d.exp_stake));
+          if(d.exp_add_step!=null) setExpAddStep(parseFloat(d.exp_add_step));
+          if(d.exp_floor_start!=null) setExpFloorStart(parseFloat(d.exp_floor_start));
+          if(d.exp_live_state){
+            try{
+              const live=JSON.parse(d.exp_live_state);
+              if(live.positions){ expPositionsRef.current=live.positions; setExpPositions(live.positions); }
+              if(live.direction!==undefined){ expDirectionRef.current=live.direction; setExpDirection(live.direction); }
+              if(live.floor!=null) expFloorRef.current=live.floor;
+              if(live.addLevel!=null) expAddLevelRef.current=live.addLevel;
+              if(live.peak!=null) expStackPeakRef.current=live.peak;
+            }catch{}
+          }
+        }
+        if(tradesRes.ok){
+          const d=await tradesRes.json();
+          if(d.trades) setExpTrades(d.trades);
+        }
+      }catch{}
+      finally{ expSyncedRef.current=true; } // recién desde aquí los 4 efectos de arriba empiezan a escribir a la DB
+    })();
+  },[]);
 
   const posRef    = useRef([]);
   const priceRef  = useRef(ASSETS["ETH/USDT"].basePrice);
@@ -1981,13 +2057,23 @@ export default function TradingBot(){
     if(!expEnabled) return;
     let alive=true;
 
+    // Local write en cada llamada (barato); el POST a la DB se throttlea a
+    // solo cuando algo REALMENTE cambió (piso se movió o cambió el tamaño
+    // de la pila) — evaluateStack llama a esto cada 1s, escribirle a
+    // Postgres esa seguido sin necesidad sería ruido puro.
+    let lastDbFloor=null, lastDbPosCount=-1;
     const persistLive=()=>{
-      try{
-        localStorage.setItem(LS_EXP_LIVE, JSON.stringify({
-          positions:expPositionsRef.current, direction:expDirectionRef.current,
-          floor:expFloorRef.current, addLevel:expAddLevelRef.current, peak:expStackPeakRef.current,
-        }));
-      }catch{}
+      const snapshot={
+        positions:expPositionsRef.current, direction:expDirectionRef.current,
+        floor:expFloorRef.current, addLevel:expAddLevelRef.current, peak:expStackPeakRef.current,
+      };
+      try{ localStorage.setItem(LS_EXP_LIVE, JSON.stringify(snapshot)); }catch{}
+      const changed=expFloorRef.current!==lastDbFloor || expPositionsRef.current.length!==lastDbPosCount;
+      if(changed){
+        lastDbFloor=expFloorRef.current; lastDbPosCount=expPositionsRef.current.length;
+        fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({key:"exp_live_state",value:JSON.stringify(snapshot)})}).catch(()=>{});
+      }
     };
 
     // Restaura una pila que ya estaba abierta antes de este mount (p.ej.
@@ -2028,6 +2114,17 @@ export default function TradingBot(){
       setExpPositions([]);
       persistLive();
       setExpTrades(prev=>{const next=[...closed,...prev].slice(0,200); saveExpTrades(next); return next;});
+      // DB-backed historial (lo que hace que otro navegador/dispositivo vea
+      // las mismas operaciones) — una fila por posición cerrada.
+      closed.forEach(c=>{
+        fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({
+            symbol:c.symbol, type:c.type, entryPrice:c.entry, exitPrice:c.exit, pnl:c.pnl, reason:c.reason,
+            allocatedSize:c.allocatedSize, multiplier:c.multiplier,
+            openedAt:c.openTime?new Date(c.openTime).toISOString():undefined,
+            closedAt:new Date(c.closeTime).toISOString(),
+          })}).catch(()=>{});
+      });
       return closed.reduce((s,c)=>s+c.pnl,0);
     };
 
@@ -2038,13 +2135,22 @@ export default function TradingBot(){
     const flip=(exitPrice)=>{
       const totalPnl=closeAllExpPos(exitPrice,"FLIP");
       const opposite=expDirectionRef.current==="BUY"?"SELL":"BUY";
-      addLog(`🔄 Experimento: pila cerró en ${fUSD(totalPnl)} (piso ${fUSD(expFloorRef.current)}) → voltea a ${opposite}`,"info");
-      expDirectionRef.current=opposite; setExpDirection(opposite);
       resetStackTracking();
+      let note="";
+      if(totalPnl>0){
+        // Venimos de un ciclo GANADOR — dale menos margen a esta nueva
+        // dirección (piso de volteo rápido): si también resulta un error,
+        // volvemos antes en vez de esperar el piso completo otra vez.
+        expFloorRef.current=expFloorStartRef.current*EXP_QUICK_REVERSAL_FRACTION;
+        note=` · volteo rápido armado (piso ${fUSD(expFloorRef.current)})`;
+      }
+      addLog(`🔄 Experimento: pila cerró en ${fUSD(totalPnl)} → voltea a ${opposite}${note}`,"info");
+      expDirectionRef.current=opposite; setExpDirection(opposite);
       addExpPos(opposite);
     };
 
     const evaluateStack=()=>{
+      if(!expIsOwnerRef.current) return; // otra pestaña/dispositivo está manejando el motor ahora
       const price=expPriceRef.current;
       if(!price || !expPositionsRef.current.length) return;
       const stackPnl=expPositionsRef.current.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize),0);
@@ -2073,6 +2179,7 @@ export default function TradingBot(){
     };
 
     const onCandleClosed=(prevCandle)=>{
+      if(!expIsOwnerRef.current) return; // otra pestaña/dispositivo está manejando el motor ahora
       if(expPositionsRef.current.length>0) return; // ya hay una pila activa, se maneja sola
       const dir=prevCandle.c<prevCandle.o?"SELL":prevCandle.c>prevCandle.o?"BUY":null;
       if(!dir) return;
@@ -2113,6 +2220,50 @@ export default function TradingBot(){
       }catch{}
     })();
 
+    // Dueño del motor: solo la pestaña/dispositivo "dueño" llama a
+    // addExpPos/flip (evaluateStack/onCandleClosed ya lo chequean arriba) —
+    // las demás solo leen y muestran. "Dueño" = guardado en exp_engine_owner
+    // con un heartbeat reciente (<15s); si no hay dueño, o el que hay dejó
+    // de mandar heartbeat (pestaña cerrada), cualquiera puede reclamarlo.
+    // Reclamar en una pestaña NUEVA (activar el toggle ahí) le quita el
+    // control a la anterior en el siguiente chequeo de esa — "la última que
+    // lo prendió, manda", el modelo mental más simple de explicar.
+    const claimOrCheckOwnership=async()=>{
+      try{
+        const r=await fetch("/api/exp-state");
+        if(!r.ok) return;
+        const d=await r.json();
+        const raw=d.exp_engine_owner||"";
+        const [owner,hbStr]=raw.split(":");
+        const hbAt=parseInt(hbStr,10)||0;
+        const stale=!hbAt||(Date.now()-hbAt)>15000;
+        const mine=owner===expSessionIdRef.current;
+        if(!owner||mine||stale){
+          expIsOwnerRef.current=true;
+          fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({key:"exp_engine_owner",value:`${expSessionIdRef.current}:${Date.now()}`})}).catch(()=>{});
+        } else {
+          expIsOwnerRef.current=false;
+          // No somos dueños — igual refrescar lo que se muestra con lo que
+          // la pestaña dueña ya guardó, para no quedar mostrando datos viejos.
+          if(d.exp_live_state){
+            try{
+              const live=JSON.parse(d.exp_live_state);
+              expPositionsRef.current=live.positions||[]; setExpPositions(live.positions||[]);
+              expDirectionRef.current=live.direction??null; setExpDirection(live.direction??null);
+              if(live.floor!=null) expFloorRef.current=live.floor;
+              if(live.addLevel!=null) expAddLevelRef.current=live.addLevel;
+              if(live.peak!=null) expStackPeakRef.current=live.peak;
+            }catch{}
+          }
+          fetch("/api/exp-trades?limit=50").then(rr=>rr.ok?rr.json():null).then(dd=>{
+            if(dd?.trades&&alive) setExpTrades(dd.trades);
+          }).catch(()=>{});
+        }
+      }catch{}
+    };
+    claimOrCheckOwnership();
+
     // Guard de reentrancia: setInterval dispara cada 1s SIN esperar a que
     // el callback anterior termine — si la llamada a Binance alguna vez
     // tarda más de 1s (red lenta), dos ticks podían solaparse y evaluar/
@@ -2124,13 +2275,15 @@ export default function TradingBot(){
     // motor entero se congelaría. Si el tick anterior lleva más de 10s
     // "corriendo" (muy por encima del roundtrip normal), se asume colgado y
     // se deja pasar el siguiente de todas formas.
-    let ticking=false, tickStartedAt=0;
+    let ticking=false, tickStartedAt=0, tickCount=0;
     const iv=setInterval(async()=>{
       const now=Date.now();
       if(!alive) return;
       if(ticking && (now-tickStartedAt)<10000) return;
       ticking=true; tickStartedAt=now;
       try{
+      tickCount++;
+      if(tickCount%5===0) claimOrCheckOwnership(); // cada ~5s, no cada tick
       const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${EXP_BINANCE}`);
       const d=await r.json();
       const np=parseFloat(d.price);
@@ -5766,9 +5919,12 @@ export default function TradingBot(){
                 apila otra posición cada +${expAddStep} de la pila. El piso protector es independiente del apilado:
                 mientras el pico de la pila no llegue a +${EXP_FLOOR_ARM_AT} es {fUSD(expFloorStart)} (tocarlo cierra todo y
                 voltea de dirección); apenas el pico alcanza +${EXP_FLOOR_ARM_AT}, el piso pasa a ser el {Math.round(EXP_RETAIN_PCT*100)}%
-                de ese pico y solo sube desde ahí — una vez ahí, siempre cierra en positivo. El stake es lo que determina
-                qué tan rápido se mueven estos $: PnL($) = %movimiento_del_precio × stake × 100 — con este stake,
-                el oro necesita moverse <b>{((expAddStep/(expStake*DEFAULT_MULTIPLIER))*100).toFixed(3)}%</b> para
+                de ese pico y solo sube desde ahí — una vez ahí, siempre cierra en positivo. Volteo rápido: si la
+                pila que se acaba de cerrar fue GANADORA, la nueva dirección arranca con un piso mucho más chico
+                ({fUSD(expFloorStart*EXP_QUICK_REVERSAL_FRACTION)} en vez de {fUSD(expFloorStart)}) — si resulta ser
+                un error, vuelve rápido a la dirección que sí funcionaba en vez de esperar el piso completo otra vez.
+                El stake es lo que determina qué tan rápido se mueven estos $: PnL($) = %movimiento_del_precio × stake × 100 —
+                con este stake, el oro necesita moverse <b>{((expAddStep/(expStake*DEFAULT_MULTIPLIER))*100).toFixed(3)}%</b> para
                 el próximo apilado/volteo (sube el stake si lo quieres más rápido, es solo Simulado).
                 <br/>Precio en vivo cada 1s vía Binance PAXG/USDT (oro tokenizado, respaldado 1:1 por oro físico) —
                 Yahoo/Deriv no dan movimiento real más seguido que ~15s para oro, PAXG sí tiene ticks genuinos; puede
@@ -5833,7 +5989,14 @@ export default function TradingBot(){
                   comentario de las constantes EXP_* arriba), por eso se
                   repiten iguales en cada fila mientras la pila esté abierta. */}
               <div style={{marginBottom:16}}>
-                <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:8}}>POSICIONES ABIERTAS EN VIVO</div>
+                <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:4}}>POSICIONES ABIERTAS EN VIVO</div>
+                {expPositions.length>0&&(
+                  <div style={{fontSize:8,color:T.muted,marginBottom:8}}>
+                    OBJETIVO/STOP son de <b>la pila completa</b>, no por posición — todas cierran juntas al mismo
+                    tiempo al mismo precio cuando se apila/voltea, por eso se repiten en cada fila. Lo que sí es
+                    propio de cada una es PNL (según su propia entrada).
+                  </div>
+                )}
                 {expPositions.length===0?(
                   <div style={{background:T.dim,borderRadius:8,padding:"16px",textAlign:"center",fontSize:10,color:T.muted}}>
                     Sin posiciones abiertas ahora mismo.
@@ -5843,7 +6006,7 @@ export default function TradingBot(){
                     <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:950}}>
                       <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px",
                         gap:10,padding:"0 10px 4px",fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700}}>
-                        <div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div><div>OBJETIVO</div><div>STOP</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div>
+                        <div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div><div>OBJETIVO PILA</div><div>STOP PILA</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div>
                       </div>
                       {expPositions.map(pos=>{
                         const livePrice=expPrice??pos.entry;

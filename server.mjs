@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
 
 import analyze from "./api/analyze.js";
 import derivOrder from "./api/deriv-order.js";
+import expState from "./api/exp-state.js";
+import expTrades from "./api/exp-trades.js";
 import forex from "./api/forex.js";
 import news from "./api/news.js";
 import positions from "./api/positions.js";
@@ -24,6 +26,8 @@ app.use(express.json());
 const routes = {
   "analyze": analyze,
   "deriv-order": derivOrder,
+  "exp-state": expState,
+  "exp-trades": expTrades,
   "forex": forex,
   "news": news,
   "positions": positions,

@@ -154,12 +154,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_open_positions_deriv_contract
   ON open_positions (deriv_contract_id) WHERE deriv_contract_id IS NOT NULL;
 
 -- Server-side bot config (TP/SL/stake/multiplier), the durable replacement
--- for the bot_tp_v2/bot_sl_v2/bot_stake/bot_mult localStorage keys.
+-- for the bot_tp_v2/bot_sl_v2/bot_stake/bot_mult localStorage keys. Also
+-- reused for the Experimento's exp_* config/live-state keys (see api/
+-- exp-state.js) — same shape, no need for a second key/value table.
 CREATE TABLE IF NOT EXISTS bot_config (
   key              TEXT PRIMARY KEY,
   value            TEXT NOT NULL,
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Closed-trade history for the XAU/USD pyramid Experimento (see the EXP_*
+-- comment block in trading-bot-v3.jsx) — its own table, deliberately never
+-- merged into `trades`: this strategy's results must not leak into the
+-- main bot's byPattern/byHour learning stats. DB-backed (not just
+-- localStorage) so the same history shows up from any browser/device —
+-- verified live: opening the Experimento page from a phone showed
+-- everything at zero because it had only ever been saved locally on desktop.
+CREATE TABLE IF NOT EXISTS exp_trades (
+  id               SERIAL PRIMARY KEY,
+  symbol           TEXT NOT NULL DEFAULT 'XAU/USD',
+  type             TEXT NOT NULL,           -- 'BUY' | 'SELL'
+  entry_price      NUMERIC NOT NULL,
+  exit_price       NUMERIC NOT NULL,
+  pnl              NUMERIC NOT NULL,
+  reason           TEXT,                    -- 'FLIP' (always, for now)
+  allocated_size   NUMERIC,
+  multiplier       INT,
+  opened_at        TIMESTAMPTZ,
+  closed_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_exp_trades_closed ON exp_trades (closed_at DESC);
 
 -- Live copy of SYMBOL_STRATEGY (src/lib/symbolStrategy.js), refreshed by
 -- backtest/update-strategy.mjs on a schedule (see .github/workflows) so
