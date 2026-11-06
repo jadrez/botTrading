@@ -25,6 +25,7 @@ const EXP_MAX_STACK_DEFAULT = 10; // overridden live by cfg.maxStack (exp_max_st
 const EXP_QUICK_REVERSAL_FRACTION = 0.3;
 const EXP_CANARY_PEAK = 5, EXP_CANARY_MIN_STACK = 3; // ver nota en trading-bot-v3.jsx junto a estas mismas constantes (v2: % de EXP_RETAIN_PCT, no rango fijo)
 const EXP_HEDGE_TRIGGER_PCT = 0.5; // ver nota en trading-bot-v3.jsx
+const EXP_HEDGE_STOP_PCT = 1; // SL propio de la cobertura: se cierra SOLA si su pérdida llega al mismo piso inicial de la pila (cfg.floorStart) — antes nada la detenía si la pila principal se recuperaba a positivo (la cobertura, al ir en la dirección contraria, queda entonces del lado perdedor) y tardaba en tocar SU propio piso para voltear
 const SESSION_ID = `server:${process.env.FLY_MACHINE_ID || "local"}:${Math.random().toString(36).slice(2)}`;
 
 // Ejecución real en Deriv (exp_deriv_live=1): SOLO este motor (servidor) la
@@ -228,12 +229,51 @@ export function startExpEngine() {
     const { ok, record } = await closeOnePosition(hedge, exitPrice, { symbol: EXP_SYMBOL, reason: "HEDGE", pattern: "COBERTURA", objetivo, stop });
     if (!ok) { log("Deriv: no se pudo confirmar el cierre de la cobertura — se reintenta"); return { pnl: 0, ok: false }; }
     hedge = null;
+    // persistLive() normal solo detecta cambios de floor/cantidad de
+    // posiciones — hedge puede pasar a null sin que ninguno de esos dos
+    // cambie (p.ej. cerrada sola por su propio SL), así que se fuerza aquí
+    // para no dejar el hedge persistido como "abierto" cuando ya no lo está.
+    await persistLive(true);
     await writeTradeRecord(record);
     log(`cobertura cerrada en ${record.pnl.toFixed(2)}`);
     return { pnl: record.pnl, ok: true };
   };
 
   const flip = async (exitPrice) => {
+    // Si hay cobertura abierta y en ESE momento viene ganando, no se cierra
+    // — se absorbe como la primera posición de la pila volteada (misma
+    // dirección que la cobertura, que es justo la dirección que el precio
+    // acaba de demostrar). Antes se cerraban pila Y cobertura juntas y se
+    // abría una posición nueva idéntica desde cero: 2 llamadas a Deriv de
+    // más y, sobre todo, se "reseteaba" una posición que ya iba en positivo
+    // justo cuando el precio ya probó ir en esa dirección — pedido
+    // explícito: seguir el ciclo desde esa positiva sin cerrarla, y apilar
+    // más solo cuando el precio avance el OBJETIVO PILA normal desde aquí.
+    const hedgePnlNow = hedge ? posPnL(hedge, exitPrice) : 0;
+    if (hedge && hedgePnlNow > 0) {
+      const stackResult = await closeAllExpPos(exitPrice, "FLIP");
+      if (!stackResult.allClosed) {
+        log("volteo incompleto (alguna posición no se pudo cerrar en Deriv) — se reintenta en el próximo tick, sin voltear todavía");
+        return;
+      }
+      const combinedPnl = stackResult.totalPnl + hedgePnlNow;
+      const absorbed = hedge;
+      resetStackTracking();
+      positions = [absorbed];
+      hedge = null;
+      direction = absorbed.type;
+      lastPosPeak = 0;
+      lastAddPrice = exitPrice;
+      let note = " · cobertura ganadora absorbida como nueva pila (sigue abierta)";
+      if (combinedPnl > 0) {
+        floor = cfg.floorStart * EXP_QUICK_REVERSAL_FRACTION;
+        note += ` · piso ${floor.toFixed(2)}`;
+      }
+      log(`pila cerró en ${stackResult.totalPnl.toFixed(2)} (cobertura seguía en +${hedgePnlNow.toFixed(2)}) → continúa como ${direction}${note}`);
+      await persistLive(true);
+      return;
+    }
+
     // Cobertura y pila son independientes — cerrarlas en paralelo en vez de
     // una tras otra ahorra otro medio segundo en el momento más crítico.
     const [hedgeResult, stackResult] = await Promise.all([closeHedge(exitPrice), closeAllExpPos(exitPrice, "FLIP")]);
@@ -310,6 +350,19 @@ export function startExpEngine() {
       hedge = h;
       log(`cobertura ${hedgeType} abierta @ ${price.toFixed(2)} (pila en ${stackPnl.toFixed(2)})`);
       await persistLive(true);
+    }
+    // SL propio de la cobertura — independiente del piso de la pila
+    // principal. Sin esto, si la pila principal empieza a recuperarse
+    // (vuelve a positivo) la cobertura queda del lado perdedor y nada la
+    // detiene hasta que la pila principal voltee por SU cuenta, lo que
+    // puede tardar mucho. Se cierra sola en cuanto su propia pérdida
+    // llega al mismo piso inicial (cfg.floorStart) que usa la pila.
+    if (hedge) {
+      const hedgePnl = posPnL(hedge, price);
+      if (hedgePnl <= cfg.floorStart * EXP_HEDGE_STOP_PCT) {
+        log(`cobertura tocó su propio stop (${hedgePnl.toFixed(2)}) — se cierra sola`);
+        await closeHedge(price);
+      }
     }
     // Canario: la ÚLTIMA posición apilada se revisa por separado (solo con
     // EXP_CANARY_MIN_STACK+ abiertas) — si su propio pico llega a

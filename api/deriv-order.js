@@ -34,6 +34,11 @@ const SYMBOL_MAP = {
   // restricciones distintas. Agregado para probar si frxXAUUSD sí acepta
   // "open" aquí (pedido explícito, cuenta demo).
   "XAU/USD": "frxXAUUSD", "XAG/USD": "frxXAGUSD",
+  // BTC/USD agregado para seguir probando el flujo de Multiplicadores en
+  // más pruebas sobre Deriv (demo) — símbolo verificado en vivo con la
+  // acción "tick" antes de registrarlo aquí (ticks_history contra
+  // "cryBTCUSD" devolvió un precio real), igual que se hizo con XAU/XAG.
+  "BTC/USD": "cryBTCUSD",
 };
 const REVERSE_SYMBOL_MAP = Object.fromEntries(Object.entries(SYMBOL_MAP).map(([k, v]) => [v, k]));
 // Direccional (Rise/Fall) label-only map — kept SEPARATE from SYMBOL_MAP on

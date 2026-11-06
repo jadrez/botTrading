@@ -491,6 +491,12 @@ const EXP_CANARY_PEAK=5, EXP_CANARY_MIN_STACK=3;
 // discusión: la alternativa de un piso independiente para la cobertura
 // casi duplica la complejidad de todo el motor).
 const EXP_HEDGE_TRIGGER_PCT=0.5; // 50% de expFloorStart
+// SL propio de la cobertura: se cierra SOLA si su pérdida llega al mismo
+// piso inicial de la pila (expFloorStart) — antes nada la detenía si la
+// pila principal se recuperaba a positivo (la cobertura, al ir en la
+// dirección contraria, queda entonces del lado perdedor) y tardaba en
+// tocar SU propio piso para voltear.
+const EXP_HEDGE_STOP_PCT=1;
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
 const LS_EXP_MAXSTACK="bot_exp_maxstack_v1";
@@ -2149,7 +2155,7 @@ export default function TradingBot(){
     // solo cuando algo REALMENTE cambió (piso se movió o cambió el tamaño
     // de la pila) — evaluateStack llama a esto cada 1s, escribirle a
     // Postgres esa seguido sin necesidad sería ruido puro.
-    let lastDbFloor=null, lastDbPosCount=-1;
+    let lastDbFloor=null, lastDbPosCount=-1, lastDbHedgeOpen=false;
     const persistLive=()=>{
       const snapshot={
         positions:expPositionsRef.current, direction:expDirectionRef.current,
@@ -2157,9 +2163,13 @@ export default function TradingBot(){
         hedge:expHedgePosRef.current,
       };
       try{ localStorage.setItem(LS_EXP_LIVE, JSON.stringify(snapshot)); }catch{}
-      const changed=expFloorRef.current!==lastDbFloor || expPositionsRef.current.length!==lastDbPosCount;
+      // Incluye el estado de la cobertura — sin esto, cerrarla SOLA (nuevo
+      // SL propio) sin que floor/cantidad de posiciones cambien a la vez
+      // dejaba el POST a la DB sin disparar y la cobertura seguía viéndose
+      // "abierta" para cualquier otra pestaña/dispositivo.
+      const changed=expFloorRef.current!==lastDbFloor || expPositionsRef.current.length!==lastDbPosCount || !!expHedgePosRef.current!==lastDbHedgeOpen;
       if(changed){
-        lastDbFloor=expFloorRef.current; lastDbPosCount=expPositionsRef.current.length;
+        lastDbFloor=expFloorRef.current; lastDbPosCount=expPositionsRef.current.length; lastDbHedgeOpen=!!expHedgePosRef.current;
         fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({key:"exp_live_state",value:JSON.stringify(snapshot)})}).catch(()=>{});
       }
@@ -2244,6 +2254,7 @@ export default function TradingBot(){
       const stop=expFloorRef.current;
       expHedgePosRef.current=null;
       setExpHedgePos(null);
+      persistLive();
       const closedAt=Date.now();
       setExpTrades(prev=>{
         const next=[{...hedge,symbol:EXP_SYMBOL,exit:exitPrice,pnl,reason:"HEDGE",objetivo,stop,time:now(),
@@ -2262,6 +2273,36 @@ export default function TradingBot(){
     };
 
     const flip=(exitPrice)=>{
+      // Si hay cobertura abierta y en ESE momento viene ganando, no se
+      // cierra — se absorbe como la primera posición de la pila volteada
+      // (misma dirección que la cobertura, que es justo la que el precio
+      // acaba de demostrar). Antes se cerraban pila Y cobertura juntas y
+      // se abría una posición nueva idéntica desde cero: se "reseteaba"
+      // una posición que ya iba en positivo justo cuando el precio ya
+      // probó ir en esa dirección — pedido explícito: seguir el ciclo
+      // desde esa positiva sin cerrarla, y apilar más solo cuando el
+      // precio avance el OBJETIVO PILA normal desde aquí.
+      const hedge=expHedgePosRef.current;
+      const hedgePnlNow=hedge?posPnL(hedge,exitPrice,hedge.allocatedSize):0;
+      if(hedge && hedgePnlNow>0){
+        const stackPnl=closeAllExpPos(exitPrice,"FLIP");
+        const combinedPnl=stackPnl+hedgePnlNow;
+        resetStackTracking();
+        expHedgePosRef.current=null; setExpHedgePos(null);
+        expPositionsRef.current=[hedge]; setExpPositions([hedge]);
+        expDirectionRef.current=hedge.type; setExpDirection(hedge.type);
+        expLastPosPeakRef.current=0;
+        expLastAddPriceRef.current=exitPrice;
+        let note=" · cobertura ganadora absorbida como nueva pila (sigue abierta)";
+        if(combinedPnl>0){
+          expFloorRef.current=expFloorStartRef.current*EXP_QUICK_REVERSAL_FRACTION;
+          note+=` · piso ${fUSD(expFloorRef.current)}`;
+        }
+        persistLive();
+        addLog(`🔄 Experimento: pila cerró en ${fUSD(stackPnl)} (cobertura seguía en +${fUSD(hedgePnlNow)}) → continúa como ${hedge.type}${note}`,"info");
+        return;
+      }
+
       const hedgePnl=closeHedge(exitPrice);
       const totalPnl=closeAllExpPos(exitPrice,"FLIP")+hedgePnl;
       const opposite=expDirectionRef.current==="BUY"?"SELL":"BUY";
@@ -2311,6 +2352,19 @@ export default function TradingBot(){
         setExpHedgePos(hedge);
         persistLive();
         addLog(`🛡️ Experimento: cobertura ${hedgeType} abierta @ ${fP(price,2)} (pila en ${fUSD(stackPnl)})`,hedgeType==="BUY"?"buy":"sell");
+      }
+      // SL propio de la cobertura — independiente del piso de la pila
+      // principal. Sin esto, si la pila principal empieza a recuperarse
+      // (vuelve a positivo) la cobertura queda del lado perdedor y nada la
+      // detiene hasta que la pila principal voltee por SU cuenta, lo que
+      // puede tardar mucho. Se cierra sola en cuanto su propia pérdida
+      // llega al mismo piso inicial (expFloorStart) que usa la pila.
+      if(expHedgePosRef.current){
+        const hedgePnl=posPnL(expHedgePosRef.current,price,expHedgePosRef.current.allocatedSize);
+        if(hedgePnl<=expFloorStartRef.current*EXP_HEDGE_STOP_PCT){
+          addLog(`🛡️ Experimento: cobertura tocó su propio stop (${fUSD(hedgePnl)}) — se cierra sola`,"info");
+          closeHedge(price);
+        }
       }
       // Canario: la ÚLTIMA posición apilada se revisa POR SEPARADO de la
       // pila (solo con EXP_CANARY_MIN_STACK+ posiciones abiertas) — si su
