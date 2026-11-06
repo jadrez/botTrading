@@ -1765,13 +1765,13 @@ export default function TradingBot(){
   // solo segundo puede saltárselo. Bajar este número reduce esa concentración.
   const [expMaxStack,setExpMaxStack]   = useState(()=>parseInt(localStorage.getItem(LS_EXP_MAXSTACK)||String(EXP_MAX_STACK),10));
   // expCandles: velas de 1m, SOLO para la lógica del motor (entrada por
-  // color de la vela anterior) — nunca se muestran directamente. El
-  // gráfico usa expChartCandles (1h) aparte, para que se vea movimiento
-  // visible en vivo en vez de micro-cambios de un bar de 1 minuto —
-  // pedido explícito ("no se mueve en vivo"). Mismo precio en cada tick
-  // de 5s alimenta ambas series, así que el de 1h también es en vivo.
+  // color de la vela anterior) — nunca se muestran directamente. El gráfico
+  // (RSI/MACD/EMA/velas) se quitó de esta página: el Experimento no usa
+  // ninguno de esos indicadores para decidir (solo precio puro — color de
+  // vela + % de movimiento), así que mostrarlos ahí era puro adorno sin
+  // relación real con la lógica. Pedido explícito: se agregará aparte
+  // cuando haya una página de gráfico en vivo de Deriv.
   const [expCandles,setExpCandles]         = useState([]);
-  const [expChartCandles,setExpChartCandles] = useState([]);
   const [expPrice,setExpPrice]         = useState(null);
   const [expPositions,setExpPositions] = useState([]);
   const [expDirection,setExpDirection] = useState(null);
@@ -2367,17 +2367,6 @@ export default function TradingBot(){
       }catch{}
     })();
 
-    // Serie aparte de 1h SOLO para el gráfico — mismo precio en vivo, pero
-    // en barras más grandes para que el movimiento se vea a simple vista
-    // (en 1m, un tick muy rápido apenas mueve el último bar un pixel).
-    (async()=>{
-      try{
-        const candles=await fetchBinanceKlines("1h",300);
-        if(!alive) return;
-        if(candles?.length>5) setExpChartCandles(candles);
-      }catch{}
-    })();
-
     // Dueño del motor: solo la pestaña/dispositivo "dueño" llama a
     // addExpPos/flip (evaluateStack/onCandleClosed ya lo chequean arriba) —
     // las demás solo leen y muestran. "Dueño" = guardado en exp_engine_owner
@@ -2487,20 +2476,6 @@ export default function TradingBot(){
           updated[lastIdx]=last; // la vela anterior queda fija tal como cerró
           updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
           onCandleClosed(last);
-        } else {
-          last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
-          updated[lastIdx]=last;
-        }
-        return updated;
-      });
-      setExpChartCandles(prev=>{
-        if(!prev.length) return prev;
-        const updated=[...prev];
-        const lastIdx=updated.length-1;
-        const last={...updated[lastIdx]};
-        if(nowSec-last.time>=3600){
-          updated[lastIdx]=last;
-          updated.push({time:nowSec,o:np,c:np,h:np,l:np,v:0});
         } else {
           last.c=np; last.h=Math.max(last.h,np); last.l=Math.min(last.l,np);
           updated[lastIdx]=last;
@@ -6327,18 +6302,6 @@ export default function TradingBot(){
                   </div>
                 )}
               </div>
-
-              {expChartCandles.length>5?(
-                <div style={{height:520,border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:12}}>
-                  <LWChart candles={expChartCandles} positions={expHedgePos?[...expPositions,expHedgePos]:expPositions} trades={expTrades}
-                    symbol={EXP_SYMBOL} precision={2} srLevels={{supports:[],resistances:[],all:[]}}
-                    aiResult={null} tfInterval="1h" tpTarget={expAddStep} slTarget={Math.abs(expFloorStart)}/>
-                </div>
-              ):(
-                <div style={{fontSize:10,color:T.muted,fontStyle:"italic",marginBottom:12}}>
-                  {expEnabled?"Cargando velas de XAU/USD...":"Activa el experimento para cargar su gráfico."}
-                </div>
-              )}
 
               {/* HISTÓRICO — mismas columnas que la tabla de Histórico del bot
                   principal (APERTURA/CIERRE/PAR/TIPO/ENTRADA/SALIDA/%/
