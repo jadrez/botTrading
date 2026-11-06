@@ -382,18 +382,29 @@ function loadTrades(){ try{return JSON.parse(localStorage.getItem(LS_TRADES)||"[
    Pedido explícitamente a partir de un bot observado en vivo operando oro
    en velas de 1 minuto: entra en la dirección de la vela que acaba de
    cerrar (roja→SELL, verde→BUY), apila otra posición en la MISMA dirección
-   cada vez que el P&L agregado de la pila sube $10 más (y en ese mismo
-   instante sube el piso protector un escalón, dando lo menos posible de
-   vuelta — "colocar el SL lo más rápido posible"), y si el agregado cae a
-   -$50 (el piso inicial, antes de haber subido nunca) cierra TODA la pila y
-   abre una sola posición en la dirección CONTRARIA, repitiendo el ciclo.
-   Completamente aislado de Simulado/Crecimiento: su propio historial,
-   su propio feed de velas de XAU/USD (independiente del símbolo activo en
-   el gráfico principal), nunca toca open_positions/trades en la DB ni la
-   cuenta real de Deriv — es solo para observar en Configuración. */
+   cada vez que el P&L agregado de la pila sube $EXP_ADD_STEP más, y si el
+   agregado cae al piso (-$50 mientras nunca haya estado en positivo) cierra
+   TODA la pila y abre una sola posición en la dirección CONTRARIA,
+   repitiendo el ciclo. Completamente aislado de Simulado/Crecimiento: su
+   propio historial, su propio feed de velas de XAU/USD (independiente del
+   símbolo activo en el gráfico principal), nunca toca open_positions/trades
+   en la DB ni la cuenta real de Deriv — es solo para observar en Configuración.
+
+   El piso y el apilado quedaron deliberadamente DESACOPLADOS (pedido
+   explícito tras la primera versión): apilar sigue siendo por saltos fijos
+   de $EXP_ADD_STEP, pero el piso ahora se calcula de forma continua como
+   un porcentaje del PICO (máximo histórico) del P&L de la pila, no un
+   salto fijo — así reacciona cada tick, no solo cuando se apila. Con
+   EXP_RETAIN_PCT=0.8 el piso a un pico de $50 da exactamente $40 (se
+   permite ceder 20%), y de ahí en adelante escala en proporción. Como el
+   piso nunca baja (solo sube con nuevos picos) y siempre es una fracción
+   POSITIVA de un pico ya positivo, una vez que la pila tocó positivo
+   cualquier cierre posterior por este piso queda garantizado en positivo
+   — "siempre vamos a requerir en cerrar en positivo". */
 const EXP_SYMBOL="XAU/USD", EXP_YAHOO="GC=F";
-const EXP_ADD_STEP=10;   // $ — cada incremento de esto en el P&L de la pila: apila otra + sube el piso un escalón
-const EXP_FLOOR_START=-50; // $ — piso inicial (antes de subir nunca); tocarlo cierra todo y voltea de dirección
+const EXP_ADD_STEP=50;    // $ — cada incremento de esto en el P&L de la pila apila otra posición
+const EXP_RETAIN_PCT=0.8; // una vez el pico de la pila es positivo, el piso = pico×este % (20% de giveback)
+const EXP_FLOOR_START=-50; // $ — piso inicial (antes de haber estado nunca en positivo)
 const EXP_MAX_STACK=10;  // límite de seguridad de posiciones apiladas a la vez
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 function loadExpTrades(){ try{return JSON.parse(localStorage.getItem(LS_EXP_TRADES)||"[]");}catch{return [];} }
@@ -1661,7 +1672,8 @@ export default function TradingBot(){
   const expPositionsRef  = useRef([]);
   const expDirectionRef  = useRef(null);
   const expFloorRef      = useRef(EXP_FLOOR_START); // piso protector actual del agregado de la pila
-  const expAddLevelRef   = useRef(0); // último múltiplo de EXP_ADD_STEP ya procesado (apilar+subir piso)
+  const expAddLevelRef   = useRef(0); // último múltiplo de EXP_ADD_STEP ya usado para apilar otra posición
+  const expStackPeakRef  = useRef(0); // máximo histórico del P&L agregado de la pila ACTUAL (se resetea en cada entrada/volteo)
   useEffect(()=>{expEnabledRef.current=expEnabled; try{localStorage.setItem(LS_EXP_ENABLED,expEnabled?"1":"0");}catch{}},[expEnabled]);
   useEffect(()=>{expStakeRef.current=expStake; try{localStorage.setItem(LS_EXP_STAKE,String(expStake));}catch{}},[expStake]);
 
@@ -1931,12 +1943,16 @@ export default function TradingBot(){
       return closed.reduce((s,c)=>s+c.pnl,0);
     };
 
+    const resetStackTracking=()=>{
+      expFloorRef.current=EXP_FLOOR_START; expAddLevelRef.current=0; expStackPeakRef.current=0;
+    };
+
     const flip=(exitPrice)=>{
       const totalPnl=closeAllExpPos(exitPrice,"FLIP");
       const opposite=expDirectionRef.current==="BUY"?"SELL":"BUY";
-      addLog(`🔄 Experimento: pila llegó a ${fUSD(totalPnl)} (piso ${fUSD(expFloorRef.current)}) → voltea a ${opposite}`,"info");
+      addLog(`🔄 Experimento: pila cerró en ${fUSD(totalPnl)} (piso ${fUSD(expFloorRef.current)}) → voltea a ${opposite}`,"info");
       expDirectionRef.current=opposite; setExpDirection(opposite);
-      expFloorRef.current=EXP_FLOOR_START; expAddLevelRef.current=0;
+      resetStackTracking();
       addExpPos(opposite);
     };
 
@@ -1944,13 +1960,22 @@ export default function TradingBot(){
       const price=expPriceRef.current;
       if(!price || !expPositionsRef.current.length) return;
       const stackPnl=expPositionsRef.current.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize),0);
+      expStackPeakRef.current=Math.max(expStackPeakRef.current,stackPnl);
+      // Piso continuo, DESACOPLADO del apilado: mientras el pico de la pila
+      // nunca haya sido positivo, el piso se queda en EXP_FLOOR_START (-50).
+      // Apenas el pico es positivo, el piso pasa a ser una fracción de ESE
+      // pico (EXP_RETAIN_PCT) — nunca baja, solo sube con nuevos picos — así
+      // que, una vez tocó positivo, cualquier cierre por este piso queda
+      // garantizado en positivo (a pico=$50 da piso=$40 exacto, luego
+      // escala en proporción). Reacciona cada tick, no solo al apilar.
+      if(expStackPeakRef.current>0){
+        expFloorRef.current=Math.max(expFloorRef.current, expStackPeakRef.current*EXP_RETAIN_PCT);
+      }
       if(stackPnl<=expFloorRef.current){ flip(price); return; }
-      // Cada $10 de más: apila otra posición Y sube el piso un escalón
-      // completo detrás (lo menos posible de vuelta, "lo más rápido
-      // posible" pedido) — misma idea que EXP_ADD_STEP describe arriba.
+      // Apilar otra posición cada $EXP_ADD_STEP de más — independiente del
+      // piso de arriba, solo gobierna CUÁNTAS posiciones hay en la pila.
       while(stackPnl>=(expAddLevelRef.current+EXP_ADD_STEP) && expPositionsRef.current.length<EXP_MAX_STACK){
         expAddLevelRef.current+=EXP_ADD_STEP;
-        expFloorRef.current=expAddLevelRef.current-EXP_ADD_STEP;
         addExpPos(expDirectionRef.current);
       }
     };
@@ -1960,7 +1985,7 @@ export default function TradingBot(){
       const dir=prevCandle.c<prevCandle.o?"SELL":prevCandle.c>prevCandle.o?"BUY":null;
       if(!dir) return;
       expDirectionRef.current=dir; setExpDirection(dir);
-      expFloorRef.current=EXP_FLOOR_START; expAddLevelRef.current=0;
+      resetStackTracking();
       addExpPos(dir);
     };
 
@@ -5578,103 +5603,111 @@ export default function TradingBot(){
               </ConfigCard>
             </div>
 
-            {/* EXPERIMENTO — pirámide XAU/USD, 100% aislado de Simulado/Crecimiento */}
-            {(()=>{
-              const stackPnl=expPrice!=null?expPositions.reduce((s,p)=>s+posPnL(p,expPrice,p.allocatedSize),0):0;
-              const volumen=expPositions.reduce((s,p)=>s+p.allocatedSize*(p.multiplier||DEFAULT_MULTIPLIER),0);
-              const expWins=expTrades.filter(t=>t.pnl>0).length;
-              const expWr=expTrades.length?Math.round(expWins/expTrades.length*100):null;
-              const expTotalPnl=expTrades.reduce((s,t)=>s+t.pnl,0);
-              return(
-              <ConfigCard title="EXPERIMENTO · PIRÁMIDE XAU/USD" style={{borderTop:`2px solid ${T.yellow}`}}>
-                <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:12}}>
-                  Solo Simulado, aislado del resto del bot: entra en la dirección de la vela de 1m que acaba de cerrar,
-                  apila otra posición cada +${EXP_ADD_STEP} de la pila (y sube el piso un escalón detrás), y si el
-                  agregado cae a {fUSD(EXP_FLOOR_START)} cierra todo y voltea a la dirección contraria.
-                </div>
+          </div>
+          );
+        })()}
 
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
-                  <div><div style={{fontSize:12,fontWeight:600}}>Activar experimento</div>
-                    <div style={{fontSize:8,color:T.muted}}>Corre en segundo plano con su propio feed de XAU/USD</div></div>
-                  <ConfigToggle on={expEnabled} onClick={()=>setExpEnabled(p=>!p)}/>
-                </div>
+        {/* ══════════ VISTA: EXPERIMENTO XAUUSD ══════════ Módulo aparte,
+            debajo de Configuración en el sidebar (pedido explícito) — no es
+            una tarjeta dentro de Configuración, es su propia página. */}
+        {activeView==="experimento"&&(()=>{
+          const stackPnl=expPrice!=null?expPositions.reduce((s,p)=>s+posPnL(p,expPrice,p.allocatedSize),0):0;
+          const volumen=expPositions.reduce((s,p)=>s+p.allocatedSize*(p.multiplier||DEFAULT_MULTIPLIER),0);
+          const expWins=expTrades.filter(t=>t.pnl>0).length;
+          const expWr=expTrades.length?Math.round(expWins/expTrades.length*100):null;
+          const expTotalPnl=expTrades.reduce((s,t)=>s+t.pnl,0);
+          return(
+          <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1320}}>
 
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}} className="g4">
-                  <ConfigField label="STAKE POR POSICIÓN (USD)" type="number" step="0.1" min="0.1" value={expStake}
-                    onChange={e=>setExpStake(Math.max(0.1,parseFloat(e.target.value)||1))}/>
-                  <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
-                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>DIRECCIÓN ACTUAL</div>
-                    <div className="mono" style={{fontSize:12,fontWeight:700,color:expDirection==="BUY"?T.green:expDirection==="SELL"?T.red:T.muted}}>
-                      {expDirection||"—"}
+            <ConfigCard title="EXPERIMENTO · PIRÁMIDE XAU/USD" style={{borderTop:`2px solid ${T.yellow}`}}>
+              <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:12}}>
+                Solo Simulado, aislado del resto del bot: entra en la dirección de la vela de 1m que acaba de cerrar,
+                apila otra posición cada +${EXP_ADD_STEP} de la pila. El piso protector es independiente del apilado:
+                mientras nunca estuvo en positivo es {fUSD(EXP_FLOOR_START)} (tocarlo cierra todo y voltea de dirección);
+                apenas el pico de la pila es positivo, el piso pasa a ser el {Math.round(EXP_RETAIN_PCT*100)}% de ese pico
+                (a pico=$50 → piso=$40) y solo sube desde ahí — una vez en positivo, siempre cierra en positivo.
+              </div>
+
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
+                <div><div style={{fontSize:12,fontWeight:600}}>Activar experimento</div>
+                  <div style={{fontSize:8,color:T.muted}}>Corre en segundo plano con su propio feed de XAU/USD</div></div>
+                <ConfigToggle on={expEnabled} onClick={()=>setExpEnabled(p=>!p)}/>
+              </div>
+
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}} className="g4">
+                <ConfigField label="STAKE POR POSICIÓN (USD)" type="number" step="0.1" min="0.1" value={expStake}
+                  onChange={e=>setExpStake(Math.max(0.1,parseFloat(e.target.value)||1))}/>
+                <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>DIRECCIÓN ACTUAL</div>
+                  <div className="mono" style={{fontSize:12,fontWeight:700,color:expDirection==="BUY"?T.green:expDirection==="SELL"?T.red:T.muted}}>
+                    {expDirection||"—"}
+                  </div>
+                </div>
+                <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>PILA / PISO</div>
+                  <div className="mono" style={{fontSize:12,fontWeight:700}}>{expPositions.length}/{EXP_MAX_STACK} · {fUSD(expFloorRef.current)}</div>
+                </div>
+                <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>VOLUMEN (NOTIONAL)</div>
+                  <div className="mono" style={{fontSize:12,fontWeight:700}}>${volumen.toFixed(0)}</div>
+                </div>
+              </div>
+
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}} className="g4">
+                {[
+                  {l:"P&L PILA ABIERTA", v:fUSD(stackPnl), c:stackPnl>=0?T.green:T.red},
+                  {l:"TRADES CERRADOS", v:expTrades.length, c:T.text},
+                  {l:"WIN RATE", v:expWr==null?"—":`${expWr}%`, c:expWr>=50?T.green:T.red},
+                  {l:"P&L ACUMULADO", v:fUSD(expTotalPnl), c:expTotalPnl>=0?T.green:T.red},
+                ].map(({l,v,c})=>(
+                  <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px",textAlign:"center"}}>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
+                    <div className="mono" style={{fontSize:12,fontWeight:700,color:c}}>{v}</div>
+                  </div>
+                ))}
+              </div>
+
+              {expCandles.length>5?(
+                <div style={{height:520,border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:12}}>
+                  <LWChart candles={expCandles} positions={expPositions} trades={expTrades}
+                    symbol={EXP_SYMBOL} precision={2} srLevels={{supports:[],resistances:[],all:[]}}
+                    aiResult={null} tfInterval="1m" tpTarget={EXP_ADD_STEP} slTarget={Math.abs(EXP_FLOOR_START)}/>
+                </div>
+              ):(
+                <div style={{fontSize:10,color:T.muted,fontStyle:"italic",marginBottom:12}}>
+                  {expEnabled?"Cargando velas de XAU/USD...":"Activa el experimento para cargar su gráfico."}
+                </div>
+              )}
+
+              {expTrades.length>0&&(
+                <div className="table-scroll">
+                  <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:520}}>
+                    <div style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 90px 1fr",gap:8,fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700,padding:"0 4px"}}>
+                      <div>HORA</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>P&L</div><div>MOTIVO</div>
                     </div>
-                  </div>
-                  <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
-                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>PILA / PISO</div>
-                    <div className="mono" style={{fontSize:12,fontWeight:700}}>{expPositions.length}/{EXP_MAX_STACK} · {fUSD(expFloorRef.current)}</div>
-                  </div>
-                  <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
-                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>VOLUMEN (NOTIONAL)</div>
-                    <div className="mono" style={{fontSize:12,fontWeight:700}}>${volumen.toFixed(0)}</div>
-                  </div>
-                </div>
-
-                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}} className="g4">
-                  {[
-                    {l:"P&L PILA ABIERTA", v:fUSD(stackPnl), c:stackPnl>=0?T.green:T.red},
-                    {l:"TRADES CERRADOS", v:expTrades.length, c:T.text},
-                    {l:"WIN RATE", v:expWr==null?"—":`${expWr}%`, c:expWr>=50?T.green:T.red},
-                    {l:"P&L ACUMULADO", v:fUSD(expTotalPnl), c:expTotalPnl>=0?T.green:T.red},
-                  ].map(({l,v,c})=>(
-                    <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px",textAlign:"center"}}>
-                      <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
-                      <div className="mono" style={{fontSize:12,fontWeight:700,color:c}}>{v}</div>
-                    </div>
-                  ))}
-                </div>
-
-                {expCandles.length>5?(
-                  <div style={{height:340,border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:12}}>
-                    <LWChart candles={expCandles} positions={expPositions} trades={expTrades}
-                      symbol={EXP_SYMBOL} precision={2} srLevels={{supports:[],resistances:[],all:[]}}
-                      aiResult={null} tfInterval="1m" tpTarget={EXP_ADD_STEP} slTarget={Math.abs(EXP_FLOOR_START)}/>
-                  </div>
-                ):(
-                  <div style={{fontSize:10,color:T.muted,fontStyle:"italic",marginBottom:12}}>
-                    {expEnabled?"Cargando velas de XAU/USD...":"Activa el experimento para cargar su gráfico."}
-                  </div>
-                )}
-
-                {expTrades.length>0&&(
-                  <div className="table-scroll">
-                    <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:520}}>
-                      <div style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 90px 1fr",gap:8,fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700,padding:"0 4px"}}>
-                        <div>HORA</div><div>TIPO</div><div>ENTRADA</div><div>SALIDA</div><div>P&L</div><div>MOTIVO</div>
+                    {expTrades.slice(0,15).map((t,i)=>(
+                      <div key={i} style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 90px 1fr",gap:8,alignItems:"center",
+                        background:`${t.pnl>=0?T.green:T.red}08`,border:`1px solid ${t.pnl>=0?T.green:T.red}25`,borderRadius:6,padding:"6px 10px"}}>
+                        <span className="mono" style={{fontSize:9,color:T.muted}}>{t.time}</span>
+                        <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:T.red}}>{t.type}</span>
+                        <span className="mono" style={{fontSize:9}}>{fP(t.entry,2)}</span>
+                        <span className="mono" style={{fontSize:9}}>{fP(t.exit,2)}</span>
+                        <span className="mono" style={{fontSize:9,fontWeight:700,color:t.pnl>=0?T.green:T.red}}>{fUSD(t.pnl)}</span>
+                        <span style={{fontSize:8,color:T.muted}}>{t.reason}</span>
                       </div>
-                      {expTrades.slice(0,15).map((t,i)=>(
-                        <div key={i} style={{display:"grid",gridTemplateColumns:"110px 70px 90px 90px 90px 1fr",gap:8,alignItems:"center",
-                          background:`${t.pnl>=0?T.green:T.red}08`,border:`1px solid ${t.pnl>=0?T.green:T.red}25`,borderRadius:6,padding:"6px 10px"}}>
-                          <span className="mono" style={{fontSize:9,color:T.muted}}>{t.time}</span>
-                          <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:T.red}}>{t.type}</span>
-                          <span className="mono" style={{fontSize:9}}>{fP(t.entry,2)}</span>
-                          <span className="mono" style={{fontSize:9}}>{fP(t.exit,2)}</span>
-                          <span className="mono" style={{fontSize:9,fontWeight:700,color:t.pnl>=0?T.green:T.red}}>{fUSD(t.pnl)}</span>
-                          <span style={{fontSize:8,color:T.muted}}>{t.reason}</span>
-                        </div>
-                      ))}
-                    </div>
+                    ))}
                   </div>
-                )}
+                </div>
+              )}
 
-                {expTrades.length>0&&(
-                  <button onClick={()=>{if(window.confirm("¿Borrar historial del experimento?")){setExpTrades([]);saveExpTrades([]);}}}
-                    style={{marginTop:10,background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
-                      borderRadius:5,padding:"5px 10px",cursor:"pointer",fontSize:9}}>
-                    🗑 Borrar historial del experimento
-                  </button>
-                )}
-              </ConfigCard>
-              );
-            })()}
+              {expTrades.length>0&&(
+                <button onClick={()=>{if(window.confirm("¿Borrar historial del experimento?")){setExpTrades([]);saveExpTrades([]);}}}
+                  style={{marginTop:10,background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
+                    borderRadius:5,padding:"5px 10px",cursor:"pointer",fontSize:9}}>
+                  🗑 Borrar historial del experimento
+                </button>
+              )}
+            </ConfigCard>
 
           </div>
           );

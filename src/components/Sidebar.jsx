@@ -14,6 +14,10 @@ const NAV = [
   { id: "signals", label: "Señales", d: "M11 19a8 8 0 100-16 8 8 0 000 16zM21 21l-4.3-4.3" },
   { id: "historico", label: "Histórico", d: "M12 21a9 9 0 100-18 9 9 0 000 18zM12 7v5l3.5 2" },
   { id: "config", label: "Configuración", d: "M19.4 13a8 8 0 000-2l2.1-1.6-2-3.5-2.5 1a8 8 0 00-1.7-1L14.9 3h-4l-.4 2.9a8 8 0 00-1.7 1l-2.5-1-2 3.5L6.4 11a8 8 0 000 2l-2.1 1.6 2 3.5 2.5-1a8 8 0 001.7 1l.4 2.9h4l.4-2.9a8 8 0 001.7-1l2.5 1 2-3.5L19.4 13zM12 15a3 3 0 100-6 3 3 0 000 6z" },
+  // Debajo de Configuración a propósito — módulo aparte, no una tarjeta
+  // dentro de Configuración (pedido explícito): su propio feed de XAU/USD,
+  // su propio gráfico, aislado de Simulado/Crecimiento.
+  { id: "experimento", label: "Experimento XAUUSD", d: "M9 3h6M10 3v5.5L5.5 17a2 2 0 001.8 3h9.4a2 2 0 001.8-3L14 8.5V3M8.5 14h7" },
 ];
 
 function Icon({ d, size = 17 }) {
