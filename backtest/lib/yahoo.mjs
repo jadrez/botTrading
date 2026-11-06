@@ -17,11 +17,28 @@ export async function fetchYahooHistory(yahooSymbol, { days = 365, interval = "1
 
   const timestamps = result.timestamp || [];
   const q = result.indicators?.quote?.[0] || {};
-  const candles = timestamps
+  let candles = timestamps
     .map((t, i) => ({
       time: t, o: q.open?.[i], h: q.high?.[i], l: q.low?.[i], c: q.close?.[i], v: q.volume?.[i] || 0,
     }))
     .filter(c => c.o != null && c.h != null && c.l != null && c.c != null);
+
+  // Same sanity filter as api/forex.js — Yahoo's commodity feeds (esp. CL=F /
+  // XTI) occasionally return a one-off garbage candle (verified live: a
+  // ~50x price spike on CL=F). A backtest over a year of 1h bars is exactly
+  // the kind of window where one of these can slip in silently and corrupt
+  // the walk-forward result for that symbol (XTI/USD came back 0/4
+  // profitable folds — plausibly influenced by this, not necessarily a real
+  // absence of edge). Drop anything too far from the series' own median.
+  if (candles.length > 10) {
+    const sortedCloses = [...candles.map(c => c.c)].sort((a, b) => a - b);
+    const median = sortedCloses[Math.floor(sortedCloses.length / 2)];
+    candles = candles.filter(c =>
+      c.c > median * 0.5 && c.c < median * 2 &&
+      c.h > median * 0.5 && c.h < median * 2 &&
+      c.l > median * 0.5 && c.l < median * 2
+    );
+  }
 
   return candles;
 }

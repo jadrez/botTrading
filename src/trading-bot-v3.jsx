@@ -195,6 +195,14 @@ function calcRSI(closes,p=14){
   for(let i=closes.length-p;i<closes.length;i++){const d=closes[i]-closes[i-1];d>0?g+=d:l-=d;}
   return 100-100/(1+g/(l||.0001));
 }
+// RSI at EVERY point in the series (not just the latest), aligned index-for-
+// index with `closes` — needed to compare RSI's value AT a specific past
+// pivot (for divergence detection) instead of only its current reading.
+// calcRSI only ever looks at its last `p` closes regardless of array length,
+// so this is cheap (O(p) per point) even over a few hundred candles.
+function calcRSISeries(closes,p=14){
+  return closes.map((_,i)=>i>=p?calcRSI(closes.slice(0,i+1),p):50);
+}
 function calcEMA(arr,p){const k=2/(p+1);let e=arr[0];for(let i=1;i<arr.length;i++)e=arr[i]*k+e*(1-k);return e;}
 function calcMACD(closes){
   if(closes.length<26)return{macd:0,signal:0,hist:0};
@@ -308,6 +316,31 @@ function detectCandlePatterns(candles){
   if(p2.c>p2.o && Math.abs(p.c-p.o)<Math.abs(p2.c-p2.o)*0.3 && c.c<c.o && c.c<p2.o)
     results.push({name:"Evening Star", signal:"BEARISH", type:"REVERSAL", conf:74, emoji:"🌆",
       desc:"Patrón de 3 velas: alcista → indecisión → bajista. Señal de techo y cambio de tendencia."});
+
+  // ── Rechazo en EMA200 (confluencia técnica) — pedido explícitamente para
+  // oro/plata/petróleo, que se mueven más lento y dan más tiempo de
+  // reacción que forex/cripto. Combina los 3 elementos descritos: 1) el
+  // precio toca un nivel estructural institucional (EMA200) 2) el RSI está
+  // sobrecomprado/sobrevendido EN ESE MISMO momento 3) la vela de ese toque
+  // muestra rechazo (mecha larga, cuerpo chico) — la confirmación de que
+  // los vendedores/compradores ya tomaron el control, no una predicción a
+  // ciegas. Igual que todo lo demás aquí, queda trackeado por símbolo vía
+  // byPattern/getPatternAdjustment, así que con el tiempo se puede ver si
+  // también funciona en forex/cripto o es específico de materias primas.
+  if(candles.length>=200){
+    const closesAll=candles.map(cc=>cc.c);
+    const ema200=calcEMA(closesAll,200);
+    const rsi=calcRSI(closesAll);
+    const touchTol=0.006; // ~0.6% de la EMA200 cuenta como "toque"
+    const touchedFromBelow=Math.abs(c.h-ema200)/ema200<touchTol && c.c<ema200;
+    const touchedFromAbove=Math.abs(c.l-ema200)/ema200<touchTol && c.c>ema200;
+    if(touchedFromBelow && rsi>=70 && upperWick>body*1.3)
+      results.push({name:"Rechazo Bajista EMA200", signal:"BEARISH", type:"REVERSAL", conf:78, emoji:"⊥",
+        desc:"Precio tocó la EMA200 desde abajo con RSI en sobrecompra (≥70) y mecha de rechazo arriba → confluencia técnica de giro bajista."});
+    if(touchedFromAbove && rsi<=30 && lowerWick>body*1.3)
+      results.push({name:"Rechazo Alcista EMA200", signal:"BULLISH", type:"REVERSAL", conf:78, emoji:"⊤",
+        desc:"Precio tocó la EMA200 desde arriba con RSI en sobreventa (≤30) y mecha de rechazo abajo → confluencia técnica de giro alcista."});
+  }
 
   return results;
 }
@@ -673,6 +706,26 @@ function detectPatterns(candles){
         results.push({name:"Bearish Pennant", signal:"BEARISH", type:"CONTINUATION", conf:69, emoji:"⊿↓",
           desc:"Fuerte movimiento bajista + triángulo simétrico → consolidación breve antes de continuar a la baja."});
     }
+  }
+
+  // ── Divergencia RSI (la señal predictiva por excelencia para anticipar un
+  // giro, descrita explícitamente como pedido: el precio hace un extremo más
+  // marcado pero el RSI NO lo confirma → el impulso detrás del movimiento se
+  // está agotando, antes de que el precio mismo lo muestre). Compara los dos
+  // últimos pivotes (ya calculados arriba por findPivots) contra el RSI que
+  // tenía el mercado EN ese mismo pivote, no el RSI actual.
+  const rsiSeries=calcRSISeries(recent.map(cc=>cc.c));
+  if(highs.length>=2){
+    const [h1,h2]=highs.slice(-2);
+    if(h2.price>h1.price*1.001 && rsiSeries[h2.idx]<rsiSeries[h1.idx]-3 && rsiSeries[h1.idx]>55)
+      results.push({name:"Divergencia Bajista RSI", signal:"BEARISH", type:"REVERSAL", conf:74, emoji:"÷",
+        desc:"El precio hace un máximo más alto pero el RSI hace un máximo más bajo → el impulso alcista se agota, posible giro bajista."});
+  }
+  if(lows.length>=2){
+    const [l1,l2]=lows.slice(-2);
+    if(l2.price<l1.price*0.999 && rsiSeries[l2.idx]>rsiSeries[l1.idx]+3 && rsiSeries[l1.idx]<45)
+      results.push({name:"Divergencia Alcista RSI", signal:"BULLISH", type:"REVERSAL", conf:74, emoji:"÷",
+        desc:"El precio hace un mínimo más bajo pero el RSI hace un mínimo más alto → la presión vendedora se agota, posible giro alcista."});
   }
 
   return results;

@@ -34,6 +34,24 @@ async function fetchFromYahoo(from, to, wantCandles, limit, interval = "1m", yah
     }))
     .filter(c => c.o != null && c.h != null && c.l != null && c.c != null);
 
+  // Sanity filter: Yahoo's commodity feeds (esp. CL=F / XTI/USD) occasionally
+  // return a one-off garbage candle — verified live: a single 1m bar for CL=F
+  // came back ~$4000-5000 (real price was ~$95), a ~50x spike that blew up
+  // every EMA on the chart (908/421/135 instead of real ~95) and made the
+  // real candles invisible once the chart's y-axis autoscaled to fit it. A
+  // lone bad print can't move a median, so dropping anything too far from
+  // the series' own median close is robust to exactly this kind of glitch
+  // without needing to know the "correct" price ahead of time.
+  if (candles.length > 10) {
+    const sortedCloses = [...candles.map(c => c.c)].sort((a, b) => a - b);
+    const median = sortedCloses[Math.floor(sortedCloses.length / 2)];
+    candles = candles.filter(c =>
+      c.c > median * 0.5 && c.c < median * 2 &&
+      c.h > median * 0.5 && c.h < median * 2 &&
+      c.l > median * 0.5 && c.l < median * 2
+    );
+  }
+
   // Aggregate 1m → 5m / 15m / 4h as needed
   const aggMap = { "5m": 5, "15m": 15, "4h": 4 };
   if (aggMap[interval]) {
