@@ -429,6 +429,17 @@ const EXP_BINANCE="PAXGUSDT";
 const EXP_ADD_STEP=50;    // $ — cada incremento de esto en el P&L de la pila apila otra posición
 const EXP_RETAIN_PCT=0.8; // una vez el pico de la pila es positivo, el piso = pico×este % (20% de giveback)
 const EXP_FLOOR_START=-50; // $ — piso inicial (antes de haber estado nunca en positivo)
+// Desde cuánto pico POSITIVO arranca a proteger el piso — pedido original
+// explícito: "el SL... colocarlo lo más rápido posible... así sea de 10 USD
+// positivos". Primera versión armaba desde CUALQUIER centavo positivo (muy
+// frágil a stake alto, un solo tick podía atravesarlo — ver fix anterior).
+// Segunda versión lo gateó a un paso completo de apilado (expAddStep,
+// hasta $50) — demasiado conservador: con eso, un pico de +$10/+$15 no
+// protegía NADA y la pila podía caer hasta el piso inicial completo
+// (ej. -$40) sin que el +$10 nunca se hubiera "guardado". Esta es la
+// tercera versión: un umbral FIJO y chico ($10, igual al número del
+// pedido original), independiente de qué tan grande sea expAddStep.
+const EXP_FLOOR_ARM_AT=10; // $ — pico mínimo antes de que el piso empiece a subir
 const EXP_MAX_STACK=10;  // límite de seguridad de posiciones apiladas a la vez
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
@@ -2039,18 +2050,15 @@ export default function TradingBot(){
       const stackPnl=expPositionsRef.current.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize),0);
       expStackPeakRef.current=Math.max(expStackPeakRef.current,stackPnl);
       // Piso continuo, DESACOPLADO del apilado: mientras el pico de la pila
-      // no haya alcanzado al menos un paso completo de apilado (expAddStep —
-      // el mismo "a pico=$50 → piso=$40" del ejemplo original), el piso se
-      // queda en expFloorStart (editable, -50 por defecto). BUG encontrado
-      // en vivo: antes esto arrancaba a proteger desde el primer centavo
-      // positivo (peak>0), así que un pico fugaz de $0.50 ya movía el piso a
-      // +$0.40 — a stake alto, el siguiente tick (que puede mover $50+ de
-      // un salto) pasaba de largo ese piso casi-cero y cerraba en pérdida
-      // chica, pareciendo "se repite/desaparece" cuando en realidad era un
-      // volteo real, solo que mal protegido. Con el piso de $0.40 por un
-      // pico de $0.50 esto nunca podía cumplir "una vez en positivo, siempre
-      // cierra en positivo" contra un movimiento de esa magnitud.
-      if(expStackPeakRef.current>=expAddStepRef.current){
+      // no haya alcanzado EXP_FLOOR_ARM_AT ($10 — el número del pedido
+      // original, "así sea de 10 USD positivos"), el piso se queda en
+      // expFloorStart. Reportado en vivo: con el gate puesto en expAddStep
+      // (hasta $50), un pico de +$10/+$15/+$30 no alcanzaba a proteger NADA
+      // y la pila terminaba cerrando en pérdida grande pese a haber tocado
+      // positivo — justo lo que "colocar el SL lo más rápido posible" pedía
+      // evitar. Con el umbral fijo en $10, un pico de +$10 ya deja el piso
+      // en +$8 (80% de retención) — no puede volver a caer tan lejos.
+      if(expStackPeakRef.current>=EXP_FLOOR_ARM_AT){
         expFloorRef.current=Math.max(expFloorRef.current, expStackPeakRef.current*EXP_RETAIN_PCT);
       }
       persistLive(); // guarda el pico/piso actualizado en cada tick, no solo al apilar/cerrar
@@ -5756,8 +5764,8 @@ export default function TradingBot(){
               <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:12}}>
                 Solo Simulado, aislado del resto del bot: entra en la dirección de la vela de 1m que acaba de cerrar,
                 apila otra posición cada +${expAddStep} de la pila. El piso protector es independiente del apilado:
-                mientras el pico de la pila no llegue a +${expAddStep} es {fUSD(expFloorStart)} (tocarlo cierra todo y
-                voltea de dirección); apenas el pico alcanza +${expAddStep}, el piso pasa a ser el {Math.round(EXP_RETAIN_PCT*100)}%
+                mientras el pico de la pila no llegue a +${EXP_FLOOR_ARM_AT} es {fUSD(expFloorStart)} (tocarlo cierra todo y
+                voltea de dirección); apenas el pico alcanza +${EXP_FLOOR_ARM_AT}, el piso pasa a ser el {Math.round(EXP_RETAIN_PCT*100)}%
                 de ese pico y solo sube desde ahí — una vez ahí, siempre cierra en positivo. El stake es lo que determina
                 qué tan rápido se mueven estos $: PnL($) = %movimiento_del_precio × stake × 100 — con este stake,
                 el oro necesita moverse <b>{((expAddStep/(expStake*DEFAULT_MULTIPLIER))*100).toFixed(3)}%</b> para
@@ -5782,7 +5790,7 @@ export default function TradingBot(){
                   onChange={e=>setExpFloorStart(Math.min(-1,parseFloat(e.target.value)||-50))}/>
               </div>
 
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}} className="g3">
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}} className="g4">
                 <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>DIRECCIÓN ACTUAL</div>
                   <div className="mono" style={{fontSize:12,fontWeight:700,color:expDirection==="BUY"?T.green:expDirection==="SELL"?T.red:T.muted}}>
@@ -5796,6 +5804,10 @@ export default function TradingBot(){
                 <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>VOLUMEN (NOTIONAL)</div>
                   <div className="mono" style={{fontSize:12,fontWeight:700}}>${volumen.toFixed(0)}</div>
+                </div>
+                <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}} title="lotes = volumen notional / (100 oz/lote × precio) — la misma unidad que MT5/MT4">
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>VOLUMEN MT5 (LOTES)</div>
+                  <div className="mono" style={{fontSize:12,fontWeight:700}}>{expPrice?(volumen/(100*expPrice)).toFixed(3):"—"}</div>
                 </div>
               </div>
 
