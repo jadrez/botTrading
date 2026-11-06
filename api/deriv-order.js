@@ -54,14 +54,32 @@ function authHeaders(token, appId) {
   return { "Authorization": `Bearer ${token}`, "Deriv-App-ID": String(appId), "Content-Type": "application/json" };
 }
 
+// El account_id no cambia entre llamadas — cachearlo ahorra UNA de las 3
+// llamadas de red encadenadas que cada apertura/cierre necesita (accounts +
+// otp + conexión WS), que es justo lo que hacía sentir lento un cierre
+// manual (reportado en vivo: "en DTrader cierra rápido, aquí se demora").
+// La conexión PERSISTENTE y autenticada que usa DTrader (API clásica,
+// wss://ws.derivws.com) no es una opción: verificado en vivo que ese
+// endpoint está bloqueado (error 520) tanto desde Fly como localmente, con
+// o sin token — no es cosa del token, el canal mismo no es alcanzable desde
+// esta infraestructura. Este cache es la optimización real que sí se puede
+// aplicar sin esa vía.
+const accountCache = new Map(); // `${token}:${wantType}` -> {account, ts}
+const ACCOUNT_CACHE_TTL = 10 * 60 * 1000;
+
 async function pickAccount(token, appId, wantType) {
+  const cacheKey = `${token}:${wantType}`;
+  const cached = accountCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ACCOUNT_CACHE_TTL) return cached.account;
   const r = await fetch(`${REST_BASE}/accounts`, { headers: authHeaders(token, appId) });
   const text = await r.text();
   if (!r.ok) throw new Error(`accounts failed (${r.status}): ${text.slice(0, 300)}`);
   let data; try { data = JSON.parse(text); } catch { throw new Error(`accounts: non-JSON response: ${text.slice(0, 300)}`); }
   const accounts = data?.data || [];
   if (!accounts.length) throw new Error("No Deriv accounts found for this token");
-  return accounts.find(a => a.account_type === wantType) || accounts[0];
+  const account = accounts.find(a => a.account_type === wantType) || accounts[0];
+  accountCache.set(cacheKey, { account, ts: Date.now() });
+  return account;
 }
 
 async function getOtpWsUrl(token, appId, accountId) {
