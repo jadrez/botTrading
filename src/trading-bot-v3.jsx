@@ -401,7 +401,24 @@ function loadTrades(){ try{return JSON.parse(localStorage.getItem(LS_TRADES)||"[
    POSITIVA de un pico ya positivo, una vez que la pila tocó positivo
    cualquier cierre posterior por este piso queda garantizado en positivo
    — "siempre vamos a requerir en cerrar en positivo". */
-const EXP_SYMBOL="XAU/USD", EXP_YAHOO="GC=F";
+const EXP_SYMBOL="XAU/USD";
+// Fuente de precio EN VIVO del motor: PAXG/USDT en Binance (oro tokenizado,
+// respaldado 1:1 por una onza de oro físico), NO el GC=F de Yahoo de arriba.
+// Verificado en vivo: Yahoo's commodity quote (usado en el resto de la app
+// para oro/plata/petróleo) solo se refresca cada ~10-15s en su propio
+// backend — pedir el precio más seguido no lo adelanta, es un límite del
+// dato en sí. Deriv tampoco sirve: ya se confirmó antes (ver api/deriv-
+// order.js / comentarios del efecto de precio) que frxXAUUSD rechaza la
+// suscripción en vivo con InvalidSymbol — reintentado en esta sesión desde
+// el servidor de producción y desde un navegador real, ambos bloqueados a
+// nivel de red antes de llegar a Deriv. Binance SÍ da ticks genuinamente en
+// vivo (mismo mecanismo ya comprobado para ETH/BTC/SOL) — PAXG seguía el
+// spot del oro con ~98-297 operaciones/minuto al verificarlo. Diferencia
+// honesta: PAXG tiene su propia base (~0.5-1% distinto al spot exacto de
+// Yahoo en un momento dado) por ser un instrumento tokenizado, no spot
+// puro — trade-off aceptado a cambio de movimiento real cada 1-2s en vez
+// de cada ~15s.
+const EXP_BINANCE="PAXGUSDT";
 // EXP_ADD_STEP/EXP_FLOOR_START son los valores por defecto — ambos quedaron
 // editables en vivo (ver expAddStep/expFloorStart más abajo) porque son en
 // realidad una función del STAKE: PnL($) = %movimiento_precio × stake × 100,
@@ -2056,58 +2073,59 @@ export default function TradingBot(){
       addExpPos(dir);
     };
 
+    // Binance klines → {time(seg), o,h,l,c,v} — mismo shape que usa el resto
+    // de la app, solo que la fuente es Binance en vez de Yahoo.
+    const fetchBinanceKlines=async(interval,limit)=>{
+      const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${EXP_BINANCE}&interval=${interval}&limit=${limit}`);
+      const raw=await r.json();
+      if(!Array.isArray(raw)) return null;
+      return raw.map(k=>({time:Math.floor(k[0]/1000),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
+    };
+
     (async()=>{
       try{
-        const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({yahooSym:EXP_YAHOO,candles:true,limit:300,interval:"1m"})});
+        const candles=await fetchBinanceKlines("1m",300);
         if(!alive) return;
-        if(r.ok){
-          const d=await r.json();
-          if(d.candles?.length>5){
-            setExpCandles(d.candles);
-            const last=d.candles.at(-1);
-            expPriceRef.current=last.c; setExpPrice(last.c);
-          }
+        if(candles?.length>5){
+          setExpCandles(candles);
+          const last=candles.at(-1);
+          expPriceRef.current=last.c; setExpPrice(last.c);
         }
       }catch{}
     })();
 
     // Serie aparte de 1h SOLO para el gráfico — mismo precio en vivo, pero
     // en barras más grandes para que el movimiento se vea a simple vista
-    // (en 1m, un tick de 5s apenas mueve el último bar un pixel).
+    // (en 1m, un tick muy rápido apenas mueve el último bar un pixel).
     (async()=>{
       try{
-        const r=await fetch("/api/forex",{method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({yahooSym:EXP_YAHOO,candles:true,limit:300,interval:"1h"})});
+        const candles=await fetchBinanceKlines("1h",300);
         if(!alive) return;
-        if(r.ok){
-          const d=await r.json();
-          if(d.candles?.length>5) setExpChartCandles(d.candles);
-        }
+        if(candles?.length>5) setExpChartCandles(candles);
       }catch{}
     })();
 
-    // Guard de reentrancia: setInterval dispara cada 5s SIN esperar a que
-    // el callback anterior termine — si fetchCommodityRateCached alguna vez
-    // tarda más de 5s (red lenta), dos ticks podían solaparse y evaluar/
+    // Guard de reentrancia: setInterval dispara cada 1s SIN esperar a que
+    // el callback anterior termine — si la llamada a Binance alguna vez
+    // tarda más de 1s (red lenta), dos ticks podían solaparse y evaluar/
     // modificar expPositionsRef.current al mismo tiempo (dos apilados o dos
     // volteos para el mismo cruce de umbral).
-    // BUG encontrado en vivo apenas desplegado esto: fetch() no tiene
-    // ningún timeout — si esa llamada alguna vez se cuelga de verdad (no
-    // solo "lenta", sino que nunca resuelve ni falla), "ticking" se queda
-    // en true PARA SIEMPRE y el motor entero se congela — el gráfico dejó
-    // de moverse después de ~10s, exactamente este caso. Se vuelve auto-
-    // recuperable: si el tick anterior lleva más de 12s "corriendo" (mucho
-    // más que el roundtrip normal), se asume colgado y se deja pasar el
-    // siguiente de todas formas en vez de bloquear para siempre.
+    // Auto-recuperable: fetch() no tiene timeout — si esa llamada alguna vez
+    // se cuelga de verdad (no solo "lenta", sino que nunca resuelve ni
+    // falla), sin esto "ticking" se quedaría en true para siempre y el
+    // motor entero se congelaría. Si el tick anterior lleva más de 10s
+    // "corriendo" (muy por encima del roundtrip normal), se asume colgado y
+    // se deja pasar el siguiente de todas formas.
     let ticking=false, tickStartedAt=0;
     const iv=setInterval(async()=>{
       const now=Date.now();
       if(!alive) return;
-      if(ticking && (now-tickStartedAt)<12000) return;
+      if(ticking && (now-tickStartedAt)<10000) return;
       ticking=true; tickStartedAt=now;
       try{
-      const np=await fetchCommodityRateCached(EXP_YAHOO,5000);
+      const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${EXP_BINANCE}`);
+      const d=await r.json();
+      const np=parseFloat(d.price);
       if(!np||isNaN(np)||!alive) return;
       expPriceRef.current=np; setExpPrice(np);
       const nowSec=Math.floor(Date.now()/1000);
@@ -2142,7 +2160,7 @@ export default function TradingBot(){
       });
       evaluateStack();
       }finally{ ticking=false; }
-    },5000);
+    },1000);
 
     return()=>{alive=false; clearInterval(iv);};
   },[expEnabled,addLog]);
@@ -5738,12 +5756,15 @@ export default function TradingBot(){
               <div style={{fontSize:9,color:T.muted,marginTop:-4,marginBottom:12}}>
                 Solo Simulado, aislado del resto del bot: entra en la dirección de la vela de 1m que acaba de cerrar,
                 apila otra posición cada +${expAddStep} de la pila. El piso protector es independiente del apilado:
-                mientras nunca estuvo en positivo es {fUSD(expFloorStart)} (tocarlo cierra todo y voltea de dirección);
-                apenas el pico de la pila es positivo, el piso pasa a ser el {Math.round(EXP_RETAIN_PCT*100)}% de ese pico
-                y solo sube desde ahí — una vez en positivo, siempre cierra en positivo. El stake es lo que determina
+                mientras el pico de la pila no llegue a +${expAddStep} es {fUSD(expFloorStart)} (tocarlo cierra todo y
+                voltea de dirección); apenas el pico alcanza +${expAddStep}, el piso pasa a ser el {Math.round(EXP_RETAIN_PCT*100)}%
+                de ese pico y solo sube desde ahí — una vez ahí, siempre cierra en positivo. El stake es lo que determina
                 qué tan rápido se mueven estos $: PnL($) = %movimiento_del_precio × stake × 100 — con este stake,
                 el oro necesita moverse <b>{((expAddStep/(expStake*DEFAULT_MULTIPLIER))*100).toFixed(3)}%</b> para
                 el próximo apilado/volteo (sube el stake si lo quieres más rápido, es solo Simulado).
+                <br/>Precio en vivo cada 1s vía Binance PAXG/USDT (oro tokenizado, respaldado 1:1 por oro físico) —
+                Yahoo/Deriv no dan movimiento real más seguido que ~15s para oro, PAXG sí tiene ticks genuinos; puede
+                diferir ~0.5-1% del spot exacto de XAU/USD por ser un instrumento distinto, no spot puro.
               </div>
 
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
