@@ -28,6 +28,17 @@ const EXP_CANARY_PEAK = 5, EXP_CANARY_MIN_STACK = 3; // ver nota en trading-bot-
 const EXP_HEDGE_TRIGGER_PCT = 0.5; // ver nota en trading-bot-v3.jsx
 const SESSION_ID = `server:${process.env.FLY_MACHINE_ID || "local"}:${Math.random().toString(36).slice(2)}`;
 
+// Ejecución real en Deriv (exp_deriv_live=1): SOLO este motor (servidor) la
+// hace — el cliente (navegador) se niega a reclamar el motor mientras este
+// modo esté activo (ver claimOrCheckOwnership en trading-bot-v3.jsx), así
+// nunca hay dos instancias capaces de abrir/cerrar la MISMA posición real al
+// mismo tiempo. El TP/SL que se le manda a Deriv al abrir es solo una RED DE
+// SEGURIDAD muy amplia (nunca debería dispararse primero) — quien decide
+// cuándo abrir/apilar/voltear sigue siendo exactamente la misma lógica de
+// piso/pirámide/canario/cobertura de siempre; Deriv solo ejecuta la orden.
+const DERIV_SAFETY_SL_MULT = 3; // múltiplo de |floorStart|
+const DERIV_SAFETY_TP = 99999; // prácticamente nunca se alcanza por sí solo
+
 let pool = null;
 function getPool() {
   if (!process.env.DATABASE_URL) return null;
@@ -38,6 +49,20 @@ function getPool() {
 function posPnL(pos, price) {
   const dir = pos.type === "BUY" ? 1 : -1;
   return (dir * (price - pos.entry) / pos.entry) * pos.allocatedSize * (pos.multiplier || DEFAULT_MULTIPLIER);
+}
+
+// Llama al propio /api/deriv-order (mismo proceso, mismo puerto) — reusa el
+// endpoint ya probado en producción en vez de hablar con Deriv directo desde
+// aquí, para no duplicar la lógica de auth/OTP/REST que ya vive en ese archivo.
+async function derivOrderCall(action, body) {
+  const port = process.env.PORT || 8080;
+  const r = await fetch(`http://127.0.0.1:${port}/api/deriv-order`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...body }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data?.error || `deriv-order ${action} failed (${r.status})`);
+  return data;
 }
 
 async function getConfigValue(db, key, fallback) {
@@ -73,8 +98,9 @@ export function startExpEngine() {
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, derivLive: false };
   let lastDbFloor = null, lastDbPosCount = -1;
+  let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
   const log = (msg) => console.log(`[exp-engine] ${msg}`);
 
@@ -85,9 +111,32 @@ export function startExpEngine() {
     await setConfigValue(db, "exp_live_state", JSON.stringify({ positions, direction, floor, addLevel, peak, hedge }));
   };
 
+  const writeTradeRecord = async (c) => {
+    try {
+      await db.query(
+        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.objetivo, c.stop, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime)]
+      );
+    } catch (e) { log(`error writing exp_trades: ${e.message}`); }
+  };
+
   const addExpPos = async (type, pattern = "VELA ANTERIOR") => {
     if (!price || positions.length >= cfg.maxStack) return;
-    const pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern };
+    let pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern };
+    if (cfg.derivLive) {
+      try {
+        const r = await derivOrderCall("open", {
+          symbol: EXP_SYMBOL, side: type, stake: cfg.stake, multiplier: DEFAULT_MULTIPLIER,
+          tpTarget: DERIV_SAFETY_TP, slTarget: Math.abs(cfg.floorStart) * DERIV_SAFETY_SL_MULT,
+        });
+        pos = { ...pos, contractId: r.contractId, derivBuyPrice: r.buyPrice };
+        log(`Deriv: contrato ${r.contractId} abierto (${type}, stake ${cfg.stake})`);
+      } catch (e) {
+        log(`Deriv: ERROR abriendo ${type} — ${e.message} — NO se apila (se reintenta en el próximo tick)`);
+        return; // sin posición local si Deriv falló — evita que diverja de la realidad
+      }
+    }
     positions = [...positions, pos];
     lastPosPeak = 0; // nueva "última" posición — el canario arranca de cero para ella
     lastAddPrice = price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
@@ -95,27 +144,52 @@ export function startExpEngine() {
     await persistLive(true);
   };
 
+  // Cierra UNA posición (real en Deriv si tiene contractId, simulada si no).
+  // ok:false significa "no se pudo confirmar el cierre, reintentar" — nunca
+  // se descarta la posición localmente sin confirmar, para no divergir de lo
+  // que de verdad hay abierto en Deriv.
+  const closeOnePosition = async (pos, exitPrice, extra) => {
+    if (pos.contractId) {
+      try {
+        const r = await derivOrderCall("close", { contractId: pos.contractId });
+        const realPnl = (r.sellPrice ?? 0) - (pos.derivBuyPrice ?? pos.allocatedSize);
+        return { ok: true, record: { ...pos, ...extra, exit: r.sellPrice ?? exitPrice, pnl: realPnl, closeTime: Date.now() } };
+      } catch (e) {
+        // Pudo haberse cerrado ya (reintento tras un fallo de red del intento
+        // anterior) — antes de darlo por fallido, revisa el estado real en
+        // Deriv (mismo patrón de reconciliación que ya usa el bot principal).
+        try {
+          const detail = await derivOrderCall("contract", { contractId: pos.contractId });
+          if (detail.isSold) {
+            const realPnl = detail.profit ?? ((detail.sellPrice ?? 0) - (pos.derivBuyPrice ?? pos.allocatedSize));
+            return { ok: true, record: { ...pos, ...extra, exit: detail.exitSpot ?? exitPrice, pnl: realPnl, closeTime: detail.closeTime || Date.now() } };
+          }
+        } catch {}
+        log(`Deriv: ERROR cerrando contrato ${pos.contractId} — ${e.message} — se reintenta`);
+        return { ok: false };
+      }
+    }
+    return { ok: true, record: { ...pos, ...extra, exit: exitPrice, pnl: posPnL(pos, exitPrice), closeTime: Date.now() } };
+  };
+
+  // allClosed:false dejó en `positions` SOLO las que no se pudieron cerrar —
+  // el caller (flip/manualCloseAll) no debe voltear/resetear hasta que esto
+  // dé allClosed:true, si no se pierde el rastro de un contrato real abierto.
   const closeAllExpPos = async (exitPrice, reason) => {
     // objetivo/stop de la pila en el momento EXACTO del cierre — hay que
     // leerlos ANTES de resetStackTracking (que se llama justo después en
     // flip()), si no quedarían en 0/piso-inicial para el histórico.
     const objetivo = addLevel + cfg.addStep;
     const stop = floor;
-    const closed = positions.map(pos => ({
-      ...pos, symbol: EXP_SYMBOL, exit: exitPrice, pnl: posPnL(pos, exitPrice), reason, objetivo, stop, closeTime: Date.now(),
-    }));
-    positions = [];
-    await persistLive(true);
-    for (const c of closed) {
-      try {
-        await db.query(
-          `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-          [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.objetivo, c.stop, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime)]
-        );
-      } catch (e) { log(`error writing exp_trades: ${e.message}`); }
+    const remaining = [], closedRecords = [];
+    for (const pos of positions) {
+      const { ok, record } = await closeOnePosition(pos, exitPrice, { symbol: EXP_SYMBOL, reason, objetivo, stop });
+      if (ok) closedRecords.push(record); else remaining.push(pos);
     }
-    return closed.reduce((s, c) => s + c.pnl, 0);
+    positions = remaining;
+    await persistLive(true);
+    for (const c of closedRecords) await writeTradeRecord(c);
+    return { totalPnl: closedRecords.reduce((s, c) => s + c.pnl, 0), allClosed: remaining.length === 0 };
   };
 
   const resetStackTracking = () => { floor = cfg.floorStart; addLevel = 0; peak = 0; };
@@ -124,29 +198,25 @@ export function startExpEngine() {
   // objetivo propio, vive y muere con el ciclo que la disparó (ver
   // EXP_HEDGE_TRIGGER_PCT en trading-bot-v3.jsx).
   const closeHedge = async (exitPrice) => {
-    if (!hedge) return 0;
-    const h = hedge;
-    const pnl = posPnL(h, exitPrice);
-    // La cobertura no tiene objetivo/stop propio — se deja constancia del
-    // de LA PILA en ese momento, igual que para cada posición normal.
+    if (!hedge) return { pnl: 0, ok: true };
     const objetivo = addLevel + cfg.addStep;
     const stop = floor;
-    const closedAt = Date.now();
+    const { ok, record } = await closeOnePosition(hedge, exitPrice, { symbol: EXP_SYMBOL, reason: "HEDGE", pattern: "COBERTURA", objetivo, stop });
+    if (!ok) { log("Deriv: no se pudo confirmar el cierre de la cobertura — se reintenta"); return { pnl: 0, ok: false }; }
     hedge = null;
-    try {
-      await db.query(
-        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at)
-         VALUES ($1,$2,$3,$4,$5,'HEDGE','COBERTURA',$6,$7,$8,$9,$10,$11)`,
-        [EXP_SYMBOL, h.type, h.entry, exitPrice, pnl, objetivo, stop, h.allocatedSize, h.multiplier, new Date(h.openTime || closedAt), new Date(closedAt)]
-      );
-    } catch (e) { log(`error writing hedge trade: ${e.message}`); }
-    log(`cobertura cerrada en ${pnl.toFixed(2)}`);
-    return pnl;
+    await writeTradeRecord(record);
+    log(`cobertura cerrada en ${record.pnl.toFixed(2)}`);
+    return { pnl: record.pnl, ok: true };
   };
 
   const flip = async (exitPrice) => {
-    const hedgePnl = await closeHedge(exitPrice);
-    const totalPnl = (await closeAllExpPos(exitPrice, "FLIP")) + hedgePnl;
+    const hedgeResult = await closeHedge(exitPrice);
+    const stackResult = await closeAllExpPos(exitPrice, "FLIP");
+    if (!hedgeResult.ok || !stackResult.allClosed) {
+      log("volteo incompleto (alguna posición no se pudo cerrar en Deriv) — se reintenta en el próximo tick, sin voltear todavía");
+      return;
+    }
+    const totalPnl = stackResult.totalPnl + hedgeResult.pnl;
     const opposite = direction === "BUY" ? "SELL" : "BUY";
     resetStackTracking();
     let note = "";
@@ -157,6 +227,34 @@ export function startExpEngine() {
     log(`pila cerró en ${totalPnl.toFixed(2)} → voltea a ${opposite}${note}`);
     direction = opposite;
     await addExpPos(opposite, "VOLTEO");
+  };
+
+  // ── Cierre manual (botón "Cerrar"/"Cerrar todo" en la UI) ───────────────
+  // A diferencia de flip(), NO reabre del lado contrario — deja la pila
+  // plana y que onCandleClosed elija la próxima dirección con la siguiente
+  // vela, como una intervención manual del usuario debe comportarse.
+  const manualCloseAll = async (exitPrice) => {
+    const hedgeResult = await closeHedge(exitPrice);
+    const stackResult = await closeAllExpPos(exitPrice, "MANUAL");
+    if (!hedgeResult.ok || !stackResult.allClosed) { log("cierre manual incompleto — se reintenta"); return false; }
+    resetStackTracking();
+    direction = null;
+    log(`cierre manual de toda la pila — cerró en ${(stackResult.totalPnl + hedgeResult.pnl).toFixed(2)}`);
+    return true;
+  };
+
+  const manualCloseOne = async (contractId, exitPrice) => {
+    if (hedge?.contractId === contractId) return (await closeHedge(exitPrice)).ok;
+    const pos = positions.find(p => p.contractId === contractId);
+    if (!pos) { log(`cierre manual: contrato ${contractId} ya no está en la pila`); return true; }
+    const objetivo = addLevel + cfg.addStep, stop = floor;
+    const { ok, record } = await closeOnePosition(pos, exitPrice, { symbol: EXP_SYMBOL, reason: "MANUAL", objetivo, stop });
+    if (!ok) return false;
+    positions = positions.filter(p => p.contractId !== contractId);
+    await persistLive(true);
+    await writeTradeRecord(record);
+    log(`cierre manual de 1 posición — pnl ${record.pnl.toFixed(2)} — pila ${positions.length}/${cfg.maxStack}`);
+    return true;
   };
 
   const evaluateStack = async () => {
@@ -259,17 +357,39 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive] = await Promise.all([
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
       getConfigValue(db, "exp_add_step", "50"),
       getConfigValue(db, "exp_floor_start", "-50"),
       getConfigValue(db, "exp_max_stack", "10"),
+      getConfigValue(db, "exp_deriv_live", "0"),
     ]);
+    const wasLive = cfg.derivLive;
     cfg = {
       enabled: enabled === "1", stake: parseFloat(stake) || 1, addStep: parseFloat(addStep) || 50,
       floorStart: parseFloat(floorStart) || -50, maxStack: parseInt(maxStack, 10) || 10,
+      derivLive: derivLive === "1",
     };
+    if (cfg.derivLive && !wasLive) log("⚠️ MODO EN VIVO (Deriv demo) activado — las próximas posiciones serán contratos reales");
+    if (!cfg.derivLive && wasLive) log("Modo en vivo (Deriv) desactivado — vuelve a simulado");
+  };
+
+  // ── Comando manual (botón "Cerrar"/"Cerrar todo" en la UI) ──────────────
+  // Igual que reloadConfig/claimOrCheckOwnership, se revisa por polling (un
+  // valor en bot_config) en vez de un canal directo — consistente con cómo
+  // ya se maneja todo lo demás en este motor, y evita necesitar un socket.
+  const checkManualCloseRequest = async () => {
+    if (!isOwner) return;
+    let req;
+    try { req = JSON.parse((await getConfigValue(db, "exp_manual_close_request", "null")) || "null"); } catch { return; }
+    if (!req || !req.requestedAt || req.requestedAt <= lastManualCloseAt) return;
+    if (Date.now() - req.requestedAt > 30000) { lastManualCloseAt = req.requestedAt; return; } // solicitud vieja, ignorar
+    if (!price) return; // sin precio todavía no se puede valorar el cierre
+    lastManualCloseAt = req.requestedAt;
+    log(`solicitud manual recibida: ${req.type === "all" ? "cerrar TODO" : `cerrar contrato ${req.contractId}`}`);
+    if (req.type === "all") await manualCloseAll(price);
+    else if (req.type === "one" && req.contractId) await manualCloseOne(req.contractId, price);
   };
 
   const fetchBinanceKlines = async (interval, limit) => {
@@ -324,6 +444,7 @@ export function startExpEngine() {
         }
       }
       await evaluateStack();
+      await checkManualCloseRequest();
     } catch (e) {
       console.error("[exp-engine] tick error:", e.message);
     } finally {

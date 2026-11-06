@@ -1776,6 +1776,15 @@ export default function TradingBot(){
   const [expPositions,setExpPositions] = useState([]);
   const [expDirection,setExpDirection] = useState(null);
   const [expHedgePos,setExpHedgePos] = useState(null); // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
+  // Deliberadamente SIN localStorage (a diferencia de los demás exp_*): no
+  // queremos que un navegador muestre "en vivo" por una caché vieja antes de
+  // confirmar con la DB — arranca siempre en false hasta que llegue la
+  // respuesta real del servidor. Solo el motor del SERVIDOR ejecuta órdenes
+  // reales (ver claimOrCheckOwnership) — el navegador nunca abre/cierra en
+  // Deriv por su cuenta, solo puede prender/apagar el interruptor y pedir
+  // cierres manuales.
+  const [expDerivLive,setExpDerivLive] = useState(false);
+  const expDerivLiveRef = useRef(false);
   const [expTrades,setExpTrades]       = useState(()=>loadExpTrades());
   const expEnabledRef    = useRef(expEnabled);
   const expStakeRef      = useRef(expStake);
@@ -1823,6 +1832,9 @@ export default function TradingBot(){
   useEffect(()=>{expMaxStackRef.current=expMaxStack; try{localStorage.setItem(LS_EXP_MAXSTACK,String(expMaxStack));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_max_stack",value:String(expMaxStack)})}).catch(()=>{});
   },[expMaxStack]);
+  useEffect(()=>{expDerivLiveRef.current=expDerivLive;
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_deriv_live",value:expDerivLive?"1":"0"})}).catch(()=>{});
+  },[expDerivLive]);
 
   // ── Sincronización inicial desde la DB (una sola vez al montar) — esto es
   // lo que hace que abrir la app desde OTRO navegador/celular muestre la
@@ -1845,6 +1857,7 @@ export default function TradingBot(){
           if(d.exp_add_step!=null) setExpAddStep(parseFloat(d.exp_add_step));
           if(d.exp_floor_start!=null) setExpFloorStart(parseFloat(d.exp_floor_start));
           if(d.exp_max_stack!=null) setExpMaxStack(parseInt(d.exp_max_stack,10));
+          if(d.exp_deriv_live!=null) setExpDerivLive(d.exp_deriv_live==="1");
           if(d.exp_live_state){
             try{
               const live=JSON.parse(d.exp_live_state);
@@ -2383,7 +2396,13 @@ export default function TradingBot(){
         const hbAt=parseInt(hbStr,10)||0;
         const stale=!hbAt||(Date.now()-hbAt)>15000;
         const mine=owner===expSessionIdRef.current;
-        if(!owner||mine||stale){
+        // En modo "en vivo" (Deriv real) el navegador NUNCA reclama el motor
+        // — solo el servidor ejecuta órdenes reales (ver nota junto a
+        // expDerivLive arriba). Evita que dos instancias puedan abrir/cerrar
+        // la MISMA posición real a la vez, incluso si el servidor tarda en
+        // reclamar tras un reinicio — mejor pausar que arriesgar duplicar.
+        const canClaim=!expDerivLiveRef.current && (!owner||mine||stale);
+        if(canClaim){
           if(!expIsOwnerRef.current && d.exp_live_state){
             // Otra sesión pudo haber mutado positions/floor/peak/hedge mientras
             // nosotros no éramos dueños — si seguimos con lo que teníamos en
@@ -6080,6 +6099,16 @@ export default function TradingBot(){
           const expWins=expTrades.filter(t=>t.pnl>0).length;
           const expWr=expTrades.length?Math.round(expWins/expTrades.length*100):null;
           const expTotalPnl=expTrades.reduce((s,t)=>s+t.pnl,0);
+          // Pide un cierre manual al motor dueño (SOLO el servidor ejecuta en
+          // Deriv — ver nota en claimOrCheckOwnership) vía un comando en
+          // bot_config que se revisa cada tick, igual que reloadConfig. No
+          // cierra nada directamente desde aquí: solo dispara la solicitud.
+          const requestExpManualClose=(type,contractId)=>{
+            fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({key:"exp_manual_close_request",value:JSON.stringify({type,contractId,requestedAt:Date.now()})})})
+              .then(()=>addLog(type==="all"?"🖐️ Cierre manual de TODA la pila solicitado…":`🖐️ Cierre manual solicitado (contrato ${contractId})…`,"info"))
+              .catch(()=>{});
+          };
           return(
           <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1600}}>
 
@@ -6108,6 +6137,27 @@ export default function TradingBot(){
                 <div><div style={{fontSize:12,fontWeight:600}}>Activar experimento</div>
                   <div style={{fontSize:8,color:T.muted}}>Corre en segundo plano con su propio feed de XAU/USD</div></div>
                 <ConfigToggle on={expEnabled} onClick={()=>setExpEnabled(p=>!p)}/>
+              </div>
+
+              {/* Modo en vivo: la MISMA lógica de piso/pirámide/canario/cobertura
+                  decide cuándo abrir/cerrar, pero en vez de simularlo llama de
+                  verdad a Deriv (Multiplicadores, Gold/USD) — pedido explícito
+                  tras confirmar que esa API sí opera oro aunque el feed público
+                  de precios lo rechace. SOLO el motor del servidor ejecuta
+                  (ver nota en claimOrCheckOwnership); esta pestaña nunca abre
+                  ni cierra contratos reales por su cuenta. */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,
+                borderBottom:`1px solid ${T.border}`,marginBottom:11,background:expDerivLive?`${T.red}0e`:"transparent",
+                border:expDerivLive?`1px solid ${T.red}40`:"none",borderRadius:expDerivLive?8:0,padding:expDerivLive?"8px 10px":0}}>
+                <div><div style={{fontSize:12,fontWeight:600,color:expDerivLive?T.red:T.text}}>
+                  {expDerivLive?"🔴 EN VIVO — Deriv demo (dinero demo real)":"Operar en vivo (Deriv demo)"}</div>
+                  <div style={{fontSize:8,color:T.muted}}>
+                    {expDerivLive?"Cada apertura/cierre es un contrato REAL en tu cuenta demo de Deriv (Gold/USD)."
+                      :"Apagado: solo simula. Al activar, abre/cierra contratos reales de Multiplicadores en tu cuenta DEMO de Deriv."}</div></div>
+                <ConfigToggle on={expDerivLive} onClick={()=>{
+                  if(!expDerivLive && !window.confirm("Esto hace que el Experimento abra y cierre contratos REALES (Multiplicadores, Gold/USD) en tu cuenta DEMO de Deriv, usando saldo demo real. ¿Continuar?")) return;
+                  setExpDerivLive(p=>!p);
+                }}/>
               </div>
 
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:10}} className="g4">
@@ -6164,7 +6214,16 @@ export default function TradingBot(){
                   comentario de las constantes EXP_* arriba), por eso se
                   repiten iguales en cada fila mientras la pila esté abierta. */}
               <div style={{marginBottom:16}}>
-                <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:4}}>POSICIONES ABIERTAS EN VIVO</div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                  <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>POSICIONES ABIERTAS EN VIVO</div>
+                  {(expPositions.length>0||expHedgePos)&&(
+                    <button onClick={()=>{if(window.confirm("¿Cerrar TODA la pila (y la cobertura si hay) ahora mismo?")) requestExpManualClose("all");}}
+                      style={{background:`${T.red}18`,border:`1px solid ${T.red}50`,color:T.red,borderRadius:5,
+                        padding:"4px 10px",cursor:"pointer",fontSize:9,fontWeight:700}}>
+                      ✕ Cerrar todo
+                    </button>
+                  )}
+                </div>
                 {expPositions.length>0&&(
                   <div style={{fontSize:8,color:T.muted,marginBottom:8}}>
                     OBJETIVO/STOP son de <b>la pila completa</b>, no por posición — todas cierran juntas al mismo
@@ -6178,10 +6237,10 @@ export default function TradingBot(){
                   </div>
                 ):(
                   <div className="table-scroll">
-                    <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:1050}}>
-                      <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px",
+                    <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:1140}}>
+                      <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px 80px",
                         gap:10,padding:"0 10px 4px",fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700}}>
-                        <div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div><div>OBJETIVO PILA</div><div>STOP PILA</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div><div>PATRONES</div>
+                        <div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div><div>OBJETIVO PILA</div><div>STOP PILA</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div><div>PATRONES</div><div>ACCIÓN</div>
                       </div>
                       {expPositions.map(pos=>{
                         const livePrice=expPrice??pos.entry;
@@ -6194,9 +6253,9 @@ export default function TradingBot(){
                         const volumen=pos.allocatedSize*(pos.multiplier||DEFAULT_MULTIPLIER);
                         const elapsedMin=Math.floor((Date.now()-(pos.openTime||Date.now()))/60000);
                         return(
-                          <div key={pos.id} style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px",
+                          <div key={pos.id} style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px 80px",
                             gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:7,padding:"8px 10px"}}>
-                            <span style={{fontSize:10,fontWeight:700,color:dirCol}}>{pos.type==="BUY"?"▲ BUY":"▼ SELL"}</span>
+                            <span style={{fontSize:10,fontWeight:700,color:dirCol}}>{pos.type==="BUY"?"▲ BUY":"▼ SELL"}{pos.contractId&&<span title="Contrato real en Deriv" style={{marginLeft:4,fontSize:8,color:T.red}}>🔴</span>}</span>
                             <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(pos.entry,2)}</span>
                             <span className="mono" style={{fontSize:10,color:T.text}}>{fP(livePrice,2)}</span>
                             <span className="mono" style={{fontSize:10,fontWeight:700,color:col}}>{fPct(pctChange)}</span>
@@ -6213,6 +6272,14 @@ export default function TradingBot(){
                               {isProtected?"🔒 protegida":`hace ${elapsedMin}m`}
                             </span>
                             <span style={{fontSize:8,fontWeight:700,color:T.text,background:T.dim,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>{pos.pattern||"—"}</span>
+                            <button onClick={()=>{if(window.confirm(`¿Cerrar esta posición ${pos.type}${pos.contractId?" (contrato real en Deriv)":""}?`)) requestExpManualClose("one",pos.contractId);}}
+                              disabled={!pos.contractId}
+                              title={pos.contractId?"Cerrar este contrato en Deriv":"Solo disponible para posiciones reales en Deriv"}
+                              style={{background:"transparent",border:`1px solid ${pos.contractId?T.red:T.border}50`,
+                                color:pos.contractId?T.red:T.muted,borderRadius:5,padding:"4px 8px",
+                                cursor:pos.contractId?"pointer":"not-allowed",fontSize:8,fontWeight:700,opacity:pos.contractId?1:0.5}}>
+                              ✕ Cerrar
+                            </button>
                           </div>
                         );
                       })}
@@ -6220,11 +6287,11 @@ export default function TradingBot(){
                           SUMA de todas las filas, no contra una sola; esto evita
                           tener que sumarlas a mano para saber si ya está cerca del
                           piso o no (pedido explícito tras verlo confuso en vivo). */}
-                      <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px",
+                      <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px 80px",
                         gap:10,alignItems:"center",background:T.dim,border:`2px solid ${stackPnl>=0?T.green:T.red}`,borderRadius:7,padding:"8px 10px"}}>
                         <span style={{fontSize:9,fontWeight:700,color:T.muted,gridColumn:"1 / 7"}}>TOTAL PILA ({expPositions.length}/{expMaxStack})</span>
                         <span className="mono" style={{fontSize:12,fontWeight:700,color:stackPnl>=0?T.green:T.red}}>{fUSD(stackPnl)}</span>
-                        <span></span><span></span><span></span>
+                        <span></span><span></span><span></span><span></span>
                       </div>
                       {expHedgePos&&(()=>{
                         const hLive=expPrice??expHedgePos.entry;
@@ -6233,9 +6300,9 @@ export default function TradingBot(){
                         const hPct=hDir*(hLive-expHedgePos.entry)/expHedgePos.entry*100;
                         const hCol=hPnl>=0?T.green:T.red;
                         return(
-                          <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px",
+                          <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px 80px",
                             gap:10,alignItems:"center",background:`${hCol}10`,border:`2px dashed ${hCol}`,borderRadius:7,padding:"8px 10px"}}>
-                            <span style={{fontSize:10,fontWeight:700,color:expHedgePos.type==="BUY"?T.green:T.red}}>{expHedgePos.type==="BUY"?"▲ BUY":"▼ SELL"}</span>
+                            <span style={{fontSize:10,fontWeight:700,color:expHedgePos.type==="BUY"?T.green:T.red}}>{expHedgePos.type==="BUY"?"▲ BUY":"▼ SELL"}{expHedgePos.contractId&&<span title="Contrato real en Deriv" style={{marginLeft:4,fontSize:8,color:T.red}}>🔴</span>}</span>
                             <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(expHedgePos.entry,2)}</span>
                             <span className="mono" style={{fontSize:10,color:T.text}}>{fP(hLive,2)}</span>
                             <span className="mono" style={{fontSize:10,fontWeight:700,color:hCol}}>{fPct(hPct)}</span>
@@ -6245,6 +6312,14 @@ export default function TradingBot(){
                             <span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.accent,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>🛡️ COBERTURA</span>
                             <span style={{fontSize:8,color:T.muted}}>cierra con la pila</span>
                             <span style={{fontSize:8,fontWeight:700,color:T.text,background:T.dim,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>{expHedgePos.pattern||"COBERTURA"}</span>
+                            <button onClick={()=>{if(window.confirm(`¿Cerrar la cobertura ${expHedgePos.type}${expHedgePos.contractId?" (contrato real en Deriv)":""}?`)) requestExpManualClose("one",expHedgePos.contractId);}}
+                              disabled={!expHedgePos.contractId}
+                              title={expHedgePos.contractId?"Cerrar este contrato en Deriv":"Solo disponible para posiciones reales en Deriv"}
+                              style={{background:"transparent",border:`1px solid ${expHedgePos.contractId?T.red:T.border}50`,
+                                color:expHedgePos.contractId?T.red:T.muted,borderRadius:5,padding:"4px 8px",
+                                cursor:expHedgePos.contractId?"pointer":"not-allowed",fontSize:8,fontWeight:700,opacity:expHedgePos.contractId?1:0.5}}>
+                              ✕ Cerrar
+                            </button>
                           </div>
                         );
                       })()}
