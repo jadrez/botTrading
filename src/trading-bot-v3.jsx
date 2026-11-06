@@ -6089,7 +6089,13 @@ export default function TradingBot(){
             debajo de Configuración en el sidebar (pedido explícito) — no es
             una tarjeta dentro de Configuración, es su propia página. */}
         {activeView==="experimento"&&(()=>{
-          const stackPnl=expPrice!=null?expPositions.reduce((s,p)=>s+posPnL(p,expPrice,p.allocatedSize),0):0;
+          // Para posiciones REALES (contractId), prefiere el profit que Deriv
+          // reporta de verdad (su propio mark price + comisión acumulada) en
+          // vez de nuestro estimado local — reportado en vivo: nuestra tabla
+          // mostraba +$9.52 mientras Deriv mostraba -$0.33 para el MISMO
+          // contrato. El servidor sincroniza esto cada ~5s en derivProfit.
+          const effExpPnL=(p,livePrice)=>p.derivProfit!=null?p.derivProfit:posPnL(p,livePrice,p.allocatedSize);
+          const stackPnl=expPrice!=null?expPositions.reduce((s,p)=>s+effExpPnL(p,expPrice),0):0;
           const volumen=expPositions.reduce((s,p)=>s+p.allocatedSize*(p.multiplier||DEFAULT_MULTIPLIER),0)
             +(expHedgePos?expHedgePos.allocatedSize*(expHedgePos.multiplier||DEFAULT_MULTIPLIER):0);
           const expWins=expTrades.filter(t=>t.pnl>0).length;
@@ -6242,9 +6248,12 @@ export default function TradingBot(){
                         <div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div><div>OBJETIVO PILA</div><div>STOP PILA</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div><div>PATRONES</div><div>ACCIÓN</div>
                       </div>
                       {expPositions.map(pos=>{
-                        const livePrice=expPrice??pos.entry;
+                        // Si es real (contractId), usa el spot/profit que Deriv
+                        // reportó de verdad la última vez que se sincronizó, en
+                        // vez de nuestro estimado local — ver nota de effExpPnL.
+                        const livePrice=pos.derivSpot??(expPrice??pos.entry);
                         const dir=pos.type==="BUY"?1:-1;
-                        const pnl=posPnL(pos,livePrice,pos.allocatedSize);
+                        const pnl=effExpPnL(pos,expPrice??pos.entry);
                         const pctChange=dir*(livePrice-pos.entry)/pos.entry*100;
                         const col=pnl>=0?T.green:T.red;
                         const dirCol=pos.type==="BUY"?T.green:T.red;
@@ -6291,9 +6300,9 @@ export default function TradingBot(){
                         <span></span><span></span><span></span><span></span>
                       </div>
                       {expHedgePos&&(()=>{
-                        const hLive=expPrice??expHedgePos.entry;
+                        const hLive=expHedgePos.derivSpot??(expPrice??expHedgePos.entry);
                         const hDir=expHedgePos.type==="BUY"?1:-1;
-                        const hPnl=posPnL(expHedgePos,hLive,expHedgePos.allocatedSize);
+                        const hPnl=effExpPnL(expHedgePos,expPrice??expHedgePos.entry);
                         const hPct=hDir*(hLive-expHedgePos.entry)/expHedgePos.entry*100;
                         const hCol=hPnl>=0?T.green:T.red;
                         return(

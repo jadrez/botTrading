@@ -402,6 +402,37 @@ export function startExpEngine() {
     if (!cfg.derivLive && wasLive) log("Modo en vivo (Deriv) desactivado — vuelve a simulado");
   };
 
+  // El pnl/precio que YA mostramos para una posición real se calculaba 100%
+  // local (nuestro propio tick + entry), distinto de lo que Deriv reporta de
+  // verdad (su propio mark price + comisión acumulada) — reportado en vivo:
+  // nuestra tabla mostraba +9.52 mientras la app de Deriv mostraba -0.33
+  // para el MISMO contrato. Esto trae el profit/spot reales de Deriv (una
+  // sola llamada a "portfolio" cubre TODOS los contratos abiertos de la
+  // cuenta) y los deja en cada posición (derivProfit/derivSpot) para que el
+  // cliente los muestre en vez de su propio estimado.
+  const syncDerivProfits = async () => {
+    if (!cfg.derivLive) return;
+    const openContractIds = [...positions, ...(hedge ? [hedge] : [])].map(p => p.contractId).filter(Boolean);
+    if (!openContractIds.length) return;
+    try {
+      const { positions: real } = await derivOrderCall("portfolio", {});
+      const byId = new Map(real.map(c => [c.contractId, c]));
+      let changed = false;
+      positions = positions.map(p => {
+        const c = p.contractId && byId.get(p.contractId);
+        if (!c) return p;
+        changed = true;
+        return { ...p, derivProfit: c.profit, derivSpot: c.currentSpot };
+      });
+      if (hedge?.contractId && byId.get(hedge.contractId)) {
+        const c = byId.get(hedge.contractId);
+        hedge = { ...hedge, derivProfit: c.profit, derivSpot: c.currentSpot };
+        changed = true;
+      }
+      if (changed) await persistLive(true);
+    } catch (e) { log(`Deriv: error sincronizando profit real — ${e.message}`); }
+  };
+
   // ── Comando manual (botón "Cerrar"/"Cerrar todo" en la UI) ──────────────
   // Igual que reloadConfig/claimOrCheckOwnership, se revisa por polling (un
   // valor en bot_config) en vez de un canal directo — consistente con cómo
@@ -413,10 +444,17 @@ export function startExpEngine() {
     if (!req || !req.requestedAt || req.requestedAt <= lastManualCloseAt) return;
     if (Date.now() - req.requestedAt > 30000) { lastManualCloseAt = req.requestedAt; return; } // solicitud vieja, ignorar
     if (!price) return; // sin precio todavía no se puede valorar el cierre
-    lastManualCloseAt = req.requestedAt;
+    // OJO: lastManualCloseAt solo se marca si el cierre REALMENTE tuvo éxito
+    // — si falla (ej. Deriv rate-limited, un error de red), la MISMA
+    // solicitud se reintenta en el siguiente tick (cada ~1s) hasta lograrlo
+    // o hasta que pasen los 30s de arriba. Antes se marcaba como "vista" en
+    // el primer intento sin importar el resultado, así que un solo fallo
+    // temporal dejaba el botón sin efecto para siempre.
     log(`solicitud manual recibida: ${req.type === "all" ? "cerrar TODO" : `cerrar posición ${req.posId}`}`);
-    if (req.type === "all") await manualCloseAll(price);
-    else if (req.type === "one" && req.posId != null) await manualCloseOne(req.posId, price);
+    const ok = req.type === "all" ? await manualCloseAll(price)
+      : (req.type === "one" && req.posId != null) ? await manualCloseOne(req.posId, price)
+      : true;
+    if (ok) lastManualCloseAt = req.requestedAt;
   };
 
   // Precio: Deriv (frxXAUUSD vía el mismo canal REST+OTP autenticado que ya
@@ -465,7 +503,7 @@ export function startExpEngine() {
     try {
       if (!bootstrapped) { await bootstrap(); return; }
       tickCount++;
-      if (tickCount % 5 === 0) { await reloadConfig(); await claimOrCheckOwnership(); }
+      if (tickCount % 5 === 0) { await reloadConfig(); await claimOrCheckOwnership(); await syncDerivProfits(); }
       // El precio se actualiza SIEMPRE (lo necesita el cierre manual aunque
       // el experimento esté pausado) — lo que si se salta cuando está
       // apagado es la lógica automática de entrada/apilado/volteo. Antes
