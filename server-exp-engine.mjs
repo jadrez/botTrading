@@ -18,7 +18,6 @@
 import pg from "pg";
 
 const EXP_SYMBOL = "XAU/USD";
-const EXP_BINANCE = "PAXGUSDT";
 const DEFAULT_MULTIPLIER = 100;
 const EXP_RETAIN_PCT = 0.8;
 const EXP_FLOOR_ARM_AT = 10;
@@ -408,11 +407,20 @@ export function startExpEngine() {
     else if (req.type === "one" && req.posId != null) await manualCloseOne(req.posId, price);
   };
 
-  const fetchBinanceKlines = async (interval, limit) => {
-    const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=${EXP_BINANCE}&interval=${interval}&limit=${limit}`);
-    const raw = await r.json();
-    if (!Array.isArray(raw)) return null;
-    return raw.map(k => ({ time: Math.floor(k[0] / 1000), o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5]) }));
+  // Precio: Deriv (frxXAUUSD vía el mismo canal REST+OTP autenticado que ya
+  // usa el Experimento para operar), NO Binance. Binance empezó a bloquear
+  // la IP de esta máquina de Fly.io ("Service unavailable from a restricted
+  // location" — dfw/Dallas cae bajo la restricción geográfica de
+  // Binance.com) — el motor entero quedó congelado en silencio (price
+  // nunca se seteaba, ni el auto-trading ni el cierre manual podían
+  // evaluar nada) hasta diagnosticarlo con logs explícitos. Deriv no tiene
+  // ese bloqueo desde esta misma máquina (ya verificado en vivo), y de
+  // paso unifica la fuente de precio de DECISIÓN con la de EJECUCIÓN real.
+  const fetchDerivGoldPrice = async () => {
+    try {
+      const r = await derivOrderCall("tick", { derivSymbol: "frxXAUUSD" });
+      return typeof r.price === "number" ? r.price : null;
+    } catch { return null; }
   };
 
   let bootstrapped = false;
@@ -427,8 +435,12 @@ export function startExpEngine() {
         log(`pila restaurada al iniciar (${positions.length}/${cfg.maxStack} ${direction}, piso ${floor.toFixed(2)}${hedge?" · cobertura "+hedge.type:""})`);
       }
     } catch {}
-    const k = await fetchBinanceKlines("1m", 300).catch(() => null);
-    if (k?.length > 5) { candles = k; price = candles.at(-1).c; }
+    const p = await fetchDerivGoldPrice();
+    if (p) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      candles = [{ time: nowSec, o: p, c: p, h: p, l: p, v: 0 }];
+      price = p;
+    }
     bootstrapped = true;
     log(`motor iniciado (sesión ${SESSION_ID})`);
   };
@@ -448,9 +460,7 @@ export function startExpEngine() {
       // esto estaba todo detrás de "if (!cfg.enabled) return", lo que
       // dejaba el botón "Cerrar"/"Cerrar todo" sin efecto mientras el
       // experimento estuviera apagado — reportado en vivo.
-      const r = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${EXP_BINANCE}`);
-      const d = await r.json();
-      const np = parseFloat(d.price);
+      const np = await fetchDerivGoldPrice();
       if (np && !isNaN(np)) {
         price = np;
         if (cfg.enabled) {
