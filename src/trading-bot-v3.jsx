@@ -2091,14 +2091,21 @@ export default function TradingBot(){
     // el callback anterior termine — si fetchCommodityRateCached alguna vez
     // tarda más de 5s (red lenta), dos ticks podían solaparse y evaluar/
     // modificar expPositionsRef.current al mismo tiempo (dos apilados o dos
-    // volteos para el mismo cruce de umbral). Sin relación con el bug del
-    // piso de arriba, pero la misma pregunta del usuario ("validar que no
-    // se estén repitiendo") aplica aquí también, así que se cierra por las
-    // dos vías.
-    let ticking=false;
+    // volteos para el mismo cruce de umbral).
+    // BUG encontrado en vivo apenas desplegado esto: fetch() no tiene
+    // ningún timeout — si esa llamada alguna vez se cuelga de verdad (no
+    // solo "lenta", sino que nunca resuelve ni falla), "ticking" se queda
+    // en true PARA SIEMPRE y el motor entero se congela — el gráfico dejó
+    // de moverse después de ~10s, exactamente este caso. Se vuelve auto-
+    // recuperable: si el tick anterior lleva más de 12s "corriendo" (mucho
+    // más que el roundtrip normal), se asume colgado y se deja pasar el
+    // siguiente de todas formas en vez de bloquear para siempre.
+    let ticking=false, tickStartedAt=0;
     const iv=setInterval(async()=>{
-      if(!alive || ticking) return;
-      ticking=true;
+      const now=Date.now();
+      if(!alive) return;
+      if(ticking && (now-tickStartedAt)<12000) return;
+      ticking=true; tickStartedAt=now;
       try{
       const np=await fetchCommodityRateCached(EXP_YAHOO,5000);
       if(!np||isNaN(np)||!alive) return;
