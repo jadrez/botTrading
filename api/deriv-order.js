@@ -28,6 +28,12 @@ const SYMBOL_MAP = {
   "EUR/USD": "frxEURUSD", "GBP/USD": "frxGBPUSD", "USD/JPY": "frxUSDJPY",
   "AUD/USD": "frxAUDUSD", "NZD/USD": "frxNZDUSD", "USD/CHF": "frxUSDCHF",
   "USD/CAD": "frxUSDCAD", "EUR/GBP": "frxEURGBP",
+  // Gold/plata: la restricción verificada (ver src/trading-bot-v3.jsx,
+  // DERIV_SYMBOLS) es sobre el WS público clásico (ticks/subscribe), NO
+  // sobre este producto REST+OTP de Multipliers — son APIs distintas con
+  // restricciones distintas. Agregado para probar si frxXAUUSD sí acepta
+  // "open" aquí (pedido explícito, cuenta demo).
+  "XAU/USD": "frxXAUUSD", "XAG/USD": "frxXAGUSD",
 };
 const REVERSE_SYMBOL_MAP = Object.fromEntries(Object.entries(SYMBOL_MAP).map(([k, v]) => [v, k]));
 // Direccional (Rise/Fall) label-only map — kept SEPARATE from SYMBOL_MAP on
