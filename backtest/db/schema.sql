@@ -53,6 +53,18 @@ CREATE TABLE IF NOT EXISTS trades (
                                               -- someone opened it directly in DTrader). Independent
                                               -- of deriv_contract_id (sim vs real) — a manual DTrader
                                               -- trade is still real money, just not the bot's own call.
+  source           TEXT DEFAULT 'MAIN',        -- 'MAIN' (the active symbol's own full Groq
+                                              -- analysis) | 'CORRELATED' (auto-opened by
+                                              -- runAutoScan's simpler EMA+RSI signal on a symbol
+                                              -- correlated with one already open) | 'SCAN' (same
+                                              -- runAutoScan loop, but as its OWN primary signal —
+                                              -- see correlated_with for which case). Previously
+                                              -- unrecoverable: `reasons` is always '[]' and nothing
+                                              -- distinguished a correlated-pair auto-trade from the
+                                              -- bot's main signal, so this split could not be
+                                              -- measured at all.
+  correlated_with  TEXT,                      -- the symbol this trade was opened BECAUSE OF (only
+                                              -- set when source='CORRELATED'); NULL otherwise
   opened_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   closed_at        TIMESTAMPTZ
 );
@@ -63,6 +75,8 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS commission NUMERIC;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS allocated_size NUMERIC;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS multiplier INT;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS opened_by TEXT DEFAULT 'BOT';
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'MAIN';
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS correlated_with TEXT;
 -- A real contract can only ever close once — but the client-side "Deriv
 -- portfolio sync" effect (runs in any open browser tab) and the server-side
 -- sync-deriv-positions.mjs cron (every ~5min via GitHub Actions) both do the
@@ -116,6 +130,8 @@ CREATE TABLE IF NOT EXISTS open_positions (
   deriv_contract_id TEXT,                  -- set only when actually executed on Deriv (real money)
   commission       NUMERIC,                -- real $ commission Deriv charged, from the sync
   opened_by        TEXT DEFAULT 'BOT',       -- 'BOT' | 'MANUAL' — see the same column on `trades`
+  source           TEXT DEFAULT 'MAIN',      -- 'MAIN' | 'CORRELATED' | 'SCAN' — see the same column on `trades`
+  correlated_with  TEXT,                     -- see the same column on `trades`
   opened_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS tp NUMERIC;
@@ -123,6 +139,8 @@ ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS sl NUMERIC;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS deriv_contract_id TEXT;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS commission NUMERIC;
 ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS opened_by TEXT DEFAULT 'BOT';
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'MAIN';
+ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS correlated_with TEXT;
 -- The Deriv-portfolio-sync effect (trading-bot-v3.jsx) decides a contract is
 -- "new" by checking React's in-memory positions state — if that state was
 -- momentarily incomplete (e.g. the tab had just reloaded and the DB-restore

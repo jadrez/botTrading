@@ -27,6 +27,8 @@ export default async function handler(req, res) {
         derivContractId: row.deriv_contract_id ?? undefined,
         commission: row.commission != null ? parseFloat(row.commission) : undefined,
         openedBy: row.opened_by ?? "BOT",
+        source: row.source ?? "MAIN",
+        correlatedWith: row.correlated_with ?? undefined,
         openTime: new Date(row.opened_at).getTime(),
       }));
       return res.status(200).json({ positions });
@@ -36,12 +38,12 @@ export default async function handler(req, res) {
   }
 
   if (req.method === "POST") {
-    const { clientId, symbol, type, entryPrice, allocatedSize, multiplier, confidence, tp, sl, derivContractId, commission, openedBy } = req.body || {};
+    const { clientId, symbol, type, entryPrice, allocatedSize, multiplier, confidence, tp, sl, derivContractId, commission, openedBy, source, correlatedWith } = req.body || {};
     if (!clientId || !symbol || !type || entryPrice == null) {
       return res.status(400).json({ error: "clientId, symbol, type, entryPrice are required" });
     }
     try {
-      const params = [String(clientId), symbol, type, entryPrice, allocatedSize ?? null, multiplier ?? null, confidence ?? null, tp ?? null, sl ?? null, derivContractId ? String(derivContractId) : null, commission ?? null, openedBy === "MANUAL" ? "MANUAL" : "BOT"];
+      const params = [String(clientId), symbol, type, entryPrice, allocatedSize ?? null, multiplier ?? null, confidence ?? null, tp ?? null, sl ?? null, derivContractId ? String(derivContractId) : null, commission ?? null, openedBy === "MANUAL" ? "MANUAL" : "BOT", source === "CORRELATED" || source === "SCAN" ? source : "MAIN", correlatedWith ?? null];
       // A real position conflicts on deriv_contract_id (the partial unique
       // index in schema.sql) — the client-side "is this contract already
       // tracked?" check can race (e.g. right after a reload, before the
@@ -53,8 +55,8 @@ export default async function handler(req, res) {
         ? `ON CONFLICT (deriv_contract_id) WHERE deriv_contract_id IS NOT NULL DO NOTHING`
         : `ON CONFLICT (client_id) DO NOTHING`;
       await db.query(
-        `INSERT INTO open_positions (client_id, symbol, type, entry_price, allocated_size, multiplier, confidence, tp, sl, deriv_contract_id, commission, opened_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        `INSERT INTO open_positions (client_id, symbol, type, entry_price, allocated_size, multiplier, confidence, tp, sl, deriv_contract_id, commission, opened_by, source, correlated_with)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          ${conflictClause}`,
         params
       );

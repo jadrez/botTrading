@@ -376,11 +376,36 @@ function getPatternAdjustment(patternNames, byPatternStats){
   // too loose, see detectPatterns) sitting at 45-46% WR, which the old
   // 35-65% dead zone scored as a neutral +0 despite real evidence they add
   // no edge — by sheer volume those two patterns alone were -$672 of
-  // accumulated pnl. Same slope as before at the extremes (±0.5/point,
-  // capped at the old -10/+6), just no longer blind in the middle.
-  const delta=Math.max(-10,Math.min(6,Math.round((avgWr-50)*0.5)));
+  // accumulated pnl.
+  // v2: steepened 0.5→1.5. Two more weeks of live data under the v1 slope
+  // showed it wasn't enough — Double Top/Bottom sat at 47-49% WR (n=175/171,
+  // a huge sample, clearly not noise) and the OLD slope rounded their
+  // penalty to -1 or literally -0 (JS: Math.round(-0.5)===-0, and
+  // -0===0 is true, so the "if(delta===0)" guard below silently treated a
+  // real, measured -$173 combined drag as "no signal at all"). At 1.5,
+  // those same win rates now pull a real, felt penalty instead of rounding
+  // away. Same ±10/+6 caps as before.
+  const delta=Math.max(-10,Math.min(6,Math.round((avgWr-50)*1.5)));
   if(delta===0) return {delta:0, note:null};
   return {delta, note:`patrón histórico ${delta>0?"fuerte":"débil"} (${Math.round(avgWr)}% WR)`};
+}
+
+// ── Hour-of-day feedback: found live (Simulado, 1010 trades) that 13h-21h
+// UTC — the London/NY liquidity overlap, the session every "more volume =
+// better signals" assumption would favor — is consistently the WORST
+// stretch of the day: hour 17h UTC alone is -$101.43, the single worst
+// hour, while quiet hours like 0h UTC run +$22.62 at 63% WR. Likely more
+// false breakouts during the volatility spike than genuine trend starts.
+// Same graduated-around-50% shape as getPatternAdjustment, gated on a
+// decent per-hour sample so a quiet hour's tiny n can't swing it.
+function getHourAdjustment(openTimeMs, byHourStats){
+  if(openTimeMs==null || !byHourStats?.length) return {delta:0, note:null};
+  const hour=new Date(openTimeMs).getUTCHours();
+  const stat=byHourStats.find(h=>h.hour===hour);
+  if(!stat || stat.t<10) return {delta:0, note:null};
+  const delta=Math.max(-10,Math.min(6,Math.round((stat.wr-50)*1.5)));
+  if(delta===0) return {delta:0, note:null};
+  return {delta, note:`hora histórica ${delta>0?"fuerte":"débil"} (${stat.wr}% WR · ${hour}h UTC)`};
 }
 
 // Real money only: block opening a real position that's actually the SAME
@@ -412,6 +437,7 @@ function savePositionOpen(pos, confidence){
       allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, confidence,
       tp:pos.tp, sl:pos.sl, derivContractId:pos.derivContractId, commission:pos.commission,
       openedBy:pos.openedBy||"BOT",
+      source:pos.source||(pos.correlatedWith?"CORRELATED":"MAIN"), correlatedWith:pos.correlatedWith,
     }),
   }).catch(()=>{});
 }
@@ -432,7 +458,7 @@ function loadBalance(){
 
 function calcLearningStats(trades){
   if(!trades.length) return null;
-  const byPattern={}, byDir={BUY:{w:0,t:0},SELL:{w:0,t:0}};
+  const byPattern={}, byDir={BUY:{w:0,t:0},SELL:{w:0,t:0}}, byHour={};
   let streak=0, maxStreak=0, curStreak=0;
   for(const t of trades){
     const win=t.pnl>0;
@@ -443,6 +469,14 @@ function calcLearningStats(trades){
       if(!byPattern[pat])byPattern[pat]={w:0,t:0};
       byPattern[pat].t++;
       if(win)byPattern[pat].w++;
+    }
+    // Hour-of-day stats (UTC) — feeds getHourAdjustment
+    if(t.openTime){
+      const h=new Date(t.openTime).getUTCHours();
+      if(!byHour[h])byHour[h]={w:0,t:0,pnl:0};
+      byHour[h].t++;
+      byHour[h].pnl+=t.pnl;
+      if(win)byHour[h].w++;
     }
     // Streak
     if(win){curStreak++;maxStreak=Math.max(maxStreak,curStreak);}
@@ -458,6 +492,10 @@ function calcLearningStats(trades){
     .filter(p=>p.t>=2)
     .sort((a,b)=>b.wr-a.wr);
 
+  const sortedHour=Object.entries(byHour)
+    .map(([h,{w,t,pnl}])=>({hour:parseInt(h,10),wr:t>0?Math.round(w/t*100):0,t,pnl:Math.round(pnl*100)/100}))
+    .sort((a,b)=>a.hour-b.hour);
+
   return{
     total:trades.length,
     wins:trades.filter(t=>t.pnl>0).length,
@@ -465,6 +503,7 @@ function calcLearningStats(trades){
     recentWR:Math.round(recentWR*100),
     byDir,
     byPattern:sortedPat,
+    byHour:sortedHour,
     maxStreak,
     suggestedConf,
     totalPnl:trades.reduce((s,t)=>s+t.pnl,0),
@@ -493,13 +532,22 @@ function detectPatterns(candles){
   const recent=candles.slice(-120);
   const {highs,lows}=findPivots(recent,3);
   const tol=0.025; // 2.5% tolerancia para precios similares
+  // Double Top/Bottom get their OWN, much tighter tolerance. Found live
+  // (1010+ Simulado trades, 2+ weeks after the downstream confidence-penalty
+  // fix alone proved insufficient): at 2.5% these two fired on ~85% of all
+  // trades (175/171-trade samples) sitting at 47-49% WR — basically every
+  // minor wiggle within a quarter-cent of the prior pivot was being called a
+  // real double top/bottom. A genuine double top/bottom is two REJECTIONS at
+  // essentially the same level, not "close enough" — 0.8% matches that much
+  // more honestly and should cut the false-positive volume sharply.
+  const tolDouble=0.008; // 0.8% — Double Top/Bottom only
 
   // ── Double Bottom (BULLISH REVERSAL)
   if(lows.length>=2){
     const [l1,l2]=lows.slice(-2);
     const diff=Math.abs(l1.price-l2.price)/l1.price;
     const gap=l2.idx-l1.idx;
-    if(diff<tol && gap>=5 && gap<=45)
+    if(diff<tolDouble && gap>=5 && gap<=45)
       results.push({name:"Double Bottom", signal:"BULLISH", type:"REVERSAL", conf:72, emoji:"W",
         desc:"Dos mínimos similares: el precio rebotó dos veces en soporte → probable subida."});
   }
@@ -509,7 +557,7 @@ function detectPatterns(candles){
     const [h1,h2]=highs.slice(-2);
     const diff=Math.abs(h1.price-h2.price)/h1.price;
     const gap=h2.idx-h1.idx;
-    if(diff<tol && gap>=5 && gap<=45)
+    if(diff<tolDouble && gap>=5 && gap<=45)
       results.push({name:"Double Top", signal:"BEARISH", type:"REVERSAL", conf:72, emoji:"M",
         desc:"Dos máximos similares: el precio rechazó la resistencia dos veces → probable bajada."});
   }
@@ -1821,6 +1869,7 @@ export default function TradingBot(){
               symbol:pos.symbol, type:pos.type, entryPrice:pos.entry, exitPrice:detail.exitSpot??pos.entry,
               pnl, closeReason:reason, derivContractId:pos.derivContractId, commission:pos.commission??detail.commission,
               allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, openedBy:pos.openedBy||"BOT",
+              source:pos.source, correlatedWith:pos.correlatedWith,
               openedAt:pos.openTime?new Date(pos.openTime).toISOString():undefined,
               closedAt:detail.closeTime?new Date(detail.closeTime).toISOString():undefined,
             }),
@@ -1831,6 +1880,7 @@ export default function TradingBot(){
           symbol:pos.symbol, type:pos.type, entry:pos.entry, exit:detail.exitSpot??pos.entry, pnl,
           reason, derivContractId:pos.derivContractId, commission:pos.commission??detail.commission,
           allocatedSize:pos.allocatedSize, multiplier:pos.multiplier, openedBy:pos.openedBy||"BOT",
+          source:pos.source, correlatedWith:pos.correlatedWith,
           time:now(), tradeTime:Math.floor(Date.now()/1000),
           openTime:pos.openTime, closeTime:detail.closeTime||Date.now(),
           activePatterns:[],
@@ -2660,6 +2710,7 @@ export default function TradingBot(){
           derivContractId:pos.derivContractId, commission,
           allocatedSize:pos.allocatedSize||positionSizeRef.current, multiplier:pos.multiplier||multiplierRef.current,
           openedBy:pos.openedBy||"BOT",
+          source:pos.source, correlatedWith:pos.correlatedWith,
           openedAt:closedTrade.openTime?new Date(closedTrade.openTime).toISOString():undefined,
           closedAt:new Date(closeTimeMs).toISOString(),
         }),
@@ -2800,7 +2851,9 @@ export default function TradingBot(){
     // Prefer THIS symbol's own recent record over the blended global one,
     // once it has enough trades of its own to be meaningful.
     minConf=getSymbolMinConf(trades,symbolRef.current,minConf);
-    const byPatternStats=calcLearningStats(trades)?.byPattern||[];
+    const learningSnapshot=calcLearningStats(trades);
+    const byPatternStats=learningSnapshot?.byPattern||[];
+    const byHourStats=learningSnapshot?.byHour||[];
 
     // ── Apply the walk-forward-validated tier for this symbol on top of the
     // learning-derived threshold: MIXTO/ROBUSTO raise the bar, SIN-EDGE blocks
@@ -2864,6 +2917,13 @@ export default function TradingBot(){
         if(delta!==0){
           result.confidence=Math.max(0,Math.min(99,result.confidence+delta));
           result.reasoning=`[Aprendizaje: ${note}, ${delta>0?"+":""}${delta}%] ${result.reasoning}`;
+        }
+        // ── Hour-of-day feedback: same idea, but keyed on the hour this new
+        // trade would open at (now), not a historical trade's hour.
+        const hourAdj=getHourAdjustment(Date.now(),byHourStats);
+        if(hourAdj.delta!==0){
+          result.confidence=Math.max(0,Math.min(99,result.confidence+hourAdj.delta));
+          result.reasoning=`[Aprendizaje: ${hourAdj.note}, ${hourAdj.delta>0?"+":""}${hourAdj.delta}%] ${result.reasoning}`;
         }
       }
 
@@ -3014,7 +3074,7 @@ export default function TradingBot(){
 
           const mainPos={type:result.signal,entry:cp,id:Date.now()+Math.random(),
             symbol:activeSym,openTime:Date.now(),allocatedSize:ps,multiplier:multiplierRef.current,peakPnl:0,
-            confidence:result.confidence,
+            confidence:result.confidence, source:"MAIN",
             tp:mainScaled?.tp??tpTargetRef.current, sl:mainScaled?.sl??slTargetRef.current,
             ...(derivContractId&&{derivContractId})};
 
@@ -3046,6 +3106,7 @@ export default function TradingBot(){
               corrPositions.push({
                 type:corrSignal,entry:corrPrice,id:Date.now()+Math.random()+corrPositions.length*0.001,
                 symbol:corrSym,openTime:Date.now(),correlatedWith:activeSym,allocatedSize:ps,multiplier:multiplierRef.current,peakPnl:0,
+                source:"CORRELATED",
                 tp:corrScaled?.tp??tpTargetRef.current, sl:corrScaled?.sl??slTargetRef.current,
                 ...(corrDerivId&&{derivContractId:corrDerivId}),
               });
@@ -3118,7 +3179,9 @@ export default function TradingBot(){
   const runAutoScan=useCallback(async()=>{
     if(!autoRef.current&&!autoRealRef.current) return;
     const allTrades=loadTrades();
-    const byPatternStats=calcLearningStats(allTrades)?.byPattern||[];
+    const learningSnapshot=calcLearningStats(allTrades);
+    const byPatternStats=learningSnapshot?.byPattern||[];
+    const byHourStats=learningSnapshot?.byHour||[];
     // Tracked locally (not just posRef) so multiple qualifying symbols in the
     // SAME scan pass can't overshoot either pool, or both become the same
     // correlated bet, before posRef re-syncs on render.
@@ -3159,7 +3222,8 @@ export default function TradingBot(){
       const baseMinConf=consLossesRef.current>=2?Math.min(95,tierMinConf+10):tierMinConf;
       const minConf=getSymbolMinConf(allTrades,sym,baseMinConf);
       const {delta,note}=getPatternAdjustment(data.patterns,byPatternStats);
-      const adjConfidence=Math.max(0,Math.min(99,data.confidence+delta));
+      const hourAdj=getHourAdjustment(Date.now(),byHourStats);
+      const adjConfidence=Math.max(0,Math.min(99,data.confidence+delta+hourAdj.delta));
       if(adjConfidence<minConf) continue;
 
       const ps=positionSizeRef.current;
@@ -3195,13 +3259,13 @@ export default function TradingBot(){
       const pos={
         type:data.signal, entry:data.price, id:Date.now()+Math.random(),
         symbol:sym, openTime:Date.now(), allocatedSize:ps, multiplier:multiplierRef.current, peakPnl:0,
-        confidence:adjConfidence,
+        confidence:adjConfidence, source:"SCAN",
         tp:scaled?.tp??tpTargetRef.current, sl:scaled?.sl??slTargetRef.current,
         ...(derivContractId&&{derivContractId}),
       };
       setPositions(p=>[...p,pos]);
       savePositionOpen(pos,adjConfidence);
-      addLog(`🌐 ${data.signal==="BUY"?"🟢":"🔴"} ${data.signal} ${sym} @ ${fP(data.price,data.prec||5)} (auto multi-símbolo, ${strat.tier}, conf ${adjConfidence}%${note?` · ${note}`:""})`,data.signal==="BUY"?"buy":"sell");
+      addLog(`🌐 ${data.signal==="BUY"?"🟢":"🔴"} ${data.signal} ${sym} @ ${fP(data.price,data.prec||5)} (auto multi-símbolo, ${strat.tier}, conf ${adjConfidence}%${note?` · ${note}`:""}${hourAdj.note?` · ${hourAdj.note}`:""})`,data.signal==="BUY"?"buy":"sell");
     }
   },[addLog]);
 
@@ -4423,7 +4487,7 @@ export default function TradingBot(){
                     const manualScaled=scaledTpSl(symbol,positionSizeRef.current,multiplierRef.current);
                     const pos={type:aiResult.signal,entry:priceRef.current,id:Date.now(),symbol,openTime:Date.now(),
                       allocatedSize:positionSizeRef.current,multiplier:multiplierRef.current,peakPnl:0,
-                      confidence:aiResult.confidence,
+                      confidence:aiResult.confidence, source:"MAIN",
                       tp:manualScaled?.tp??tpTargetRef.current, sl:manualScaled?.sl??slTargetRef.current};
                     setPositions(p=>[...p,pos]);
                     savePositionOpen(pos,aiResult.confidence);
