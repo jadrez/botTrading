@@ -476,6 +476,19 @@ const EXP_QUICK_REVERSAL_FRACTION=0.3; // 30% del piso inicial normal
 // útil justo cuando ya hay varias posiciones viejas que podrían estar
 // escondiendo una reversión reciente detrás de su propio P&L grande.
 const EXP_CANARY_PEAK=5, EXP_CANARY_MIN_STACK=3;
+// Cobertura ("hedge"): pedido explícito tras confirmar que SÍ se quiere
+// cobertura real (dos direcciones abiertas a la vez, no solo voltear más
+// temprano) — si la pila principal NUNCA estuvo en positivo y su pérdida
+// agregada llega al 50% de expFloorStart (ej. floorStart=-10 → dispara en
+// -5), abre UNA sola posición en la dirección CONTRARIA, mismo stake,
+// completamente aparte de la pila principal (que sigue con su piso/
+// apilado normal, sin tocarla). Solo una cobertura por ciclo — no se
+// apila ni se vuelve a abrir otra mientras ya exista una. Se cierra
+// junto con la pila principal cuando esta por fin resuelve (toca su piso
+// y voltea) — no tiene piso/objetivo propio, por simplicidad (ver
+// discusión: la alternativa de un piso independiente para la cobertura
+// casi duplica la complejidad de todo el motor).
+const EXP_HEDGE_TRIGGER_PCT=0.5; // 50% de expFloorStart
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
 const LS_EXP_MAXSTACK="bot_exp_maxstack_v1";
@@ -1762,6 +1775,7 @@ export default function TradingBot(){
   const [expPrice,setExpPrice]         = useState(null);
   const [expPositions,setExpPositions] = useState([]);
   const [expDirection,setExpDirection] = useState(null);
+  const [expHedgePos,setExpHedgePos] = useState(null); // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   const [expTrades,setExpTrades]       = useState(()=>loadExpTrades());
   const expEnabledRef    = useRef(expEnabled);
   const expStakeRef      = useRef(expStake);
@@ -1776,6 +1790,7 @@ export default function TradingBot(){
   const expStackPeakRef  = useRef(0); // máximo histórico del P&L agregado de la pila ACTUAL (se resetea en cada entrada/volteo)
   const expLastPosPeakRef= useRef(0); // pico propio de la ÚLTIMA posición apilada (canario de reversión, ver EXP_CANARY_*)
   const expLastAddPriceRef= useRef(null); // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra, ver nota en evaluateStack)
+  const expHedgePosRef = useRef(null); // ver EXP_HEDGE_TRIGGER_PCT
   // Identidad de esta pestaña/dispositivo + si es la que actualmente "maneja"
   // el motor (ver efecto de abajo) — necesario desde que el estado se
   // sincroniza por DB: si dos pestañas/dispositivos tuvieran el experimento
@@ -1838,6 +1853,7 @@ export default function TradingBot(){
               if(live.floor!=null) expFloorRef.current=live.floor;
               if(live.addLevel!=null) expAddLevelRef.current=live.addLevel;
               if(live.peak!=null) expStackPeakRef.current=live.peak;
+              expHedgePosRef.current=live.hedge??null; setExpHedgePos(live.hedge??null);
             }catch{}
           }
         }
@@ -2104,6 +2120,7 @@ export default function TradingBot(){
       const snapshot={
         positions:expPositionsRef.current, direction:expDirectionRef.current,
         floor:expFloorRef.current, addLevel:expAddLevelRef.current, peak:expStackPeakRef.current,
+        hedge:expHedgePosRef.current,
       };
       try{ localStorage.setItem(LS_EXP_LIVE, JSON.stringify(snapshot)); }catch{}
       const changed=expFloorRef.current!==lastDbFloor || expPositionsRef.current.length!==lastDbPosCount;
@@ -2126,17 +2143,19 @@ export default function TradingBot(){
         expFloorRef.current=saved.floor??expFloorStartRef.current;
         expAddLevelRef.current=saved.addLevel??0;
         expStackPeakRef.current=saved.peak??0;
+        expHedgePosRef.current=saved.hedge??null;
         setExpPositions(saved.positions);
         setExpDirection(saved.direction);
+        setExpHedgePos(saved.hedge??null);
         addLog(`🧪 Experimento: pila restaurada (${saved.positions.length}/${expMaxStackRef.current} ${saved.direction}, piso ${fUSD(expFloorRef.current)})`,"info");
       }
     }catch{}
 
-    const addExpPos=(type)=>{
+    const addExpPos=(type,pattern="VELA ANTERIOR")=>{
       const price=expPriceRef.current;
       if(!price || expPositionsRef.current.length>=expMaxStackRef.current) return;
       const pos={id:Date.now()+Math.random(), type, entry:price, allocatedSize:expStakeRef.current,
-        multiplier:DEFAULT_MULTIPLIER, openTime:Date.now()};
+        multiplier:DEFAULT_MULTIPLIER, openTime:Date.now(), pattern};
       expPositionsRef.current=[...expPositionsRef.current,pos];
       expLastPosPeakRef.current=0; // nueva "última" posición — el canario arranca de cero para ella
       expLastAddPriceRef.current=price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
@@ -2160,7 +2179,7 @@ export default function TradingBot(){
         fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({
             symbol:c.symbol, type:c.type, entryPrice:c.entry, exitPrice:c.exit, pnl:c.pnl, reason:c.reason,
-            allocatedSize:c.allocatedSize, multiplier:c.multiplier,
+            pattern:c.pattern, allocatedSize:c.allocatedSize, multiplier:c.multiplier,
             openedAt:c.openTime?new Date(c.openTime).toISOString():undefined,
             closedAt:new Date(c.closeTime).toISOString(),
           })}).catch(()=>{});
@@ -2172,8 +2191,35 @@ export default function TradingBot(){
       expFloorRef.current=expFloorStartRef.current; expAddLevelRef.current=0; expStackPeakRef.current=0;
     };
 
+    // Cierra la cobertura (si existe) junto con la pila principal — ver
+    // EXP_HEDGE_TRIGGER_PCT: no tiene piso/objetivo propio, vive y muere
+    // con el ciclo de la pila que la disparó.
+    const closeHedge=(exitPrice)=>{
+      const hedge=expHedgePosRef.current;
+      if(!hedge) return 0;
+      const pnl=posPnL(hedge,exitPrice,hedge.allocatedSize);
+      expHedgePosRef.current=null;
+      setExpHedgePos(null);
+      const closedAt=Date.now();
+      setExpTrades(prev=>{
+        const next=[{...hedge,symbol:EXP_SYMBOL,exit:exitPrice,pnl,reason:"HEDGE",time:now(),
+          closeTime:closedAt,tradeTime:Math.floor(closedAt/1000)},...prev].slice(0,200);
+        saveExpTrades(next); return next;
+      });
+      fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          symbol:EXP_SYMBOL, type:hedge.type, entryPrice:hedge.entry, exitPrice, pnl, reason:"HEDGE",
+          pattern:"COBERTURA", allocatedSize:hedge.allocatedSize, multiplier:hedge.multiplier,
+          openedAt:hedge.openTime?new Date(hedge.openTime).toISOString():undefined,
+          closedAt:new Date(closedAt).toISOString(),
+        })}).catch(()=>{});
+      addLog(`🛡️ Experimento: cobertura ${hedge.type} cerrada en ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
+      return pnl;
+    };
+
     const flip=(exitPrice)=>{
-      const totalPnl=closeAllExpPos(exitPrice,"FLIP");
+      const hedgePnl=closeHedge(exitPrice);
+      const totalPnl=closeAllExpPos(exitPrice,"FLIP")+hedgePnl;
       const opposite=expDirectionRef.current==="BUY"?"SELL":"BUY";
       resetStackTracking();
       let note="";
@@ -2186,7 +2232,7 @@ export default function TradingBot(){
       }
       addLog(`🔄 Experimento: pila cerró en ${fUSD(totalPnl)} → voltea a ${opposite}${note}`,"info");
       expDirectionRef.current=opposite; setExpDirection(opposite);
-      addExpPos(opposite);
+      addExpPos(opposite,"VOLTEO");
     };
 
     const evaluateStack=()=>{
@@ -2206,6 +2252,21 @@ export default function TradingBot(){
       // en +$8 (80% de retención) — no puede volver a caer tan lejos.
       if(expStackPeakRef.current>=EXP_FLOOR_ARM_AT){
         expFloorRef.current=Math.max(expFloorRef.current, expStackPeakRef.current*EXP_RETAIN_PCT);
+      }
+      // Cobertura: la pila NUNCA estuvo en positivo (expStackPeakRef sigue
+      // en 0 — solo sube con Math.max, así que seguir en 0 prueba que
+      // stackPnl jamás cruzó arriba de 0) y la pérdida agregada ya llega al
+      // 50% de expFloorStart — abre UNA posición en la dirección contraria,
+      // mismo stake, aparte de la pila (que sigue con su piso normal sin
+      // tocarla). Solo una vez por ciclo — expHedgePosRef como gate.
+      if(!expHedgePosRef.current && expStackPeakRef.current===0 && stackPnl<=expFloorStartRef.current*EXP_HEDGE_TRIGGER_PCT){
+        const hedgeType=expDirectionRef.current==="BUY"?"SELL":"BUY";
+        const hedge={id:Date.now()+Math.random(), type:hedgeType, entry:price, allocatedSize:expStakeRef.current,
+          multiplier:DEFAULT_MULTIPLIER, openTime:Date.now(), pattern:"COBERTURA"};
+        expHedgePosRef.current=hedge;
+        setExpHedgePos(hedge);
+        persistLive();
+        addLog(`🛡️ Experimento: cobertura ${hedgeType} abierta @ ${fP(price,2)} (pila en ${fUSD(stackPnl)})`,hedgeType==="BUY"?"buy":"sell");
       }
       // Canario: la ÚLTIMA posición apilada se revisa POR SEPARADO de la
       // pila (solo con EXP_CANARY_MIN_STACK+ posiciones abiertas) — si su
@@ -2248,7 +2309,7 @@ export default function TradingBot(){
       );
       if(movedEnough && expPositionsRef.current.length<expMaxStackRef.current){
         expAddLevelRef.current+=expAddStepRef.current; // solo informativo para la UI (OBJETIVO PILA)
-        addExpPos(expDirectionRef.current);
+        addExpPos(expDirectionRef.current,"PIRÁMIDE");
       }
     };
 
@@ -2259,7 +2320,7 @@ export default function TradingBot(){
       if(!dir) return;
       expDirectionRef.current=dir; setExpDirection(dir);
       resetStackTracking();
-      addExpPos(dir);
+      addExpPos(dir,"VELA ANTERIOR");
     };
 
     // Binance klines → {time(seg), o,h,l,c,v} — mismo shape que usa el resto
@@ -2328,6 +2389,7 @@ export default function TradingBot(){
               if(live.floor!=null) expFloorRef.current=live.floor;
               if(live.addLevel!=null) expAddLevelRef.current=live.addLevel;
               if(live.peak!=null) expStackPeakRef.current=live.peak;
+              expHedgePosRef.current=live.hedge??null; setExpHedgePos(live.hedge??null);
             }catch{}
           }
           fetch("/api/exp-trades?limit=50").then(rr=>rr.ok?rr.json():null).then(dd=>{
@@ -5980,7 +6042,8 @@ export default function TradingBot(){
             una tarjeta dentro de Configuración, es su propia página. */}
         {activeView==="experimento"&&(()=>{
           const stackPnl=expPrice!=null?expPositions.reduce((s,p)=>s+posPnL(p,expPrice,p.allocatedSize),0):0;
-          const volumen=expPositions.reduce((s,p)=>s+p.allocatedSize*(p.multiplier||DEFAULT_MULTIPLIER),0);
+          const volumen=expPositions.reduce((s,p)=>s+p.allocatedSize*(p.multiplier||DEFAULT_MULTIPLIER),0)
+            +(expHedgePos?expHedgePos.allocatedSize*(expHedgePos.multiplier||DEFAULT_MULTIPLIER):0);
           const expWins=expTrades.filter(t=>t.pnl>0).length;
           const expWr=expTrades.length?Math.round(expWins/expTrades.length*100):null;
           const expTotalPnl=expTrades.reduce((s,t)=>s+t.pnl,0);
@@ -6003,6 +6066,9 @@ export default function TradingBot(){
                 <br/>Precio en vivo cada 1s vía Binance PAXG/USDT (oro tokenizado, respaldado 1:1 por oro físico) —
                 Yahoo/Deriv no dan movimiento real más seguido que ~15s para oro, PAXG sí tiene ticks genuinos; puede
                 diferir ~0.5-1% del spot exacto de XAU/USD por ser un instrumento distinto, no spot puro.
+                <br/>Cobertura: si la pila nunca estuvo en positivo y su pérdida llega al {Math.round(EXP_HEDGE_TRIGGER_PCT*100)}%
+                de {fUSD(expFloorStart)} ({fUSD(expFloorStart*EXP_HEDGE_TRIGGER_PCT)}), abre una posición contraria aparte
+                (mismo stake) — la pila sigue con su piso normal; la cobertura cierra junto con ella cuando resuelve.
               </div>
 
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
@@ -6079,10 +6145,10 @@ export default function TradingBot(){
                   </div>
                 ):(
                   <div className="table-scroll">
-                    <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:950}}>
-                      <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px",
+                    <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:1050}}>
+                      <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px",
                         gap:10,padding:"0 10px 4px",fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700}}>
-                        <div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div><div>OBJETIVO PILA</div><div>STOP PILA</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div>
+                        <div>TIPO</div><div>ENTRADA</div><div>ACTUAL</div><div>%</div><div>OBJETIVO PILA</div><div>STOP PILA</div><div>PNL</div><div>VOL/COMISIÓN</div><div>ORIGEN</div><div>ESTADO</div><div>PATRONES</div>
                       </div>
                       {expPositions.map(pos=>{
                         const livePrice=expPrice??pos.entry;
@@ -6095,7 +6161,7 @@ export default function TradingBot(){
                         const volumen=pos.allocatedSize*(pos.multiplier||DEFAULT_MULTIPLIER);
                         const elapsedMin=Math.floor((Date.now()-(pos.openTime||Date.now()))/60000);
                         return(
-                          <div key={pos.id} style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px",
+                          <div key={pos.id} style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px",
                             gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:7,padding:"8px 10px"}}>
                             <span style={{fontSize:10,fontWeight:700,color:dirCol}}>{pos.type==="BUY"?"▲ BUY":"▼ SELL"}</span>
                             <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(pos.entry,2)}</span>
@@ -6113,6 +6179,7 @@ export default function TradingBot(){
                               background:isProtected?`${T.green}18`:"transparent",padding:isProtected?"3px 7px":0,borderRadius:4}}>
                               {isProtected?"🔒 protegida":`hace ${elapsedMin}m`}
                             </span>
+                            <span style={{fontSize:8,fontWeight:700,color:T.text,background:T.dim,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>{pos.pattern||"—"}</span>
                           </div>
                         );
                       })}
@@ -6120,12 +6187,34 @@ export default function TradingBot(){
                           SUMA de todas las filas, no contra una sola; esto evita
                           tener que sumarlas a mano para saber si ya está cerca del
                           piso o no (pedido explícito tras verlo confuso en vivo). */}
-                      <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px",
+                      <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px",
                         gap:10,alignItems:"center",background:T.dim,border:`2px solid ${stackPnl>=0?T.green:T.red}`,borderRadius:7,padding:"8px 10px"}}>
                         <span style={{fontSize:9,fontWeight:700,color:T.muted,gridColumn:"1 / 7"}}>TOTAL PILA ({expPositions.length}/{expMaxStack})</span>
                         <span className="mono" style={{fontSize:12,fontWeight:700,color:stackPnl>=0?T.green:T.red}}>{fUSD(stackPnl)}</span>
                         <span></span><span></span><span></span>
                       </div>
+                      {expHedgePos&&(()=>{
+                        const hLive=expPrice??expHedgePos.entry;
+                        const hDir=expHedgePos.type==="BUY"?1:-1;
+                        const hPnl=posPnL(expHedgePos,hLive,expHedgePos.allocatedSize);
+                        const hPct=hDir*(hLive-expHedgePos.entry)/expHedgePos.entry*100;
+                        const hCol=hPnl>=0?T.green:T.red;
+                        return(
+                          <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px",
+                            gap:10,alignItems:"center",background:`${hCol}10`,border:`2px dashed ${hCol}`,borderRadius:7,padding:"8px 10px"}}>
+                            <span style={{fontSize:10,fontWeight:700,color:expHedgePos.type==="BUY"?T.green:T.red}}>{expHedgePos.type==="BUY"?"▲ BUY":"▼ SELL"}</span>
+                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(expHedgePos.entry,2)}</span>
+                            <span className="mono" style={{fontSize:10,color:T.text}}>{fP(hLive,2)}</span>
+                            <span className="mono" style={{fontSize:10,fontWeight:700,color:hCol}}>{fPct(hPct)}</span>
+                            <span></span><span></span>
+                            <span className="mono" style={{fontSize:11,fontWeight:700,color:hCol}}>{fUSD(hPnl)}</span>
+                            <div><div className="mono" style={{fontSize:10,fontWeight:700,color:T.text}}>${(expHedgePos.allocatedSize*(expHedgePos.multiplier||DEFAULT_MULTIPLIER)).toFixed(0)}</div></div>
+                            <span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.accent,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>🛡️ COBERTURA</span>
+                            <span style={{fontSize:8,color:T.muted}}>cierra con la pila</span>
+                            <span style={{fontSize:8,fontWeight:700,color:T.text,background:T.dim,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>{expHedgePos.pattern||"COBERTURA"}</span>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 )}
@@ -6133,7 +6222,7 @@ export default function TradingBot(){
 
               {expChartCandles.length>5?(
                 <div style={{height:520,border:`1px solid ${T.border}`,borderRadius:8,overflow:"hidden",marginBottom:12}}>
-                  <LWChart candles={expChartCandles} positions={expPositions} trades={expTrades}
+                  <LWChart candles={expChartCandles} positions={expHedgePos?[...expPositions,expHedgePos]:expPositions} trades={expTrades}
                     symbol={EXP_SYMBOL} precision={2} srLevels={{supports:[],resistances:[],all:[]}}
                     aiResult={null} tfInterval="1h" tpTarget={expAddStep} slTarget={Math.abs(expFloorStart)}/>
                 </div>
@@ -6146,8 +6235,11 @@ export default function TradingBot(){
               {/* HISTÓRICO — mismas columnas que la tabla de Histórico del bot
                   principal (APERTURA/CIERRE/PAR/TIPO/ENTRADA/SALIDA/PNL/
                   MOTIVO/VOL-COMISIÓN/ORIGEN/PATRONES), pedido explícitamente.
-                  PATRONES siempre "—": esta estrategia no usa detectPatterns,
-                  entra solo por el color de la vela anterior. */}
+                  PATRONES aquí es el motivo de APERTURA de la posición
+                  (VELA ANTERIOR/PIRÁMIDE/VOLTEO/COBERTURA) — distinto de
+                  MOTIVO, que es el motivo de CIERRE (FLIP/HEDGE). Pedido
+                  explícito para poder verificar en vivo si la cobertura
+                  (COBERTURA) está disparando. */}
               <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:8}}>HISTÓRICO</div>
               {expTrades.length>0&&(
                 <div className="table-scroll">
@@ -6192,7 +6284,7 @@ export default function TradingBot(){
                                     <div style={{fontSize:7,color:T.muted}}>sin comisión</div>
                                   </div>
                                   <span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.yellow,padding:"2px 7px",borderRadius:4,textAlign:"center",width:"fit-content"}}>EXPERIMENTO</span>
-                                  <span style={{fontSize:9,color:T.muted}}>—</span>
+                                  <span style={{fontSize:9,color:T.muted}}>{t.pattern||"—"}</span>
                                 </div>
                               );
                             })}

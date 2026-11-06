@@ -177,7 +177,8 @@ CREATE TABLE IF NOT EXISTS exp_trades (
   entry_price      NUMERIC NOT NULL,
   exit_price       NUMERIC NOT NULL,
   pnl              NUMERIC NOT NULL,
-  reason           TEXT,                    -- 'FLIP' (always, for now)
+  reason           TEXT,                    -- 'FLIP' | 'HEDGE' (motivo de CIERRE)
+  pattern          TEXT,                    -- 'VELA ANTERIOR' | 'PIRÁMIDE' | 'VOLTEO' | 'COBERTURA' (motivo de APERTURA)
   allocated_size   NUMERIC,
   multiplier       INT,
   opened_at        TIMESTAMPTZ,

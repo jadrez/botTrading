@@ -25,6 +25,7 @@ const EXP_FLOOR_ARM_AT = 10;
 const EXP_MAX_STACK_DEFAULT = 10; // overridden live by cfg.maxStack (exp_max_stack)
 const EXP_QUICK_REVERSAL_FRACTION = 0.3;
 const EXP_CANARY_PEAK = 5, EXP_CANARY_MIN_STACK = 3; // ver nota en trading-bot-v3.jsx junto a estas mismas constantes (v2: % de EXP_RETAIN_PCT, no rango fijo)
+const EXP_HEDGE_TRIGGER_PCT = 0.5; // ver nota en trading-bot-v3.jsx
 const SESSION_ID = `server:${process.env.FLY_MACHINE_ID || "local"}:${Math.random().toString(36).slice(2)}`;
 
 let pool = null;
@@ -70,6 +71,7 @@ export function startExpEngine() {
   let peak = 0;
   let lastPosPeak = 0; // pico propio de la ÚLTIMA posición apilada (canario)
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
+  let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
   let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
@@ -80,12 +82,12 @@ export function startExpEngine() {
     const changed = floor !== lastDbFloor || positions.length !== lastDbPosCount;
     if (!force && !changed) return;
     lastDbFloor = floor; lastDbPosCount = positions.length;
-    await setConfigValue(db, "exp_live_state", JSON.stringify({ positions, direction, floor, addLevel, peak }));
+    await setConfigValue(db, "exp_live_state", JSON.stringify({ positions, direction, floor, addLevel, peak, hedge }));
   };
 
-  const addExpPos = async (type) => {
+  const addExpPos = async (type, pattern = "VELA ANTERIOR") => {
     if (!price || positions.length >= cfg.maxStack) return;
-    const pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now() };
+    const pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern };
     positions = [...positions, pos];
     lastPosPeak = 0; // nueva "última" posición — el canario arranca de cero para ella
     lastAddPrice = price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
@@ -102,9 +104,9 @@ export function startExpEngine() {
     for (const c of closed) {
       try {
         await db.query(
-          `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, allocated_size, multiplier, opened_at, closed_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-          [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime)]
+          `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, allocated_size, multiplier, opened_at, closed_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime)]
         );
       } catch (e) { log(`error writing exp_trades: ${e.message}`); }
     }
@@ -113,8 +115,29 @@ export function startExpEngine() {
 
   const resetStackTracking = () => { floor = cfg.floorStart; addLevel = 0; peak = 0; };
 
+  // Cierra la cobertura (si existe) junto con la pila principal — sin piso/
+  // objetivo propio, vive y muere con el ciclo que la disparó (ver
+  // EXP_HEDGE_TRIGGER_PCT en trading-bot-v3.jsx).
+  const closeHedge = async (exitPrice) => {
+    if (!hedge) return 0;
+    const h = hedge;
+    const pnl = posPnL(h, exitPrice);
+    const closedAt = Date.now();
+    hedge = null;
+    try {
+      await db.query(
+        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, allocated_size, multiplier, opened_at, closed_at)
+         VALUES ($1,$2,$3,$4,$5,'HEDGE','COBERTURA',$6,$7,$8,$9)`,
+        [EXP_SYMBOL, h.type, h.entry, exitPrice, pnl, h.allocatedSize, h.multiplier, new Date(h.openTime || closedAt), new Date(closedAt)]
+      );
+    } catch (e) { log(`error writing hedge trade: ${e.message}`); }
+    log(`cobertura cerrada en ${pnl.toFixed(2)}`);
+    return pnl;
+  };
+
   const flip = async (exitPrice) => {
-    const totalPnl = await closeAllExpPos(exitPrice, "FLIP");
+    const hedgePnl = await closeHedge(exitPrice);
+    const totalPnl = (await closeAllExpPos(exitPrice, "FLIP")) + hedgePnl;
     const opposite = direction === "BUY" ? "SELL" : "BUY";
     resetStackTracking();
     let note = "";
@@ -124,7 +147,7 @@ export function startExpEngine() {
     }
     log(`pila cerró en ${totalPnl.toFixed(2)} → voltea a ${opposite}${note}`);
     direction = opposite;
-    await addExpPos(opposite);
+    await addExpPos(opposite, "VOLTEO");
   };
 
   const evaluateStack = async () => {
@@ -132,6 +155,15 @@ export function startExpEngine() {
     const stackPnl = positions.reduce((s, p) => s + posPnL(p, price), 0);
     peak = Math.max(peak, stackPnl);
     if (peak >= EXP_FLOOR_ARM_AT) floor = Math.max(floor, peak * EXP_RETAIN_PCT);
+    // Cobertura: la pila NUNCA estuvo en positivo (peak sigue en 0) y la
+    // pérdida agregada ya llega al 50% de cfg.floorStart — abre UNA
+    // posición en la dirección contraria, mismo stake, aparte de la pila.
+    if (!hedge && peak === 0 && stackPnl <= cfg.floorStart * EXP_HEDGE_TRIGGER_PCT) {
+      const hedgeType = direction === "BUY" ? "SELL" : "BUY";
+      hedge = { id: Date.now() + Math.random(), type: hedgeType, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern: "COBERTURA" };
+      log(`cobertura ${hedgeType} abierta @ ${price.toFixed(2)} (pila en ${stackPnl.toFixed(2)})`);
+      await persistLive(true);
+    }
     // Canario: la ÚLTIMA posición apilada se revisa por separado (solo con
     // EXP_CANARY_MIN_STACK+ abiertas) — si su propio pico llega a
     // EXP_CANARY_PEAK y retrocede al mismo % de retención que ya usa el
@@ -164,7 +196,7 @@ export function startExpEngine() {
     );
     if (movedEnough && positions.length < cfg.maxStack) {
       addLevel += cfg.addStep; // solo informativo para la UI (OBJETIVO PILA)
-      await addExpPos(direction);
+      await addExpPos(direction, "PIRÁMIDE");
     }
   };
 
@@ -174,7 +206,7 @@ export function startExpEngine() {
     if (!dir) return;
     direction = dir;
     resetStackTracking();
-    await addExpPos(dir);
+    await addExpPos(dir, "VELA ANTERIOR");
   };
 
   const claimOrCheckOwnership = async () => {
@@ -193,7 +225,7 @@ export function startExpEngine() {
         isOwner = false;
         try {
           const live = JSON.parse((await getConfigValue(db, "exp_live_state", "null")) || "null");
-          if (live) { positions = live.positions || []; direction = live.direction ?? null; if (live.floor != null) floor = live.floor; if (live.addLevel != null) addLevel = live.addLevel; if (live.peak != null) peak = live.peak; }
+          if (live) { positions = live.positions || []; direction = live.direction ?? null; if (live.floor != null) floor = live.floor; if (live.addLevel != null) addLevel = live.addLevel; if (live.peak != null) peak = live.peak; hedge = live.hedge ?? null; }
         } catch {}
       }
     } catch {}
@@ -228,7 +260,8 @@ export function startExpEngine() {
       if (live?.positions?.length) {
         positions = live.positions; direction = live.direction ?? null;
         floor = live.floor ?? cfg.floorStart; addLevel = live.addLevel ?? 0; peak = live.peak ?? 0;
-        log(`pila restaurada al iniciar (${positions.length}/${cfg.maxStack} ${direction}, piso ${floor.toFixed(2)})`);
+        hedge = live.hedge ?? null;
+        log(`pila restaurada al iniciar (${positions.length}/${cfg.maxStack} ${direction}, piso ${floor.toFixed(2)}${hedge?" · cobertura "+hedge.type:""})`);
       }
     } catch {}
     const k = await fetchBinanceKlines("1m", 300).catch(() => null);
