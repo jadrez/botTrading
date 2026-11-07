@@ -1824,6 +1824,8 @@ export default function TradingBot(){
   const [expHistSymbol,setExpHistSymbol] = useState("TODOS");
   const [expHistType,setExpHistType]     = useState("TODOS");
   const [expHistResult,setExpHistResult] = useState("TODOS");
+  const [expHistPage,setExpHistPage]     = useState(1); // paginación del HISTÓRICO — vuelve a 1 cada vez que cambia el filtro
+  useEffect(()=>{setExpHistPage(1);},[expHistFrom,expHistTo,expHistSymbol,expHistType,expHistResult]);
   const [expHedgePos,setExpHedgePos] = useState(null); // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   // Deliberadamente SIN localStorage (a diferencia de los demás exp_*): no
   // queremos que un navegador muestre "en vivo" por una caché vieja antes de
@@ -6247,6 +6249,30 @@ export default function TradingBot(){
               .then(()=>addLog(type==="all"?"🖐️ Cierre manual de TODA la pila solicitado…":`🖐️ Cierre manual solicitado…`,"info"))
               .catch(()=>{});
           };
+          // Filtro del Experimento — UNA sola vez aquí arriba, usado tanto por
+          // el gráfico de RENDIMIENTO POR HORA como por la tabla de HISTÓRICO
+          // más abajo, para que el filtro de PAR (entre otros) afecte a los
+          // dos a la vez: "este filtro de horas debe funcionar también con
+          // el filtro si selecciono BTC o ORO" — antes el gráfico usaba
+          // SIEMPRE todo expTrades sin filtrar, sin importar lo que se
+          // eligiera abajo.
+          const expHistSymbolOptions=[...new Set(expTrades.map(t=>t.symbol).filter(Boolean))];
+          const expHistFromMs=expHistFrom?new Date(expHistFrom+"T00:00:00").getTime():null;
+          const expHistToMs=expHistTo?new Date(expHistTo+"T23:59:59.999").getTime():null;
+          const expFilteredTrades=expTrades.filter(t=>{
+            if(expHistFromMs!=null && (!t.closeTime || t.closeTime<expHistFromMs)) return false;
+            if(expHistToMs!=null && (!t.closeTime || t.closeTime>expHistToMs)) return false;
+            if(expHistSymbol!=="TODOS" && (t.symbol||expSymbol)!==expHistSymbol) return false;
+            if(expHistType!=="TODOS" && t.type!==expHistType) return false;
+            if(expHistResult==="GANANCIA" && !(t.pnl>=0)) return false;
+            if(expHistResult==="PERDIDA" && !(t.pnl<0)) return false;
+            return true;
+          });
+          const expHasFilters=expHistFrom||expHistTo||expHistSymbol!=="TODOS"||expHistType!=="TODOS"||expHistResult!=="TODOS";
+          const EXP_HIST_PAGE_SIZE=50;
+          const expHistTotalPages=Math.max(1,Math.ceil(expFilteredTrades.length/EXP_HIST_PAGE_SIZE));
+          const expHistPageSafe=Math.min(expHistPage,expHistTotalPages);
+          const expHistPageTrades=expFilteredTrades.slice((expHistPageSafe-1)*EXP_HIST_PAGE_SIZE,expHistPageSafe*EXP_HIST_PAGE_SIZE);
           return(
           <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1600}}>
 
@@ -6272,6 +6298,62 @@ export default function TradingBot(){
                 se cierra sola (SL propio); si en cambio gana, se absorbe como la nueva pila en vez de cerrarse al voltear.
               </div>
 
+              {/* Filtro compartido — afecta AL MISMO TIEMPO el gráfico de
+                  RENDIMIENTO POR HORA de aquí abajo y la tabla de HISTÓRICO
+                  más abajo (pedido explícito: "este filtro de horas debe
+                  funcionar también con el filtro si selecciono BTC o ORO" —
+                  antes el gráfico ignoraba el filtro de PAR). Un solo
+                  filtro arriba de todo en vez de uno por sección. */}
+              <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"flex-end",marginBottom:10,padding:"8px 10px",background:T.dim,borderRadius:6}}>
+                <div>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>DESDE</div>
+                  <input type="date" value={expHistFrom} onChange={e=>setExpHistFrom(e.target.value)}
+                    style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10}}/>
+                </div>
+                <div>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>HASTA</div>
+                  <input type="date" value={expHistTo} onChange={e=>setExpHistTo(e.target.value)}
+                    style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10}}/>
+                </div>
+                <div>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>PAR</div>
+                  <select value={expHistSymbol} onChange={e=>setExpHistSymbol(e.target.value)}
+                    style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
+                    <option value="TODOS">Todos</option>
+                    {expHistSymbolOptions.map(s=><option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>TIPO</div>
+                  <select value={expHistType} onChange={e=>setExpHistType(e.target.value)}
+                    style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
+                    <option value="TODOS">Todos</option>
+                    <option value="BUY">BUY</option>
+                    <option value="SELL">SELL</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>RESULTADO</div>
+                  <select value={expHistResult} onChange={e=>setExpHistResult(e.target.value)}
+                    style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
+                    <option value="TODOS">Todos</option>
+                    <option value="GANANCIA">Ganancias</option>
+                    <option value="PERDIDA">Pérdidas</option>
+                  </select>
+                </div>
+                {expHasFilters&&(
+                  <button onClick={()=>{setExpHistFrom("");setExpHistTo("");setExpHistSymbol("TODOS");setExpHistType("TODOS");setExpHistResult("TODOS");}}
+                    style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,borderRadius:4,padding:"5px 10px",cursor:"pointer",fontSize:9,fontWeight:600}}>
+                    ✕ Limpiar filtros
+                  </button>
+                )}
+                {expHasFilters&&(
+                  <div style={{fontSize:9,color:T.muted,marginLeft:"auto",alignSelf:"center"}}>
+                    {expFilteredTrades.length} de {expTrades.length} · afecta el gráfico y el histórico de abajo
+                  </div>
+                )}
+              </div>
+
               {/* RENDIMIENTO POR HORA — pedido explícito: "estudiando cuales
                   son las mejores horas para que este experimento funcione,
                   dado que si veo muy excelente avance pero al parecer es
@@ -6280,16 +6362,23 @@ export default function TradingBot(){
                   learningStats.byHour más arriba) para que se lea igual,
                   pero en HORA LOCAL del navegador (no UTC) — lo que importa
                   aquí es la hora del reloj del usuario, no normalizar entre
-                  dispositivos. Agrupa el histórico CERRADO del Experimento;
-                  no cambia ninguna decisión del motor todavía, es solo para
-                  VER el patrón antes de decidir qué hacer con él. */}
+                  dispositivos. Usa expFilteredTrades (el filtro de arriba),
+                  NO expTrades directo — así "mejor hora" es dinámico según
+                  el PAR/fechas/tipo elegidos, no siempre la mezcla completa.
+                  Se recalcula en CADA render (no hay caché/snapshot): apenas
+                  cierra un trade nuevo y expTrades cambia, las barras y el
+                  mejor/peor horario se actualizan solos, sin recargar. */}
               <div style={{marginBottom:16}}>
-                <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:4}}>RENDIMIENTO POR HORA (hora local)</div>
-                {expTrades.length===0?(
-                  <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>Sin historial todavía — el patrón aparece con los primeros cierres.</div>
+                <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:4}}>
+                  RENDIMIENTO POR HORA (hora local{expHistSymbol!=="TODOS"?` · ${expHistSymbol}`:""})
+                </div>
+                {expFilteredTrades.length===0?(
+                  <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>
+                    {expHasFilters?"Ningún trade coincide con el filtro de arriba.":"Sin historial todavía — el patrón aparece con los primeros cierres."}
+                  </div>
                 ):(()=>{
                   const byH={};
-                  for(const t of expTrades){
+                  for(const t of expFilteredTrades){
                     if(!t.closeTime) continue;
                     const h=new Date(t.closeTime).getHours();
                     if(!byH[h]) byH[h]={t:0,wins:0,pnl:0};
@@ -6318,7 +6407,7 @@ export default function TradingBot(){
                               <div style={{width:"100%",height:`${heightPct}%`,background:barColor,borderRadius:2,
                                 opacity:hasData?1:0.35,transition:"height .4s"}}/>
                             </div>
-                            <span style={{fontSize:6,color:T.muted}}>{h.hour}</span>
+                            <span style={{fontSize:7,color:T.muted,fontWeight:(h.hour===12||h.hour===17)?700:400}}>{h.hour}</span>
                           </div>
                         );
                       })}
@@ -6555,77 +6644,16 @@ export default function TradingBot(){
                   el motivo de APERTURA de la posición (VELA ANTERIOR/
                   PIRÁMIDE/VOLTEO/COBERTURA) — distinto de MOTIVO, que es
                   el motivo de CIERRE (FLIP/HEDGE). */}
-              <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:8}}>HISTÓRICO</div>
-              {(()=>{
-                const histSymbolOptions=[...new Set(expTrades.map(t=>t.symbol).filter(Boolean))];
-                const fromMs=expHistFrom?new Date(expHistFrom+"T00:00:00").getTime():null;
-                const toMs=expHistTo?new Date(expHistTo+"T23:59:59.999").getTime():null;
-                const filteredTrades=expTrades.filter(t=>{
-                  if(fromMs!=null && (!t.closeTime || t.closeTime<fromMs)) return false;
-                  if(toMs!=null && (!t.closeTime || t.closeTime>toMs)) return false;
-                  if(expHistSymbol!=="TODOS" && (t.symbol||expSymbol)!==expHistSymbol) return false;
-                  if(expHistType!=="TODOS" && t.type!==expHistType) return false;
-                  if(expHistResult==="GANANCIA" && !(t.pnl>=0)) return false;
-                  if(expHistResult==="PERDIDA" && !(t.pnl<0)) return false;
-                  return true;
-                });
-                const hasFilters=expHistFrom||expHistTo||expHistSymbol!=="TODOS"||expHistType!=="TODOS"||expHistResult!=="TODOS";
-                return(<>
-                <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"flex-end",marginBottom:10,padding:"8px 10px",background:T.dim,borderRadius:6}}>
-                  <div>
-                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>DESDE</div>
-                    <input type="date" value={expHistFrom} onChange={e=>setExpHistFrom(e.target.value)}
-                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10}}/>
-                  </div>
-                  <div>
-                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>HASTA</div>
-                    <input type="date" value={expHistTo} onChange={e=>setExpHistTo(e.target.value)}
-                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10}}/>
-                  </div>
-                  <div>
-                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>PAR</div>
-                    <select value={expHistSymbol} onChange={e=>setExpHistSymbol(e.target.value)}
-                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
-                      <option value="TODOS">Todos</option>
-                      {histSymbolOptions.map(s=><option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>TIPO</div>
-                    <select value={expHistType} onChange={e=>setExpHistType(e.target.value)}
-                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
-                      <option value="TODOS">Todos</option>
-                      <option value="BUY">BUY</option>
-                      <option value="SELL">SELL</option>
-                    </select>
-                  </div>
-                  <div>
-                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>RESULTADO</div>
-                    <select value={expHistResult} onChange={e=>setExpHistResult(e.target.value)}
-                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
-                      <option value="TODOS">Todos</option>
-                      <option value="GANANCIA">Ganancias</option>
-                      <option value="PERDIDA">Pérdidas</option>
-                    </select>
-                  </div>
-                  {hasFilters&&(
-                    <button onClick={()=>{setExpHistFrom("");setExpHistTo("");setExpHistSymbol("TODOS");setExpHistType("TODOS");setExpHistResult("TODOS");}}
-                      style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,borderRadius:4,padding:"5px 10px",cursor:"pointer",fontSize:9,fontWeight:600}}>
-                      ✕ Limpiar filtros
-                    </button>
-                  )}
-                  {hasFilters&&(
-                    <div style={{fontSize:9,color:T.muted,marginLeft:"auto",alignSelf:"center"}}>
-                      {filteredTrades.length} de {expTrades.length}
-                    </div>
-                  )}
-                </div>
-              {filteredTrades.length===0&&(
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+                <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>HISTÓRICO</div>
+                <div style={{fontSize:8,color:T.muted}}>Usa el filtro de arriba (fechas/PAR/tipo/resultado) · {expFilteredTrades.length} trade{expFilteredTrades.length!==1?"s":""}</div>
+              </div>
+              {expFilteredTrades.length===0&&(
                 <div style={{background:T.dim,borderRadius:8,padding:"16px",textAlign:"center",fontSize:10,color:T.muted}}>
-                  {hasFilters?"Ningún trade coincide con el filtro.":"Sin historial todavía."}
+                  {expHasFilters?"Ningún trade coincide con el filtro.":"Sin historial todavía."}
                 </div>
               )}
-              {filteredTrades.length>0&&(
+              {expFilteredTrades.length>0&&(
                 <div className="table-scroll">
                   <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:1220}}>
                     <div style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 70px 100px 100px 90px 90px 100px 100px 1fr",
@@ -6642,7 +6670,7 @@ export default function TradingBot(){
                       // forma de ver de un vistazo cuánto dio ESE cierre en total
                       // (pedido explícito: "genera confusión").
                       const groups=[];
-                      for(const t of filteredTrades.slice(0,50)){
+                      for(const t of expHistPageTrades){
                         const key=`${t.closeTime?Math.floor(t.closeTime/2000):"x"}_${t.exit}_${t.reason}`;
                         const last=groups[groups.length-1];
                         if(last&&last.key===key) last.items.push(t);
@@ -6693,11 +6721,21 @@ export default function TradingBot(){
                   </div>
                 </div>
               )}
-              {filteredTrades.length>50&&(
-                <div style={{fontSize:9,color:T.muted,textAlign:"center",marginTop:8}}>Mostrando 50 de {filteredTrades.length}.</div>
+              {expHistTotalPages>1&&(
+                <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:10,marginTop:10}}>
+                  <button disabled={expHistPageSafe<=1} onClick={()=>setExpHistPage(p=>Math.max(1,p-1))}
+                    style={{background:"transparent",border:`1px solid ${T.border}`,color:expHistPageSafe<=1?T.muted:T.text,
+                      borderRadius:5,padding:"5px 12px",cursor:expHistPageSafe<=1?"default":"pointer",fontSize:10,fontWeight:600,opacity:expHistPageSafe<=1?0.5:1}}>
+                    ← Anterior
+                  </button>
+                  <span style={{fontSize:9,color:T.muted}}>Página {expHistPageSafe} de {expHistTotalPages} · {expFilteredTrades.length} trades</span>
+                  <button disabled={expHistPageSafe>=expHistTotalPages} onClick={()=>setExpHistPage(p=>Math.min(expHistTotalPages,p+1))}
+                    style={{background:"transparent",border:`1px solid ${T.border}`,color:expHistPageSafe>=expHistTotalPages?T.muted:T.text,
+                      borderRadius:5,padding:"5px 12px",cursor:expHistPageSafe>=expHistTotalPages?"default":"pointer",fontSize:10,fontWeight:600,opacity:expHistPageSafe>=expHistTotalPages?0.5:1}}>
+                    Siguiente →
+                  </button>
+                </div>
               )}
-              </>);
-              })()}
 
               {expTrades.length>0&&(
                 <button onClick={()=>{if(window.confirm("¿Borrar historial del experimento?")){setExpTrades([]);saveExpTrades([]);}}}
