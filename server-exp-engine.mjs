@@ -142,7 +142,13 @@ export function startExpEngine() {
 
   const addExpPos = async (type, pattern = "VELA ANTERIOR") => {
     if (!price || positions.length >= cfg.maxStack) return;
-    let pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern };
+    // symbol se graba EN LA POSICIÓN al abrir (no solo al cerrar) — defensa
+    // extra ante el bug real que pasó en vivo: cfg.symbol cambió mientras
+    // una posición de otro símbolo seguía abierta, y evaluateStack calculó
+    // PnL mezclando el precio nuevo contra la entrada vieja (ver guard en
+    // reloadConfig/bootstrap). Con esto, aunque ese guard fallara, cualquier
+    // posición puede verificar contra QUÉ símbolo se abrió de verdad.
+    let pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern, symbol: cfg.symbol };
     if (cfg.derivLive) {
       try {
         const r = await derivOrderCall("open", {
@@ -159,7 +165,7 @@ export function startExpEngine() {
     positions = [...positions, pos];
     lastPosPeak = 0; // nueva "última" posición — el canario arranca de cero para ella
     lastAddPrice = price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
-    log(`${type} XAU/USD @ ${price.toFixed(2)} — pila ${positions.length}/${cfg.maxStack}`);
+    log(`${type} ${cfg.symbol} @ ${price.toFixed(2)} — pila ${positions.length}/${cfg.maxStack}`);
     await persistLive(true);
   };
 
@@ -213,8 +219,12 @@ export function startExpEngine() {
     // for) con una pila de 5 posiciones podía sumar 2.5-3.5s solo para
     // cerrar (5 × ~0.5-0.7s cada llamada a Deriv), justo el "bajonazo"
     // reportado en vivo durante un volteo con la pila llena.
+    // symbol: el de la POSICIÓN (grabado al abrirla), no cfg.symbol actual —
+    // si cfg.symbol cambió entre que se abrió y que se cierra (no debería,
+    // el guard lo impide, pero esto es la red de seguridad real), el
+    // registro histórico queda con el símbolo correcto de todas formas.
     const results = await Promise.all(
-      positions.map(pos => closeOnePosition(pos, exitPrice, { symbol: cfg.symbol, reason, objetivo, stop }))
+      positions.map(pos => closeOnePosition(pos, exitPrice, { symbol: pos.symbol || cfg.symbol, reason, objetivo, stop }))
     );
     const remaining = [], closedRecords = [];
     results.forEach(({ ok, record }, i) => { if (ok) closedRecords.push(record); else remaining.push(positions[i]); });
@@ -233,7 +243,7 @@ export function startExpEngine() {
     if (!hedge) return { pnl: 0, ok: true };
     const objetivo = addLevel + cfg.addStep;
     const stop = floor;
-    const { ok, record } = await closeOnePosition(hedge, exitPrice, { symbol: cfg.symbol, reason: "HEDGE", pattern: "COBERTURA", objetivo, stop });
+    const { ok, record } = await closeOnePosition(hedge, exitPrice, { symbol: hedge.symbol || cfg.symbol, reason: "HEDGE", pattern: "COBERTURA", objetivo, stop });
     if (!ok) { log("Deriv: no se pudo confirmar el cierre de la cobertura — se reintenta"); return { pnl: 0, ok: false }; }
     hedge = null;
     // persistLive() normal solo detecta cambios de floor/cantidad de
@@ -321,7 +331,7 @@ export function startExpEngine() {
     const pos = positions.find(p => p.id === posId);
     if (!pos) { log(`cierre manual: posición ${posId} ya no está en la pila`); return true; }
     const objetivo = addLevel + cfg.addStep, stop = floor;
-    const { ok, record } = await closeOnePosition(pos, exitPrice, { symbol: cfg.symbol, reason: "MANUAL", objetivo, stop });
+    const { ok, record } = await closeOnePosition(pos, exitPrice, { symbol: pos.symbol || cfg.symbol, reason: "MANUAL", objetivo, stop });
     if (!ok) return false;
     positions = positions.filter(p => p.id !== posId);
     await persistLive(true);
@@ -332,6 +342,18 @@ export function startExpEngine() {
 
   const evaluateStack = async () => {
     if (!isOwner || !price || !positions.length) return;
+    // Red de seguridad real: pasó en vivo que cfg.symbol cambió con una
+    // posición de OTRO símbolo todavía abierta (bug de orden en bootstrap,
+    // ya corregido) y esto calculó PnL mezclando el precio nuevo contra una
+    // entrada vieja de otro símbolo — números absurdos que dispararon un
+    // volteo en bucle. Si algo abierto no coincide con cfg.symbol, no se
+    // evalúa NADA hasta que se resuelva (ver checkManualCloseRequest, que
+    // sigue permitiendo cerrarla a mano).
+    const mismatched = positions.find(p => p.symbol && p.symbol !== cfg.symbol);
+    if (mismatched || (hedge?.symbol && hedge.symbol !== cfg.symbol)) {
+      log(`⚠️ hay posiciones abiertas en un símbolo distinto a cfg.symbol (${cfg.symbol}) — se detiene evaluateStack hasta resolverlo`);
+      return;
+    }
     const stackPnl = positions.reduce((s, p) => s + posPnL(p, price), 0);
     peak = Math.max(peak, stackPnl);
     if (peak >= EXP_FLOOR_ARM_AT) floor = Math.max(floor, peak * EXP_RETAIN_PCT);
@@ -340,7 +362,7 @@ export function startExpEngine() {
     // posición en la dirección contraria, mismo stake, aparte de la pila.
     if (!hedge && peak === 0 && stackPnl <= cfg.floorStart * EXP_HEDGE_TRIGGER_PCT) {
       const hedgeType = direction === "BUY" ? "SELL" : "BUY";
-      let h = { id: Date.now() + Math.random(), type: hedgeType, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern: "COBERTURA" };
+      let h = { id: Date.now() + Math.random(), type: hedgeType, entry: price, allocatedSize: cfg.stake, multiplier: DEFAULT_MULTIPLIER, openTime: Date.now(), pattern: "COBERTURA", symbol: cfg.symbol };
       if (cfg.derivLive) {
         try {
           const r = await derivOrderCall("open", {

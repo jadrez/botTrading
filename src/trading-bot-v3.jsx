@@ -1815,6 +1815,15 @@ export default function TradingBot(){
   const [expDirection,setExpDirection] = useState(null);
   const [expSymbol,setExpSymbol]       = useState(()=>localStorage.getItem(LS_EXP_SYMBOL)||EXP_SYMBOL);
   const expSymbolRef = useRef(expSymbol);
+  // Filtro del HISTÓRICO del Experimento — nombres propios (expHist*) para no
+  // chocar con el filtro ya existente del histórico del bot principal
+  // (hist*, más abajo). Solo UI, nada se persiste (se resetea al recargar),
+  // pedido explícito: Fechas, PAR, TIPO, ganancia/pérdida.
+  const [expHistFrom,setExpHistFrom]     = useState("");
+  const [expHistTo,setExpHistTo]         = useState("");
+  const [expHistSymbol,setExpHistSymbol] = useState("TODOS");
+  const [expHistType,setExpHistType]     = useState("TODOS");
+  const [expHistResult,setExpHistResult] = useState("TODOS");
   const [expHedgePos,setExpHedgePos] = useState(null); // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   // Deliberadamente SIN localStorage (a diferencia de los demás exp_*): no
   // queremos que un navegador muestre "en vivo" por una caché vieja antes de
@@ -1901,7 +1910,12 @@ export default function TradingBot(){
           if(d.exp_floor_start!=null) setExpFloorStart(parseFloat(d.exp_floor_start));
           if(d.exp_max_stack!=null) setExpMaxStack(parseInt(d.exp_max_stack,10));
           if(d.exp_deriv_live!=null) setExpDerivLive(d.exp_deriv_live==="1");
-          if(d.exp_symbol && EXP_SYMBOLS[d.exp_symbol]) setExpSymbol(d.exp_symbol);
+          // El símbolo restaurado se lee ANTES de aplicar exp_symbol — mismo
+          // motivo que el guard del servidor: si hay una posición/cobertura
+          // abierta en OTRO símbolo, el de la DB (exp_symbol) se ignora y se
+          // usa el de la posición real, para no mezclar precio nuevo contra
+          // entrada vieja de otro símbolo (pasó en vivo, ver evaluateStack).
+          let liveOpenSymbol=null;
           if(d.exp_live_state){
             try{
               const live=JSON.parse(d.exp_live_state);
@@ -1911,8 +1925,11 @@ export default function TradingBot(){
               if(live.addLevel!=null) expAddLevelRef.current=live.addLevel;
               if(live.peak!=null) expStackPeakRef.current=live.peak;
               expHedgePosRef.current=live.hedge??null; setExpHedgePos(live.hedge??null);
+              liveOpenSymbol=live.positions?.[0]?.symbol || live.hedge?.symbol || null;
             }catch{}
           }
+          if(liveOpenSymbol && EXP_SYMBOLS[liveOpenSymbol]) setExpSymbol(liveOpenSymbol);
+          else if(d.exp_symbol && EXP_SYMBOLS[d.exp_symbol]) setExpSymbol(d.exp_symbol);
         }
         if(tradesRes.ok){
           const d=await tradesRes.json();
@@ -2215,14 +2232,18 @@ export default function TradingBot(){
     const addExpPos=(type,pattern="VELA ANTERIOR")=>{
       const price=expPriceRef.current;
       if(!price || expPositionsRef.current.length>=expMaxStackRef.current) return;
+      // symbol se graba EN LA POSICIÓN al abrir — mismo motivo que en el
+      // servidor: si expSymbol llegara a cambiar con esto todavía abierto,
+      // el registro y la evaluación pueden saber de verdad en qué símbolo
+      // se abrió, en vez de asumir el expSymbol actual (que pudo cambiar).
       const pos={id:Date.now()+Math.random(), type, entry:price, allocatedSize:expStakeRef.current,
-        multiplier:DEFAULT_MULTIPLIER, openTime:Date.now(), pattern};
+        multiplier:DEFAULT_MULTIPLIER, openTime:Date.now(), pattern, symbol:expSymbolRef.current};
       expPositionsRef.current=[...expPositionsRef.current,pos];
       expLastPosPeakRef.current=0; // nueva "última" posición — el canario arranca de cero para ella
       expLastAddPriceRef.current=price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
       setExpPositions(expPositionsRef.current);
       persistLive();
-      addLog(`🧪 Experimento ${type} XAU/USD @ ${fP(price,2)} — pila ${expPositionsRef.current.length}/${expMaxStackRef.current}`,type==="BUY"?"buy":"sell");
+      addLog(`🧪 Experimento ${type} ${expSymbolRef.current} @ ${fP(price,2)} — pila ${expPositionsRef.current.length}/${expMaxStackRef.current}`,type==="BUY"?"buy":"sell");
     };
 
     const closeAllExpPos=(exitPrice,reason)=>{
@@ -2232,7 +2253,7 @@ export default function TradingBot(){
       const objetivo=expAddLevelRef.current+expAddStepRef.current;
       const stop=expFloorRef.current;
       const closed=expPositionsRef.current.map(pos=>({
-        ...pos, symbol:expSymbolRef.current, exit:exitPrice, pnl:posPnL(pos,exitPrice,pos.allocatedSize),
+        ...pos, symbol:pos.symbol||expSymbolRef.current, exit:exitPrice, pnl:posPnL(pos,exitPrice,pos.allocatedSize),
         reason, objetivo, stop, time:now(), closeTime:Date.now(), tradeTime:Math.floor(Date.now()/1000),
       }));
       expPositionsRef.current=[];
@@ -2274,13 +2295,13 @@ export default function TradingBot(){
       persistLive();
       const closedAt=Date.now();
       setExpTrades(prev=>{
-        const next=[{...hedge,symbol:expSymbolRef.current,exit:exitPrice,pnl,reason:"HEDGE",objetivo,stop,time:now(),
+        const next=[{...hedge,symbol:hedge.symbol||expSymbolRef.current,exit:exitPrice,pnl,reason:"HEDGE",objetivo,stop,time:now(),
           closeTime:closedAt,tradeTime:Math.floor(closedAt/1000)},...prev].slice(0,200);
         saveExpTrades(next); return next;
       });
       fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
-          symbol:expSymbolRef.current, type:hedge.type, entryPrice:hedge.entry, exitPrice, pnl, reason:"HEDGE",
+          symbol:hedge.symbol||expSymbolRef.current, type:hedge.type, entryPrice:hedge.entry, exitPrice, pnl, reason:"HEDGE",
           pattern:"COBERTURA", objetivoPila:objetivo, stopPila:stop, allocatedSize:hedge.allocatedSize, multiplier:hedge.multiplier,
           openedAt:hedge.openTime?new Date(hedge.openTime).toISOString():undefined,
           closedAt:new Date(closedAt).toISOString(),
@@ -2341,6 +2362,17 @@ export default function TradingBot(){
       if(!expIsOwnerRef.current) return; // otra pestaña/dispositivo está manejando el motor ahora
       const price=expPriceRef.current;
       if(!price || !expPositionsRef.current.length) return;
+      // Red de seguridad real: pasó en vivo que expSymbol cambió con una
+      // posición de OTRO símbolo todavía abierta y esto calculó PnL
+      // mezclando el precio nuevo contra una entrada vieja de otro símbolo
+      // — números absurdos que dispararon un volteo en bucle. Si algo
+      // abierto no coincide con expSymbol, no se evalúa nada hasta
+      // resolverlo (el cierre manual sigue funcionando).
+      const mismatched=expPositionsRef.current.find(p=>p.symbol && p.symbol!==expSymbolRef.current);
+      if(mismatched || (expHedgePosRef.current?.symbol && expHedgePosRef.current.symbol!==expSymbolRef.current)){
+        addLog(`⚠️ Experimento: hay posiciones abiertas en otro símbolo distinto a ${expSymbolRef.current} — evaluación detenida hasta resolverlo`,"info");
+        return;
+      }
       const stackPnl=expPositionsRef.current.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize),0);
       expStackPeakRef.current=Math.max(expStackPeakRef.current,stackPnl);
       // Piso continuo, DESACOPLADO del apilado: mientras el pico de la pila
@@ -2364,7 +2396,7 @@ export default function TradingBot(){
       if(!expHedgePosRef.current && expStackPeakRef.current===0 && stackPnl<=expFloorStartRef.current*EXP_HEDGE_TRIGGER_PCT){
         const hedgeType=expDirectionRef.current==="BUY"?"SELL":"BUY";
         const hedge={id:Date.now()+Math.random(), type:hedgeType, entry:price, allocatedSize:expStakeRef.current,
-          multiplier:DEFAULT_MULTIPLIER, openTime:Date.now(), pattern:"COBERTURA"};
+          multiplier:DEFAULT_MULTIPLIER, openTime:Date.now(), pattern:"COBERTURA", symbol:expSymbolRef.current};
         expHedgePosRef.current=hedge;
         setExpHedgePos(hedge);
         persistLive();
@@ -2566,10 +2598,13 @@ export default function TradingBot(){
       // ni siquiera vale la pena pedirle su propio precio a Binance: sería
       // otra fuente distinta peleando por mostrarse en "ACTUAL").
       if(!expIsOwnerRef.current){ return; }
-      const binanceSym=EXP_SYMBOLS[expSymbolRef.current]?.binance||"PAXGUSDT";
-      const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${binanceSym}`);
-      const d=await r.json();
-      const np=parseFloat(d.price);
+      // Precio EN VIVO: Deriv (mismo tick que usa el servidor para decidir),
+      // NO Binance — reportado en vivo: "el BITCOIN tiene un valor de 75.596
+      // y aquí lo tenemos 75.701", un desfase real entre el spot de Binance
+      // y la cotización de Deriv (el venue que de verdad ejecutaría). Unifica
+      // la fuente para que el precio mostrado sea siempre el que cuenta.
+      const derivSym=EXP_SYMBOLS[expSymbolRef.current]?.deriv;
+      const np=derivSym?await fetchDerivTick(derivSym):null;
       if(!np||isNaN(np)||!alive) return;
       expPriceRef.current=np; setExpPrice(np);
       const nowSec=Math.floor(Date.now()/1000);
@@ -6228,13 +6263,75 @@ export default function TradingBot(){
                 El stake es lo que determina qué tan rápido se mueven estos $: PnL($) = %movimiento_del_precio × stake × 100 —
                 con este stake, {expSymbol} necesita moverse <b>{((expAddStep/(expStake*DEFAULT_MULTIPLIER))*100).toFixed(3)}%</b> para
                 el próximo apilado/volteo (sube el stake si lo quieres más rápido, es solo Simulado).
-                <br/>Precio en vivo cada 1s vía Binance {EXP_SYMBOLS[expSymbol]?.binance} — Yahoo/Deriv no dan movimiento
-                real más seguido que ~15s para la mayoría de estos símbolos, Binance sí tiene ticks genuinos; puede
-                diferir un poco del spot exacto de {expSymbol} según el instrumento.
+                <br/>Precio en vivo cada 1s vía Deriv ({EXP_SYMBOLS[expSymbol]?.deriv}) — el mismo tick que usa el
+                servidor para decidir y el mismo venue que ejecutaría de verdad, así el número que ves siempre
+                coincide con el que cuenta (antes usaba Binance, que podía diferir del spot de Deriv).
                 <br/>Cobertura: si la pila nunca estuvo en positivo y su pérdida llega al {Math.round(EXP_HEDGE_TRIGGER_PCT*100)}%
                 de {fUSD(expFloorStart)} ({fUSD(expFloorStart*EXP_HEDGE_TRIGGER_PCT)}), abre una posición contraria aparte
                 (mismo stake) — la pila sigue con su piso normal; si su propia pérdida llega al 100% de {fUSD(expFloorStart)}
                 se cierra sola (SL propio); si en cambio gana, se absorbe como la nueva pila en vez de cerrarse al voltear.
+              </div>
+
+              {/* RENDIMIENTO POR HORA — pedido explícito: "estudiando cuales
+                  son las mejores horas para que este experimento funcione,
+                  dado que si veo muy excelente avance pero al parecer es
+                  por horas" + "se muestre un gráfico... arriba de símbolo".
+                  Mismo estilo de barras que ya usa el bot principal (ver
+                  learningStats.byHour más arriba) para que se lea igual,
+                  pero en HORA LOCAL del navegador (no UTC) — lo que importa
+                  aquí es la hora del reloj del usuario, no normalizar entre
+                  dispositivos. Agrupa el histórico CERRADO del Experimento;
+                  no cambia ninguna decisión del motor todavía, es solo para
+                  VER el patrón antes de decidir qué hacer con él. */}
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:4}}>RENDIMIENTO POR HORA (hora local)</div>
+                {expTrades.length===0?(
+                  <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>Sin historial todavía — el patrón aparece con los primeros cierres.</div>
+                ):(()=>{
+                  const byH={};
+                  for(const t of expTrades){
+                    if(!t.closeTime) continue;
+                    const h=new Date(t.closeTime).getHours();
+                    if(!byH[h]) byH[h]={t:0,wins:0,pnl:0};
+                    byH[h].t++;
+                    if(t.pnl>=0) byH[h].wins++;
+                    byH[h].pnl+=t.pnl;
+                  }
+                  const hours=Array.from({length:24},(_,h)=>{
+                    const s=byH[h]||{t:0,wins:0,pnl:0};
+                    return {hour:h,t:s.t,wr:s.t?Math.round(s.wins/s.t*100):0,pnl:s.pnl};
+                  });
+                  const withData=hours.filter(h=>h.t>0);
+                  const best=withData.length?withData.reduce((a,b)=>b.pnl>a.pnl?b:a):null;
+                  const worst=withData.length?withData.reduce((a,b)=>b.pnl<a.pnl?b:a):null;
+                  return(<>
+                    <div style={{display:"flex",alignItems:"flex-end",gap:2,height:46}}>
+                      {hours.map(h=>{
+                        const hasData=h.t>0;
+                        const barColor=!hasData?T.border:h.wr>=55?T.green:h.wr<=40?T.red:T.yellow;
+                        const heightPct=hasData?Math.max(8,h.wr):4;
+                        return(
+                          <div key={h.hour}
+                            title={`${String(h.hour).padStart(2,"0")}:00 · ${h.t} trade${h.t!==1?"s":""} · WR ${h.wr}% · PNL ${fUSD(h.pnl)}`}
+                            style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2,cursor:"default"}}>
+                            <div style={{width:"100%",height:34,display:"flex",alignItems:"flex-end"}}>
+                              <div style={{width:"100%",height:`${heightPct}%`,background:barColor,borderRadius:2,
+                                opacity:hasData?1:0.35,transition:"height .4s"}}/>
+                            </div>
+                            <span style={{fontSize:6,color:T.muted}}>{h.hour}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {(best||worst)&&(
+                      <div style={{fontSize:8,color:T.muted,marginTop:4}}>
+                        {best&&<span style={{color:T.green}}>▲ mejor: {String(best.hour).padStart(2,"0")}:00 ({fUSD(best.pnl)}, {best.wr}% WR, {best.t} trades)</span>}
+                        {best&&worst&&best.hour!==worst.hour&&"  ·  "}
+                        {worst&&worst.hour!==best?.hour&&<span style={{color:T.red}}>▼ peor: {String(worst.hour).padStart(2,"0")}:00 ({fUSD(worst.pnl)}, {worst.wr}% WR, {worst.t} trades)</span>}
+                      </div>
+                    )}
+                  </>);
+                })()}
               </div>
 
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
@@ -6243,7 +6340,10 @@ export default function TradingBot(){
                     {(expPositions.length>0||expHedgePos)?"No se puede cambiar con la pila abierta — ciérrala primero."
                       :"Cuál instrumento opera el Experimento (afecta precio en vivo y, si aplica, el contrato real en Deriv)."}</div></div>
                 <select value={expSymbol} disabled={expPositions.length>0||!!expHedgePos}
-                  onChange={e=>setExpSymbol(e.target.value)}
+                  onChange={e=>{
+                    if(expPositions.length>0||expHedgePos){ addLog("No se puede cambiar de símbolo con la pila abierta — ciérrala primero.","info"); return; }
+                    setExpSymbol(e.target.value);
+                  }}
                   style={{background:T.dim,color:T.text,border:`1px solid ${T.border}`,borderRadius:5,padding:"6px 10px",fontSize:11,fontWeight:600}}>
                   {Object.keys(EXP_SYMBOLS).map(s=><option key={s} value={s}>{s}</option>)}
                 </select>
@@ -6456,7 +6556,76 @@ export default function TradingBot(){
                   PIRÁMIDE/VOLTEO/COBERTURA) — distinto de MOTIVO, que es
                   el motivo de CIERRE (FLIP/HEDGE). */}
               <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:8}}>HISTÓRICO</div>
-              {expTrades.length>0&&(
+              {(()=>{
+                const histSymbolOptions=[...new Set(expTrades.map(t=>t.symbol).filter(Boolean))];
+                const fromMs=expHistFrom?new Date(expHistFrom+"T00:00:00").getTime():null;
+                const toMs=expHistTo?new Date(expHistTo+"T23:59:59.999").getTime():null;
+                const filteredTrades=expTrades.filter(t=>{
+                  if(fromMs!=null && (!t.closeTime || t.closeTime<fromMs)) return false;
+                  if(toMs!=null && (!t.closeTime || t.closeTime>toMs)) return false;
+                  if(expHistSymbol!=="TODOS" && (t.symbol||expSymbol)!==expHistSymbol) return false;
+                  if(expHistType!=="TODOS" && t.type!==expHistType) return false;
+                  if(expHistResult==="GANANCIA" && !(t.pnl>=0)) return false;
+                  if(expHistResult==="PERDIDA" && !(t.pnl<0)) return false;
+                  return true;
+                });
+                const hasFilters=expHistFrom||expHistTo||expHistSymbol!=="TODOS"||expHistType!=="TODOS"||expHistResult!=="TODOS";
+                return(<>
+                <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"flex-end",marginBottom:10,padding:"8px 10px",background:T.dim,borderRadius:6}}>
+                  <div>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>DESDE</div>
+                    <input type="date" value={expHistFrom} onChange={e=>setExpHistFrom(e.target.value)}
+                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>HASTA</div>
+                    <input type="date" value={expHistTo} onChange={e=>setExpHistTo(e.target.value)}
+                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>PAR</div>
+                    <select value={expHistSymbol} onChange={e=>setExpHistSymbol(e.target.value)}
+                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
+                      <option value="TODOS">Todos</option>
+                      {histSymbolOptions.map(s=><option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>TIPO</div>
+                    <select value={expHistType} onChange={e=>setExpHistType(e.target.value)}
+                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
+                      <option value="TODOS">Todos</option>
+                      <option value="BUY">BUY</option>
+                      <option value="SELL">SELL</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>RESULTADO</div>
+                    <select value={expHistResult} onChange={e=>setExpHistResult(e.target.value)}
+                      style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
+                      <option value="TODOS">Todos</option>
+                      <option value="GANANCIA">Ganancias</option>
+                      <option value="PERDIDA">Pérdidas</option>
+                    </select>
+                  </div>
+                  {hasFilters&&(
+                    <button onClick={()=>{setExpHistFrom("");setExpHistTo("");setExpHistSymbol("TODOS");setExpHistType("TODOS");setExpHistResult("TODOS");}}
+                      style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,borderRadius:4,padding:"5px 10px",cursor:"pointer",fontSize:9,fontWeight:600}}>
+                      ✕ Limpiar filtros
+                    </button>
+                  )}
+                  {hasFilters&&(
+                    <div style={{fontSize:9,color:T.muted,marginLeft:"auto",alignSelf:"center"}}>
+                      {filteredTrades.length} de {expTrades.length}
+                    </div>
+                  )}
+                </div>
+              {filteredTrades.length===0&&(
+                <div style={{background:T.dim,borderRadius:8,padding:"16px",textAlign:"center",fontSize:10,color:T.muted}}>
+                  {hasFilters?"Ningún trade coincide con el filtro.":"Sin historial todavía."}
+                </div>
+              )}
+              {filteredTrades.length>0&&(
                 <div className="table-scroll">
                   <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:1220}}>
                     <div style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 70px 100px 100px 90px 90px 100px 100px 1fr",
@@ -6473,7 +6642,7 @@ export default function TradingBot(){
                       // forma de ver de un vistazo cuánto dio ESE cierre en total
                       // (pedido explícito: "genera confusión").
                       const groups=[];
-                      for(const t of expTrades.slice(0,50)){
+                      for(const t of filteredTrades.slice(0,50)){
                         const key=`${t.closeTime?Math.floor(t.closeTime/2000):"x"}_${t.exit}_${t.reason}`;
                         const last=groups[groups.length-1];
                         if(last&&last.key===key) last.items.push(t);
@@ -6524,9 +6693,11 @@ export default function TradingBot(){
                   </div>
                 </div>
               )}
-              {expTrades.length>50&&(
-                <div style={{fontSize:9,color:T.muted,textAlign:"center",marginTop:8}}>Mostrando 50 de {expTrades.length}.</div>
+              {filteredTrades.length>50&&(
+                <div style={{fontSize:9,color:T.muted,textAlign:"center",marginTop:8}}>Mostrando 50 de {filteredTrades.length}.</div>
               )}
+              </>);
+              })()}
 
               {expTrades.length>0&&(
                 <button onClick={()=>{if(window.confirm("¿Borrar historial del experimento?")){setExpTrades([]);saveExpTrades([]);}}}
