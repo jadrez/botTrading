@@ -1802,6 +1802,19 @@ export default function TradingBot(){
   // revisa cada 1s (no es una orden de stop real) — un salto violento en un
   // solo segundo puede saltárselo. Bajar este número reduce esa concentración.
   const [expMaxStack,setExpMaxStack]   = useState(()=>parseInt(localStorage.getItem(LS_EXP_MAXSTACK)||String(EXP_MAX_STACK),10));
+  // Texto "en bruto" de estos 4 campos — SEPARADO del número real que usa
+  // el motor. Reportado en vivo: no se podía escribir 0.02 porque el
+  // onChange de antes hacía parseFloat(e.target.value)||fallback en CADA
+  // tecla — borrar el campo da "", parseFloat("")=NaN, NaN||fallback vuelve
+  // al número anterior al instante (nunca se podía vaciar para escribir
+  // algo nuevo); y escribir el primer "0" daba parseFloat("0")=0, que en
+  // JS es falsy, así que 0||fallback TAMBIÉN saltaba al fallback. Con texto
+  // separado se puede escribir libremente ("", "0", "0.", "0.02") y el
+  // número real solo se confirma/recorta (min/max) al salir del campo.
+  const [expStakeText,setExpStakeText]=useState(String(expStake));
+  const [expAddStepText,setExpAddStepText]=useState(String(expAddStep));
+  const [expFloorStartText,setExpFloorStartText]=useState(String(expFloorStart));
+  const [expMaxStackText,setExpMaxStackText]=useState(String(expMaxStack));
   // expCandles: velas de 1m, SOLO para la lógica del motor (entrada por
   // color de la vela anterior) — nunca se muestran directamente. El gráfico
   // (RSI/MACD/EMA/velas) se quitó de esta página: el Experimento no usa
@@ -1907,10 +1920,10 @@ export default function TradingBot(){
         if(stateRes.ok){
           const d=await stateRes.json();
           if(d.exp_enabled!=null) setExpEnabled(d.exp_enabled==="1");
-          if(d.exp_stake!=null) setExpStake(parseFloat(d.exp_stake));
-          if(d.exp_add_step!=null) setExpAddStep(parseFloat(d.exp_add_step));
-          if(d.exp_floor_start!=null) setExpFloorStart(parseFloat(d.exp_floor_start));
-          if(d.exp_max_stack!=null) setExpMaxStack(parseInt(d.exp_max_stack,10));
+          if(d.exp_stake!=null){ setExpStake(parseFloat(d.exp_stake)); setExpStakeText(d.exp_stake); }
+          if(d.exp_add_step!=null){ setExpAddStep(parseFloat(d.exp_add_step)); setExpAddStepText(d.exp_add_step); }
+          if(d.exp_floor_start!=null){ setExpFloorStart(parseFloat(d.exp_floor_start)); setExpFloorStartText(d.exp_floor_start); }
+          if(d.exp_max_stack!=null){ setExpMaxStack(parseInt(d.exp_max_stack,10)); setExpMaxStackText(d.exp_max_stack); }
           if(d.exp_deriv_live!=null) setExpDerivLive(d.exp_deriv_live==="1");
           // El símbolo restaurado se lee ANTES de aplicar exp_symbol — mismo
           // motivo que el guard del servidor: si hay una posición/cobertura
@@ -6466,14 +6479,18 @@ export default function TradingBot(){
               </div>
 
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:10}} className="g4">
-                <ConfigField label="STAKE POR POSICIÓN (USD)" type="number" step="0.1" min="0.1" value={expStake}
-                  onChange={e=>setExpStake(Math.max(0.1,parseFloat(e.target.value)||1))}/>
-                <ConfigField label="APILAR CADA (USD)" type="number" step="1" min="1" value={expAddStep}
-                  onChange={e=>setExpAddStep(Math.max(1,parseFloat(e.target.value)||50))}/>
-                <ConfigField label="PISO INICIAL (USD, negativo)" type="number" step="1" max="-1" value={expFloorStart}
-                  onChange={e=>setExpFloorStart(Math.min(-1,parseFloat(e.target.value)||-50))}/>
-                <ConfigField label="MÁXIMO DE POSICIONES" type="number" step="1" min="1" max="10" value={expMaxStack}
-                  onChange={e=>setExpMaxStack(Math.max(1,Math.min(10,parseInt(e.target.value,10)||10)))}/>
+                <ConfigField label="STAKE POR POSICIÓN (USD, min. real Deriv $2)" type="text" inputMode="decimal" value={expStakeText}
+                  onChange={e=>{const v=e.target.value; setExpStakeText(v); const n=parseFloat(v); if(!isNaN(n)) setExpStake(n);}}
+                  onBlur={()=>{const n=Math.max(0.1,parseFloat(expStakeText)||1); setExpStake(n); setExpStakeText(String(n));}}/>
+                <ConfigField label="APILAR CADA (USD)" type="text" inputMode="decimal" value={expAddStepText}
+                  onChange={e=>{const v=e.target.value; setExpAddStepText(v); const n=parseFloat(v); if(!isNaN(n)) setExpAddStep(n);}}
+                  onBlur={()=>{const n=Math.max(0.01,parseFloat(expAddStepText)||50); setExpAddStep(n); setExpAddStepText(String(n));}}/>
+                <ConfigField label="PISO INICIAL (USD, negativo)" type="text" inputMode="decimal" value={expFloorStartText}
+                  onChange={e=>{const v=e.target.value; setExpFloorStartText(v); const n=parseFloat(v); if(!isNaN(n)) setExpFloorStart(n);}}
+                  onBlur={()=>{const n=Math.min(-0.01,parseFloat(expFloorStartText)||-50); setExpFloorStart(n); setExpFloorStartText(String(n));}}/>
+                <ConfigField label="MÁXIMO DE POSICIONES" type="text" inputMode="numeric" value={expMaxStackText}
+                  onChange={e=>{const v=e.target.value; setExpMaxStackText(v); const n=parseInt(v,10); if(!isNaN(n)) setExpMaxStack(n);}}
+                  onBlur={()=>{const n=Math.max(1,Math.min(10,parseInt(expMaxStackText,10)||10)); setExpMaxStack(n); setExpMaxStackText(String(n));}}/>
               </div>
 
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}} className="g4">
