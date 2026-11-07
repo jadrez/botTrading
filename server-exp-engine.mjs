@@ -490,22 +490,34 @@ export function startExpEngine() {
     ]);
     const wasLive = cfg.derivLive;
     const wasSymbol = cfg.symbol;
-    // El símbolo NO se cambia si hay algo abierto (posición u hedge) — mezclar
-    // el precio de un símbolo nuevo con la entrada de una posición abierta en
-    // OTRO símbolo daría un PnL/piso basura (ej. entrada ~4065 de oro contra
-    // un precio ~76000 de BTC). Se ignora el pedido hasta que la pila quede
-    // vacía (el usuario debe cerrarla/esperar a que resuelva primero).
+    // El símbolo real lo manda lo que YA está abierto (posición u hedge),
+    // no ciegamente exp_symbol — si hay algo abierto, cfg.symbol se fija al
+    // símbolo CON el que se abrió, sin importar qué pida exp_symbol; evita
+    // mezclar el precio de un símbolo nuevo con la entrada de una posición
+    // abierta en OTRO símbolo (daría un PnL/piso basura, ej. entrada ~4065
+    // de oro contra un precio ~76000 de BTC — pasó en vivo).
+    // Antes esto bloqueaba CUALQUIER cambio mientras hubiera algo abierto,
+    // incluso cuando el símbolo pedido YA coincidía con el de lo abierto —
+    // en una instancia standby (2 máquinas Fly corren este motor; solo una
+    // es dueña a la vez) que recién sincroniza una pila ya abierta en BTC,
+    // esa condición nunca se volvía falsa (siempre había algo abierto en
+    // cuanto se sincronizaba) y la instancia quedaba PERMANENTEMENTE
+    // atascada en el símbolo viejo — reportado en vivo: exp_live_price
+    // nunca dejaba de publicar el precio congelado del oro (mercado cerrado
+    // el fin de semana) aun con exp_symbol en BTC/USD y la pila real ya en
+    // BTC. Ahora solo bloquea si lo abierto es de verdad OTRO símbolo.
     const requestedSymbol = EXP_SYMBOL_TICK[symbol] ? symbol : EXP_SYMBOL_DEFAULT;
-    const symbolChangeBlocked = requestedSymbol !== wasSymbol && (positions.length > 0 || hedge);
+    const openSymbol = positions[0]?.symbol || hedge?.symbol || null;
+    const resolvedSymbol = (openSymbol && EXP_SYMBOL_TICK[openSymbol]) ? openSymbol : requestedSymbol;
     cfg = {
       enabled: enabled === "1", stake: parseFloat(stake) || 1, addStep: parseFloat(addStep) || 50,
       floorStart: parseFloat(floorStart) || -50, maxStack: parseInt(maxStack, 10) || 10,
       derivLive: derivLive === "1",
-      symbol: symbolChangeBlocked ? wasSymbol : requestedSymbol,
+      symbol: resolvedSymbol,
     };
     if (cfg.derivLive && !wasLive) log("⚠️ MODO EN VIVO (Deriv demo) activado — las próximas posiciones serán contratos reales");
     if (!cfg.derivLive && wasLive) log("Modo en vivo (Deriv) desactivado — vuelve a simulado");
-    if (symbolChangeBlocked) log(`⚠️ exp_symbol pide cambiar de ${wasSymbol} a ${requestedSymbol} pero hay posiciones/cobertura abiertas — se ignora hasta que la pila esté vacía`);
+    if (resolvedSymbol !== requestedSymbol) log(`⚠️ exp_symbol pide ${requestedSymbol} pero hay algo abierto en ${resolvedSymbol} — se mantiene ${resolvedSymbol} hasta que esa pila cierre`);
     else if (cfg.symbol !== wasSymbol) log(`símbolo del Experimento cambiado a ${cfg.symbol}`);
   };
 
