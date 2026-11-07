@@ -410,9 +410,15 @@ const EXP_SYMBOL="XAU/USD"; // valor por defecto — ver expSymbol más abajo (e
 // vivo está activo — ver api/deriv-order.js SYMBOL_MAP). BTC/USD agregado
 // explícitamente para poder seguir probando el motor (simulado) mientras
 // XAU/USD está cerrado por fin de semana/feriado — cripto opera 24/7.
+// lotUnit: cuántas unidades del subyacente hace 1 "lote" estilo MT5/MT4 —
+// 100 oz troy para oro (convención estándar), 1 BTC para cripto (ningún
+// "oz" aplica ahí). Antes el cálculo de VOLUMEN MT5 (LOTES) usaba SIEMPRE
+// el divisor de oro (÷100) aunque el símbolo fuera BTC — reportado en vivo
+// ("ayúdame a saber cuáles son los datos de 0.01 que se maneja en
+// volumen"), daba un número sin sentido para cripto.
 const EXP_SYMBOLS={
-  "XAU/USD":{binance:"PAXGUSDT",deriv:"frxXAUUSD"},
-  "BTC/USD":{binance:"BTCUSDT",deriv:"cryBTCUSD"},
+  "XAU/USD":{binance:"PAXGUSDT",deriv:"frxXAUUSD",lotUnit:100},
+  "BTC/USD":{binance:"BTCUSDT",deriv:"cryBTCUSD",lotUnit:1},
 };
 // Fuente de precio EN VIVO del motor: PAXG/USDT en Binance (oro tokenizado,
 // respaldado 1:1 por una onza de oro físico), NO el GC=F de Yahoo de arriba.
@@ -1815,6 +1821,13 @@ export default function TradingBot(){
   const [expAddStepText,setExpAddStepText]=useState(String(expAddStep));
   const [expFloorStartText,setExpFloorStartText]=useState(String(expFloorStart));
   const [expMaxStackText,setExpMaxStackText]=useState(String(expMaxStack));
+  // Presets guardados — pedido explícito: "me gustaría poderla guardar para
+  // ir guardando mis configuraciones". Un array de {name,symbol,stake,
+  // addStep,floorStart,maxStack} persistido en bot_config (exp_presets),
+  // mismo mecanismo que todo lo demás del Experimento — así se ven iguales
+  // desde cualquier dispositivo, no solo localStorage de este navegador.
+  const [expPresets,setExpPresets]=useState([]);
+  const [expPresetNameInput,setExpPresetNameInput]=useState("");
   // expCandles: velas de 1m, SOLO para la lógica del motor (entrada por
   // color de la vela anterior) — nunca se muestran directamente. El gráfico
   // (RSI/MACD/EMA/velas) se quitó de esta página: el Experimento no usa
@@ -1945,6 +1958,7 @@ export default function TradingBot(){
           }
           if(liveOpenSymbol && EXP_SYMBOLS[liveOpenSymbol]) setExpSymbol(liveOpenSymbol);
           else if(d.exp_symbol && EXP_SYMBOLS[d.exp_symbol]) setExpSymbol(d.exp_symbol);
+          if(d.exp_presets){ try{ const p=JSON.parse(d.exp_presets); if(Array.isArray(p)) setExpPresets(p); }catch{} }
         }
         if(tradesRes.ok){
           const d=await tradesRes.json();
@@ -6478,6 +6492,74 @@ export default function TradingBot(){
                 }}/>
               </div>
 
+              {/* Presets — pedido explícito: "me gustaría poderla guardar
+                  para ir guardando mis configuraciones" + "si yo lo quiero
+                  dejar nuevamente con estos parámetros, pues solamente es
+                  configurarle la cantidad" — en vez de reescribir los 4
+                  números a mano cada vez, guardarlos con un nombre y
+                  cargarlos con un clic. Persistido en bot_config
+                  (exp_presets), igual que todo lo demás — se ve igual
+                  desde cualquier dispositivo. */}
+              <div style={{marginBottom:10,padding:"8px 10px",background:T.dim,borderRadius:6}}>
+                <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:6}}>CONFIGURACIONES GUARDADAS</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:expPresets.length?8:0}}>
+                  <input type="text" placeholder="Nombre (ej. BTC agresivo chico)" value={expPresetNameInput}
+                    onChange={e=>setExpPresetNameInput(e.target.value)}
+                    style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"6px 8px",fontSize:10,flex:"1 1 200px"}}/>
+                  <button onClick={()=>{
+                    const name=expPresetNameInput.trim();
+                    if(!name) return;
+                    const preset={name,symbol:expSymbol,stake:expStake,addStep:expAddStep,floorStart:expFloorStart,maxStack:expMaxStack};
+                    const next=[...expPresets.filter(p=>p.name!==name),preset];
+                    setExpPresets(next); setExpPresetNameInput("");
+                    fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
+                      body:JSON.stringify({key:"exp_presets",value:JSON.stringify(next)})}).catch(()=>{});
+                    addLog(`💾 Configuración "${name}" guardada (${expSymbol}, stake ${fUSD(expStake,false)}, apilar ${fUSD(expAddStep,false)}, piso ${fUSD(expFloorStart)})`,"info");
+                  }} disabled={!expPresetNameInput.trim()}
+                    style={{background:expPresetNameInput.trim()?T.accent:T.border,color:"#fff",border:"none",borderRadius:4,
+                      padding:"6px 12px",cursor:expPresetNameInput.trim()?"pointer":"default",fontSize:10,fontWeight:700}}>
+                    💾 Guardar actual
+                  </button>
+                </div>
+                {expPresets.length>0&&(
+                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                    {expPresets.map(p=>(
+                      <div key={p.name} style={{display:"flex",alignItems:"center",gap:4,background:T.panel,border:`1px solid ${T.border}`,borderRadius:5,padding:"4px 4px 4px 9px"}}>
+                        <span style={{fontSize:9,fontWeight:600,color:T.text}}
+                          title={`${p.symbol} · stake ${fUSD(p.stake,false)} · apilar ${fUSD(p.addStep,false)} · piso ${fUSD(p.floorStart)} · máx ${p.maxStack}`}>
+                          {p.name}
+                        </span>
+                        <button onClick={()=>{
+                          if((expPositions.length>0||expHedgePos) && p.symbol!==expSymbol){
+                            addLog(`⚠️ "${p.name}" es de ${p.symbol} pero hay una pila abierta en ${expSymbol} — se aplican los demás valores, el símbolo NO cambia hasta que cierres la pila.`,"info");
+                          } else if(!(expPositions.length>0||expHedgePos)){
+                            setExpSymbol(p.symbol);
+                          }
+                          setExpStake(p.stake); setExpStakeText(String(p.stake));
+                          setExpAddStep(p.addStep); setExpAddStepText(String(p.addStep));
+                          setExpFloorStart(p.floorStart); setExpFloorStartText(String(p.floorStart));
+                          setExpMaxStack(p.maxStack); setExpMaxStackText(String(p.maxStack));
+                          addLog(`📂 Configuración "${p.name}" cargada`,"info");
+                        }} title="Cargar esta configuración"
+                          style={{background:"transparent",border:"none",color:T.green,cursor:"pointer",fontSize:11,padding:"2px 4px"}}>
+                          ▶
+                        </button>
+                        <button onClick={()=>{
+                          if(!window.confirm(`¿Borrar la configuración "${p.name}"?`)) return;
+                          const next=expPresets.filter(x=>x.name!==p.name);
+                          setExpPresets(next);
+                          fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
+                            body:JSON.stringify({key:"exp_presets",value:JSON.stringify(next)})}).catch(()=>{});
+                        }} title="Borrar"
+                          style={{background:"transparent",border:"none",color:T.red,cursor:"pointer",fontSize:11,padding:"2px 4px"}}>
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:10}} className="g4">
                 <ConfigField label="STAKE POR POSICIÓN (USD, min. real Deriv $2)" type="text" inputMode="decimal" value={expStakeText}
                   onChange={e=>{const v=e.target.value; setExpStakeText(v); const n=parseFloat(v); if(!isNaN(n)) setExpStake(n);}}
@@ -6508,9 +6590,10 @@ export default function TradingBot(){
                   <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>VOLUMEN (NOTIONAL)</div>
                   <div className="mono" style={{fontSize:12,fontWeight:700}}>${volumen.toFixed(0)}</div>
                 </div>
-                <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}} title="lotes = volumen notional / (100 oz/lote × precio) — la misma unidad que MT5/MT4">
+                <div style={{background:T.dim,borderRadius:5,padding:"7px 9px"}}
+                  title={`lotes = volumen notional / (${EXP_SYMBOLS[expSymbol]?.lotUnit} ${expSymbol==="XAU/USD"?"oz":"unidad"}/lote × precio) — la misma unidad que MT5/MT4`}>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>VOLUMEN MT5 (LOTES)</div>
-                  <div className="mono" style={{fontSize:12,fontWeight:700}}>{expPrice?(volumen/(100*expPrice)).toFixed(3):"—"}</div>
+                  <div className="mono" style={{fontSize:12,fontWeight:700}}>{expPrice?(volumen/((EXP_SYMBOLS[expSymbol]?.lotUnit||100)*expPrice)).toFixed(3):"—"}</div>
                 </div>
               </div>
 
