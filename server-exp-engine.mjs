@@ -350,7 +350,24 @@ export function startExpEngine() {
   };
 
   const evaluateStack = async () => {
-    if (!isOwner || !price || !positions.length) return;
+    if (!isOwner || !price || (!positions.length && !hedge)) return;
+    // La cobertura puede quedar sola (pila vacía) si el volteo la cerró en
+    // paralelo con la pila y ESE cierre falló mientras el de la pila sí
+    // funcionó — antes esta función cortaba de inmediato con la pila
+    // vacía, sin llegar NUNCA al chequeo de stop propio de la cobertura
+    // (más abajo), dejándola huérfana sin nada que la vigile. Reportado en
+    // vivo con datos reales: cobertura real sola en -$4.53 y subiendo,
+    // mucho más allá de su propio piso de -$0.10.
+    if (!positions.length) {
+      if (hedge) {
+        const hedgePnl = posPnL(hedge, price);
+        if (hedgePnl <= cfg.floorStart * EXP_HEDGE_STOP_PCT) {
+          log(`cobertura huérfana (pila ya vacía) tocó su propio stop (${hedgePnl.toFixed(2)}) — se cierra sola`);
+          await closeHedge(price);
+        }
+      }
+      return;
+    }
     // Red de seguridad real: pasó en vivo que cfg.symbol cambió con una
     // posición de OTRO símbolo todavía abierta (bug de orden en bootstrap,
     // ya corregido) y esto calculó PnL mezclando el precio nuevo contra una

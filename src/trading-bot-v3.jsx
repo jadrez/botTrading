@@ -1617,10 +1617,10 @@ async function analyzeMarketAI({symbol,price,rsi,macd,bb,ema9,ema21,volRatio,tre
 // same component identity across renders (defining these INSIDE the config
 // view's render would remount every <input> on each render, e.g. dropping
 // focus after one keystroke while editing the Crecimiento TP/SL fields).
-function ConfigToggle({on,onClick}){
+function ConfigToggle({on,onClick,disabled}){
   return(
     <button onClick={onClick} style={{width:36,height:20,borderRadius:10,position:"relative",flex:"0 0 36px",
-      border:"none",cursor:"pointer",background:on?T.green:T.border}}>
+      border:"none",cursor:disabled?"not-allowed":"pointer",background:on?T.green:T.border,opacity:disabled?0.5:1}}>
       <span style={{position:"absolute",top:2,width:16,height:16,borderRadius:"50%",background:"#fff",
         left:on?18:2,transition:"left .15s"}}/>
     </button>
@@ -2546,7 +2546,23 @@ export default function TradingBot(){
     const evaluateStack=()=>{
       if(!expIsOwnerRef.current) return; // otra pestaña/dispositivo está manejando el motor ahora
       const price=expPriceRef.current;
-      if(!price || !expPositionsRef.current.length) return;
+      if(!price || (!expPositionsRef.current.length && !expHedgePosRef.current)) return;
+      // La cobertura puede quedar sola (pila vacía) si el volteo la cerró
+      // en paralelo con la pila y ESE cierre falló — antes esta función
+      // cortaba de inmediato con la pila vacía, sin llegar NUNCA al
+      // chequeo de stop propio de la cobertura, dejándola huérfana sin
+      // nada que la vigile. Reportado en vivo con datos reales: cobertura
+      // real sola en -$4.53 y subiendo, mucho más allá de su propio piso.
+      if(!expPositionsRef.current.length){
+        if(expHedgePosRef.current){
+          const hPnl=posPnL(expHedgePosRef.current,price,expHedgePosRef.current.allocatedSize);
+          if(hPnl<=expFloorStartRef.current){
+            addLog(`🛡️ Experimento: cobertura huérfana (pila ya vacía) tocó su propio stop (${fUSD(hPnl)}) — se cierra sola`,"info");
+            closeHedge(price);
+          }
+        }
+        return;
+      }
       // Red de seguridad real: pasó en vivo que expSymbol cambió con una
       // posición de OTRO símbolo todavía abierta y esto calculó PnL
       // mezclando el precio nuevo contra una entrada vieja de otro símbolo
@@ -6679,9 +6695,11 @@ export default function TradingBot(){
                 <div><div style={{fontSize:12,fontWeight:600,color:expDerivLive?T.red:T.text}}>
                   {expDerivLive?"🔴 EN VIVO — Deriv demo (dinero demo real)":"Operar en vivo (Deriv demo)"}</div>
                   <div style={{fontSize:8,color:T.muted}}>
-                    {expDerivLive?`Cada apertura/cierre es un contrato REAL en tu cuenta demo de Deriv (${expSymbol}).`
+                    {(expPositions.length>0||expHedgePos)?"No se puede cambiar con la pila abierta — ciérrala primero (evita mezclar real y simulado a mitad de ciclo)."
+                      :expDerivLive?`Cada apertura/cierre es un contrato REAL en tu cuenta demo de Deriv (${expSymbol}).`
                       :"Apagado: solo simula. Al activar, abre/cierra contratos reales de Multiplicadores en tu cuenta DEMO de Deriv."}</div></div>
-                <ConfigToggle on={expDerivLive} onClick={()=>{
+                <ConfigToggle on={expDerivLive} disabled={expPositions.length>0||!!expHedgePos} onClick={()=>{
+                  if(expPositions.length>0||expHedgePos){ addLog("No se puede cambiar de modo con la pila abierta — ciérrala primero.","info"); return; }
                   if(!expDerivLive && !window.confirm(`Esto hace que el Experimento abra y cierre contratos REALES (Multiplicadores, ${expSymbol}) en tu cuenta DEMO de Deriv, usando saldo demo real. ¿Continuar?`)) return;
                   setExpDerivLive(p=>!p);
                 }}/>
