@@ -574,27 +574,44 @@ export function startExpEngine() {
   // sola llamada a "portfolio" cubre TODOS los contratos abiertos de la
   // cuenta) y los deja en cada posición (derivProfit/derivSpot) para que el
   // cliente los muestre en vez de su propio estimado.
+  // "portfolio" (proposal_open_contract SIN contract_id) trae TODOS los
+  // contratos abiertos de la cuenta en un solo stream — pero si CUALQUIERA
+  // de ellos falla al valorarse del lado de Deriv, el stream entero falla y
+  // NINGÚN contrato se sincroniza, ni siquiera los que están perfectamente
+  // sanos. Confirmado en vivo: 2 contratos viejos de BTC quedaron atascados
+  // sin poder liquidarse en Deriv (fuera de nuestro control, visible en su
+  // propia app como "Cerrado" sin estarlo de verdad) — mientras sigan ahí,
+  // "portfolio" siempre tira ContractValidationError y CUALQUIER posición
+  // real nueva se queda sin sincronizar para siempre (reportado en vivo:
+  // "en nuestro desarrollo aparece positivo pero en Deriv tiene negativo",
+  // 9 minutos después de abierta, nunca se había corregido). Se cambia a
+  // consultar CADA contrato por separado ("contract", con su propio
+  // contract_id) — uno roto ya no puede arrastrar a los demás. "contract"
+  // no trae current_spot (solo "portfolio" lo tenía), así que derivSpot usa
+  // nuestro propio tick en vivo (`price`, la misma fuente que ya se usa
+  // para todo lo demás) como ancla — equivalente en la práctica.
   const syncDerivProfits = async () => {
     if (!cfg.derivLive) return;
-    const openContractIds = [...positions, ...(hedge ? [hedge] : [])].map(p => p.contractId).filter(Boolean);
-    if (!openContractIds.length) return;
-    try {
-      const { positions: real } = await derivOrderCall("portfolio", {});
-      const byId = new Map(real.map(c => [c.contractId, c]));
-      let changed = false;
-      positions = positions.map(p => {
-        const c = p.contractId && byId.get(p.contractId);
-        if (!c) return p;
-        changed = true;
-        return { ...p, derivProfit: c.profit, derivSpot: c.currentSpot };
-      });
-      if (hedge?.contractId && byId.get(hedge.contractId)) {
-        const c = byId.get(hedge.contractId);
-        hedge = { ...hedge, derivProfit: c.profit, derivSpot: c.currentSpot };
-        changed = true;
-      }
-      if (changed) await persistLive(true);
-    } catch (e) { log(`Deriv: error sincronizando profit real — ${e.message}`); }
+    const targets = [...positions, ...(hedge ? [hedge] : [])].filter(p => p.contractId);
+    if (!targets.length) return;
+    const results = await Promise.allSettled(
+      targets.map(p => derivOrderCall("contract", { contractId: p.contractId }))
+    );
+    const byId = new Map();
+    results.forEach((r, i) => { if (r.status === "fulfilled") byId.set(targets[i].contractId, r.value); });
+    if (!byId.size) return;
+    let changed = false;
+    positions = positions.map(p => {
+      const c = p.contractId && byId.get(p.contractId);
+      if (!c) return p;
+      changed = true;
+      return { ...p, derivProfit: c.profit, derivSpot: price };
+    });
+    if (hedge?.contractId && byId.get(hedge.contractId)) {
+      hedge = { ...hedge, derivProfit: byId.get(hedge.contractId).profit, derivSpot: price };
+      changed = true;
+    }
+    if (changed) await persistLive(true);
   };
 
   // ── Comando manual (botón "Cerrar"/"Cerrar todo" en la UI) ──────────────
