@@ -2218,7 +2218,7 @@ export default function TradingBot(){
     // solo cuando algo REALMENTE cambió (piso se movió o cambió el tamaño
     // de la pila) — evaluateStack llama a esto cada 1s, escribirle a
     // Postgres esa seguido sin necesidad sería ruido puro.
-    let lastDbFloor=null, lastDbPosCount=-1, lastDbHedgeOpen=false;
+    let lastDbFloor=null, lastDbPosCount=-1, lastDbHedgeOpen=false, lastManualCloseAt=0;
     const persistLive=()=>{
       const snapshot={
         positions:expPositionsRef.current, direction:expDirectionRef.current,
@@ -2337,6 +2337,71 @@ export default function TradingBot(){
         })}).catch(()=>{});
       addLog(`🛡️ Experimento: cobertura ${hedge.type} cerrada en ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
       return pnl;
+    };
+
+    // ── Cierre manual (botón "Cerrar"/"Cerrar todo") — el SERVIDOR ya
+    // tenía esto (checkManualCloseRequest en server-exp-engine.mjs), pero
+    // el CLIENTE solo ENVIABA la solicitud (requestExpManualClose más
+    // abajo en el render) y nunca la procesaba. Mientras el símbolo esté
+    // en modo simulado (exp_deriv_live=0) el cliente SÍ puede ser dueño
+    // del motor (ver claimOrCheckOwnership) — si lo era en ese momento,
+    // el botón no hacía nada porque nadie del lado del cliente la leía.
+    // Reportado en vivo: "ese botón debería dejarme cerrar las de
+    // experimento pero no hace ninguna acción". A diferencia del
+    // servidor no hay contratos reales que cerrar en Deriv desde aquí
+    // (el cliente nunca ejecuta en Deriv — ver nota de claimOrCheckOwnership
+    // más abajo), así que no hace falta el patrón ok/reintento.
+    const manualCloseAll=(exitPrice)=>{
+      const hedgePnl=closeHedge(exitPrice);
+      const totalPnl=closeAllExpPos(exitPrice,"MANUAL")+hedgePnl;
+      resetStackTracking();
+      expDirectionRef.current=null; setExpDirection(null);
+      addLog(`🖐️ Experimento: cierre manual de toda la pila — cerró en ${fUSD(totalPnl)}`,"info");
+    };
+
+    // posId identifica por el `id` local de la posición/cobertura — todas
+    // lo tienen, sean simuladas (siempre, del lado cliente) o reales.
+    const manualCloseOne=(posId,exitPrice)=>{
+      if(expHedgePosRef.current?.id===posId){ closeHedge(exitPrice); return; }
+      const pos=expPositionsRef.current.find(p=>p.id===posId);
+      if(!pos) return;
+      const objetivo=expAddLevelRef.current+expAddStepRef.current, stop=expFloorRef.current;
+      const pnl=posPnL(pos,exitPrice,pos.allocatedSize);
+      expPositionsRef.current=expPositionsRef.current.filter(p=>p.id!==posId);
+      setExpPositions(expPositionsRef.current);
+      persistLive();
+      const closedAt=Date.now();
+      const record={...pos,symbol:pos.symbol||expSymbolRef.current,exit:exitPrice,pnl,reason:"MANUAL",objetivo,stop,
+        time:now(),closeTime:closedAt,tradeTime:Math.floor(closedAt/1000)};
+      setExpTrades(prev=>{const next=[record,...prev].slice(0,200); saveExpTrades(next); return next;});
+      fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          symbol:record.symbol, type:record.type, entryPrice:record.entry, exitPrice, pnl, reason:"MANUAL",
+          pattern:record.pattern, objetivoPila:objetivo, stopPila:stop, allocatedSize:record.allocatedSize, multiplier:record.multiplier,
+          openedAt:record.openTime?new Date(record.openTime).toISOString():undefined,
+          closedAt:new Date(closedAt).toISOString(),
+        })}).catch(()=>{});
+      addLog(`🖐️ Experimento: cierre manual — pnl ${fUSD(pnl)}`,pnl>=0?"buy":"sell");
+    };
+
+    // Igual que el servidor: solo marca la solicitud como "vista" cuando
+    // de verdad hay algo que hacer (dueño + precio) — si no, se reintenta
+    // sola en el próximo tick apenas este lado sea dueño y tenga precio.
+    const checkManualCloseRequest=async()=>{
+      if(!expIsOwnerRef.current) return;
+      const price=expPriceRef.current;
+      if(!price) return;
+      try{
+        const r=await fetch("/api/exp-state");
+        if(!r.ok) return;
+        const d=await r.json();
+        const req=d.exp_manual_close_request?JSON.parse(d.exp_manual_close_request):null;
+        if(!req||!req.requestedAt||req.requestedAt<=lastManualCloseAt) return;
+        if(Date.now()-req.requestedAt>30000){ lastManualCloseAt=req.requestedAt; return; } // solicitud vieja, ignorar
+        if(req.type==="all") manualCloseAll(price);
+        else if(req.type==="one"&&req.posId!=null) manualCloseOne(req.posId,price);
+        lastManualCloseAt=req.requestedAt;
+      }catch{}
     };
 
     const flip=(exitPrice)=>{
@@ -2653,6 +2718,7 @@ export default function TradingBot(){
         return updated;
       });
       evaluateStack();
+      await checkManualCloseRequest();
       }finally{ ticking=false; }
     },1000);
 
