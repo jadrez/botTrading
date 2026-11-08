@@ -2611,11 +2611,17 @@ export default function TradingBot(){
       // chequeo y el siguiente (límite real de revisar por sondeo, no de
       // esta regla) — sí reacciona más rápido cuando el giro no es
       // instantáneo.
+      // IMPORTANTE: contra expFloorStartRef (PISO INICIAL, fijo), NO contra
+      // expFloorRef (que puede haber subido a POSITIVO una vez el pico arma
+      // el piso dinámico) — bug encontrado en vivo: con el piso ya en +$51,
+      // CUALQUIER posición recién apilada (pnl ~0) habría cumplido "0 <=
+      // 51" y volteado TODA la pila ganadora en el siguiente apilado, justo
+      // cuando más protección de ganancia hacía falta.
       if(expPositionsRef.current.length>=2){
         const lastPosNow=expPositionsRef.current.at(-1);
         const lastPnlNow=posPnL(lastPosNow,price,lastPosNow.allocatedSize);
-        if(lastPnlNow<=expFloorRef.current){
-          addLog(`🐤 Experimento: canario inmediato — la última posición sola ya perdió ${fUSD(lastPnlNow)} (piso ${fUSD(expFloorRef.current)}) — voltea sin esperar al agregado`,"info");
+        if(lastPnlNow<=expFloorStartRef.current){
+          addLog(`🐤 Experimento: canario inmediato — la última posición sola ya perdió ${fUSD(lastPnlNow)} (piso inicial ${fUSD(expFloorStartRef.current)}) — voltea sin esperar al agregado`,"info");
           flip(price); return;
         }
       }

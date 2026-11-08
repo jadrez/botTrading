@@ -435,10 +435,16 @@ export function startExpEngine() {
     // mismo segundo entre un chequeo y el siguiente (límite real de
     // revisar por sondeo, no de esta regla) — sí reacciona más rápido
     // cuando el giro no es instantáneo.
+    // IMPORTANTE: contra cfg.floorStart (PISO INICIAL, fijo), NO contra
+    // `floor` (que puede haber subido a POSITIVO una vez el pico arma el
+    // piso dinámico) — pedido explícito tras encontrar el bug en vivo: con
+    // `floor` ya en +$51, CUALQUIER posición recién apilada (pnl ~0) habría
+    // cumplido "0 <= 51" y volteado TODA la pila ganadora en el siguiente
+    // apilado, justo cuando más protección de ganancia hacía falta.
     if (positions.length >= 2) {
       const lastPnlNow = posPnL(positions.at(-1), price);
-      if (lastPnlNow <= floor) {
-        log(`canario inmediato — la última posición sola ya perdió ${lastPnlNow.toFixed(2)} (piso ${floor.toFixed(2)}) — voltea sin esperar al agregado`);
+      if (lastPnlNow <= cfg.floorStart) {
+        log(`canario inmediato — la última posición sola ya perdió ${lastPnlNow.toFixed(2)} (piso inicial ${cfg.floorStart.toFixed(2)}) — voltea sin esperar al agregado`);
         await flip(price); return;
       }
     }
