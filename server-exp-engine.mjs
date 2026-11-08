@@ -697,7 +697,17 @@ export function startExpEngine() {
       if (!bootstrapped) { await bootstrap(); return; }
       tickCount++;
       if (tickCount % 5 === 0) { await reloadConfig(); await claimOrCheckOwnership(); }
-      if (tickCount % 3 === 0) await syncDerivProfits(); // ancla real más fresca para la interpolación en vivo del cliente
+      // Cada 20s, NO cada 3 — syncDerivProfits ahora llama "contract" UNA VEZ
+      // POR POSICIÓN abierta (ver nota junto a la función, arreglo del bug
+      // anterior de "portfolio" atascado), y a 1 tick/seg ya de por sí se
+      // gasta una llamada a Deriv solo para el precio — sumarle N consultas
+      // más cada 3s saturó el límite de velocidad de Deriv en vivo (visto en
+      // logs: "Rate limit exceeded" en cascada, el servidor perdiendo el
+      // control del motor a cada rato). El ancla real se sigue viendo fresca
+      // igual: effExpPnL interpola el movimiento DESDE la última ancla con
+      // el precio en vivo de cada segundo, así que sincronizar cada 20s en
+      // vez de cada 3s no se nota en pantalla, solo gasta menos cupo.
+      if (tickCount % 20 === 0) await syncDerivProfits();
       // El precio se actualiza SIEMPRE (lo necesita el cierre manual aunque
       // el experimento esté pausado) — lo que si se salta cuando está
       // apagado es la lógica automática de entrada/apilado/volteo. Antes
