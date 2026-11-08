@@ -1953,6 +1953,7 @@ export default function TradingBot(){
               if(live.addLevel!=null) expAddLevelRef.current=live.addLevel;
               if(live.peak!=null) expStackPeakRef.current=live.peak;
               expHedgePosRef.current=live.hedge??null; setExpHedgePos(live.hedge??null);
+              expLastAddPriceRef.current=live.lastAddPrice??null; expLastPosPeakRef.current=live.lastPosPeak??0;
               liveOpenSymbol=live.positions?.[0]?.symbol || live.hedge?.symbol || null;
             }catch{}
           }
@@ -2220,10 +2221,19 @@ export default function TradingBot(){
     // Postgres esa seguido sin necesidad sería ruido puro.
     let lastDbFloor=null, lastDbPosCount=-1, lastDbHedgeOpen=false, lastManualCloseAt=0;
     const persistLive=()=>{
+      // lastAddPrice/lastPosPeak van AQUÍ también — no son solo refs internas.
+      // Antes NO se persistían: si el dueño del motor cambiaba a mitad de
+      // ciclo (pasa seguido, servidor y cliente compiten por el control), el
+      // lado nuevo heredaba positions/floor/peak correctos pero lastAddPrice
+      // quedaba en null — y el gate de apilado (`lastAddPrice != null && ...`)
+      // se queda bloqueado PARA SIEMPRE mientras ese lado sea dueño, aunque
+      // el precio siguiera moviéndose a favor. Reportado en vivo: "pasó muy
+      // rápido de negativo a positivo y no activó las otras" — la pila se
+      // quedó en 3/10 mientras el precio seguía subiendo.
       const snapshot={
         positions:expPositionsRef.current, direction:expDirectionRef.current,
         floor:expFloorRef.current, addLevel:expAddLevelRef.current, peak:expStackPeakRef.current,
-        hedge:expHedgePosRef.current,
+        hedge:expHedgePosRef.current, lastAddPrice:expLastAddPriceRef.current, lastPosPeak:expLastPosPeakRef.current,
       };
       try{ localStorage.setItem(LS_EXP_LIVE, JSON.stringify(snapshot)); }catch{}
       // Incluye el estado de la cobertura — sin esto, cerrarla SOLA (nuevo
@@ -2251,6 +2261,8 @@ export default function TradingBot(){
         expAddLevelRef.current=saved.addLevel??0;
         expStackPeakRef.current=saved.peak??0;
         expHedgePosRef.current=saved.hedge??null;
+        expLastAddPriceRef.current=saved.lastAddPrice??null;
+        expLastPosPeakRef.current=saved.lastPosPeak??0;
         setExpPositions(saved.positions);
         setExpDirection(saved.direction);
         setExpHedgePos(saved.hedge??null);
@@ -2625,6 +2637,7 @@ export default function TradingBot(){
               if(live.addLevel!=null) expAddLevelRef.current=live.addLevel;
               if(live.peak!=null) expStackPeakRef.current=live.peak;
               expHedgePosRef.current=live.hedge??null; setExpHedgePos(live.hedge??null);
+              expLastAddPriceRef.current=live.lastAddPrice??null; expLastPosPeakRef.current=live.lastPosPeak??0;
             }catch{}
           }
           expIsOwnerRef.current=true;
@@ -2643,6 +2656,7 @@ export default function TradingBot(){
               if(live.addLevel!=null) expAddLevelRef.current=live.addLevel;
               if(live.peak!=null) expStackPeakRef.current=live.peak;
               expHedgePosRef.current=live.hedge??null; setExpHedgePos(live.hedge??null);
+              expLastAddPriceRef.current=live.lastAddPrice??null; expLastPosPeakRef.current=live.lastPosPeak??0;
             }catch{}
           }
           // El precio en vivo TAMBIÉN viene del dueño real (Deriv, vía el

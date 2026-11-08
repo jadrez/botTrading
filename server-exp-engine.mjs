@@ -127,7 +127,16 @@ export function startExpEngine() {
     const changed = floor !== lastDbFloor || positions.length !== lastDbPosCount;
     if (!force && !changed) return;
     lastDbFloor = floor; lastDbPosCount = positions.length;
-    await setConfigValue(db, "exp_live_state", JSON.stringify({ positions, direction, floor, addLevel, peak, hedge }));
+    // lastAddPrice/lastPosPeak van AQUÍ también — no son solo refs internas
+    // de exhibición. Antes NO se persistían: si el dueño del motor cambiaba
+    // a mitad de ciclo (pasa seguido, servidor y cliente compiten por el
+    // control), el lado nuevo heredaba positions/floor/peak correctos pero
+    // lastAddPrice quedaba en null — y el gate de apilado (`lastAddPrice !=
+    // null && ...`) se queda bloqueado PARA SIEMPRE mientras ese lado sea
+    // dueño, aunque el precio seguiera moviéndose a favor. Reportado en
+    // vivo: "pasó muy rápido de negativo a positivo y no activó las otras"
+    // — la pila se quedó en 3/10 mientras el precio seguía subiendo.
+    await setConfigValue(db, "exp_live_state", JSON.stringify({ positions, direction, floor, addLevel, peak, hedge, lastAddPrice, lastPosPeak }));
   };
 
   const writeTradeRecord = async (c) => {
@@ -462,6 +471,7 @@ export function startExpEngine() {
               if (live.addLevel != null) addLevel = live.addLevel;
               if (live.peak != null) peak = live.peak;
               hedge = live.hedge ?? null;
+              lastAddPrice = live.lastAddPrice ?? null; lastPosPeak = live.lastPosPeak ?? 0;
             }
           } catch {}
         }
@@ -472,7 +482,14 @@ export function startExpEngine() {
         isOwner = false;
         try {
           const live = JSON.parse((await getConfigValue(db, "exp_live_state", "null")) || "null");
-          if (live) { positions = live.positions || []; direction = live.direction ?? null; if (live.floor != null) floor = live.floor; if (live.addLevel != null) addLevel = live.addLevel; if (live.peak != null) peak = live.peak; hedge = live.hedge ?? null; }
+          if (live) {
+            positions = live.positions || []; direction = live.direction ?? null;
+            if (live.floor != null) floor = live.floor;
+            if (live.addLevel != null) addLevel = live.addLevel;
+            if (live.peak != null) peak = live.peak;
+            hedge = live.hedge ?? null;
+            lastAddPrice = live.lastAddPrice ?? null; lastPosPeak = live.lastPosPeak ?? 0;
+          }
         } catch {}
       }
     } catch {}
@@ -611,6 +628,7 @@ export function startExpEngine() {
         positions = live.positions; direction = live.direction ?? null;
         floor = live.floor ?? -50; addLevel = live.addLevel ?? 0; peak = live.peak ?? 0;
         hedge = live.hedge ?? null;
+        lastAddPrice = live.lastAddPrice ?? null; lastPosPeak = live.lastPosPeak ?? 0;
       }
     } catch {}
     await reloadConfig();
