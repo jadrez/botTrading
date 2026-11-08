@@ -308,7 +308,7 @@ export default async function handler(req, res) {
       const match = derivSymbol ? list.find(s => s.symbol === derivSymbol) : null;
       return res.status(200).json({
         tradeable: !!match, match, totalSymbols: list.length,
-        allSymbols: list.map(s => ({ symbol: s.symbol, market: s.market, submarket: s.submarket })),
+        crypto: list.filter(s => s.market === "cryptocurrency"),
       });
     }
 
