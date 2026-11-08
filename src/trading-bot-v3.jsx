@@ -1895,6 +1895,30 @@ export default function TradingBot(){
     }).catch(()=>{});
     return()=>{alive=false;};
   },[expHistSymbol,expHistFrom,expHistTo,expHistType,expHistResult,expTrades.length]);
+  // HISTÓRICO paginado — la PÁGINA exacta se le pide al SERVIDOR (filtrada
+  // en SQL), no se recorta de expTrades del lado del cliente. Reportado en
+  // vivo: "no sale paginación de nada y llevo más de 2 mil operaciones" —
+  // expTrades solo trae 200 filas al montar, y mientras esta pestaña NO es
+  // dueña del motor se refresca con apenas 50 (ver claimOrCheckOwnership) —
+  // ninguna de las dos ventanas alcanzaba para ver "ayer" entre miles de
+  // filas de hoy, así que nunca había más de una página que mostrar.
+  const [expHistRows,setExpHistRows]=useState([]);
+  const [expHistTotal,setExpHistTotal]=useState(0);
+  useEffect(()=>{
+    let alive=true;
+    const qs=new URLSearchParams({limit:"50",offset:String((expHistPage-1)*50)});
+    if(expHistSymbol!=="TODOS") qs.set("symbol",expHistSymbol);
+    if(expHistFrom) qs.set("from",expHistFrom);
+    if(expHistTo) qs.set("to",expHistTo);
+    if(expHistType!=="TODOS") qs.set("type",expHistType);
+    if(expHistResult!=="TODOS") qs.set("result",expHistResult);
+    fetch(`/api/exp-trades?${qs.toString()}`).then(r=>r.ok?r.json():null).then(d=>{
+      if(!alive||!d) return;
+      setExpHistRows(d.trades||[]);
+      setExpHistTotal(d.total??0);
+    }).catch(()=>{});
+    return()=>{alive=false;};
+  },[expHistSymbol,expHistFrom,expHistTo,expHistType,expHistResult,expHistPage,expTrades.length]);
   const expEnabledRef    = useRef(expEnabled);
   const expStakeRef      = useRef(expStake);
   const expPriceRef      = useRef(null);
@@ -6403,23 +6427,10 @@ export default function TradingBot(){
           // el filtro si selecciono BTC o ORO" — antes el gráfico usaba
           // SIEMPRE todo expTrades sin filtrar, sin importar lo que se
           // eligiera abajo.
-          const expHistSymbolOptions=[...new Set(expTrades.map(t=>t.symbol).filter(Boolean))];
-          const expHistFromMs=expHistFrom?new Date(expHistFrom+"T00:00:00").getTime():null;
-          const expHistToMs=expHistTo?new Date(expHistTo+"T23:59:59.999").getTime():null;
-          const expFilteredTrades=expTrades.filter(t=>{
-            if(expHistFromMs!=null && (!t.closeTime || t.closeTime<expHistFromMs)) return false;
-            if(expHistToMs!=null && (!t.closeTime || t.closeTime>expHistToMs)) return false;
-            if(expHistSymbol!=="TODOS" && (t.symbol||expSymbol)!==expHistSymbol) return false;
-            if(expHistType!=="TODOS" && t.type!==expHistType) return false;
-            if(expHistResult==="GANANCIA" && !(t.pnl>=0)) return false;
-            if(expHistResult==="PERDIDA" && !(t.pnl<0)) return false;
-            return true;
-          });
+          const expHistSymbolOptions=Object.keys(EXP_SYMBOLS);
           const expHasFilters=expHistFrom||expHistTo||expHistSymbol!=="TODOS"||expHistType!=="TODOS"||expHistResult!=="TODOS";
-          const EXP_HIST_PAGE_SIZE=50;
-          const expHistTotalPages=Math.max(1,Math.ceil(expFilteredTrades.length/EXP_HIST_PAGE_SIZE));
+          const expHistTotalPages=Math.max(1,Math.ceil(expHistTotal/50));
           const expHistPageSafe=Math.min(expHistPage,expHistTotalPages);
-          const expHistPageTrades=expFilteredTrades.slice((expHistPageSafe-1)*EXP_HIST_PAGE_SIZE,expHistPageSafe*EXP_HIST_PAGE_SIZE);
           return(
           <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1600}}>
 
@@ -6496,7 +6507,7 @@ export default function TradingBot(){
                 )}
                 {expHasFilters&&(
                   <div style={{fontSize:9,color:T.muted,marginLeft:"auto",alignSelf:"center"}}>
-                    {expFilteredTrades.length} de {expTrades.length} · afecta el gráfico y el histórico de abajo
+                    {expHistTotal} coinciden · afecta el gráfico y el histórico de abajo
                   </div>
                 )}
               </div>
@@ -6864,14 +6875,14 @@ export default function TradingBot(){
                   el motivo de CIERRE (FLIP/HEDGE). */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
                 <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>HISTÓRICO</div>
-                <div style={{fontSize:8,color:T.muted}}>Usa el filtro de arriba (fechas/PAR/tipo/resultado) · {expFilteredTrades.length} trade{expFilteredTrades.length!==1?"s":""}</div>
+                <div style={{fontSize:8,color:T.muted}}>Usa el filtro de arriba (fechas/PAR/tipo/resultado) · {expHistTotal} trade{expHistTotal!==1?"s":""}</div>
               </div>
-              {expFilteredTrades.length===0&&(
+              {expHistTotal===0&&(
                 <div style={{background:T.dim,borderRadius:8,padding:"16px",textAlign:"center",fontSize:10,color:T.muted}}>
                   {expHasFilters?"Ningún trade coincide con el filtro.":"Sin historial todavía."}
                 </div>
               )}
-              {expFilteredTrades.length>0&&(
+              {expHistTotal>0&&(
                 <div className="table-scroll">
                   <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:1220}}>
                     <div style={{display:"grid",gridTemplateColumns:"95px 95px 80px 70px 90px 90px 70px 100px 100px 90px 90px 100px 100px 1fr",
@@ -6888,7 +6899,7 @@ export default function TradingBot(){
                       // forma de ver de un vistazo cuánto dio ESE cierre en total
                       // (pedido explícito: "genera confusión").
                       const groups=[];
-                      for(const t of expHistPageTrades){
+                      for(const t of expHistRows){
                         const key=`${t.closeTime?Math.floor(t.closeTime/2000):"x"}_${t.exit}_${t.reason}`;
                         const last=groups[groups.length-1];
                         if(last&&last.key===key) last.items.push(t);
@@ -6946,7 +6957,7 @@ export default function TradingBot(){
                       borderRadius:5,padding:"5px 12px",cursor:expHistPageSafe<=1?"default":"pointer",fontSize:10,fontWeight:600,opacity:expHistPageSafe<=1?0.5:1}}>
                     ← Anterior
                   </button>
-                  <span style={{fontSize:9,color:T.muted}}>Página {expHistPageSafe} de {expHistTotalPages} · {expFilteredTrades.length} trades</span>
+                  <span style={{fontSize:9,color:T.muted}}>Página {expHistPageSafe} de {expHistTotalPages} · {expHistTotal} trades</span>
                   <button disabled={expHistPageSafe>=expHistTotalPages} onClick={()=>setExpHistPage(p=>Math.min(expHistTotalPages,p+1))}
                     style={{background:"transparent",border:`1px solid ${T.border}`,color:expHistPageSafe>=expHistTotalPages?T.muted:T.text,
                       borderRadius:5,padding:"5px 12px",cursor:expHistPageSafe>=expHistTotalPages?"default":"pointer",fontSize:10,fontWeight:600,opacity:expHistPageSafe>=expHistTotalPages?0.5:1}}>

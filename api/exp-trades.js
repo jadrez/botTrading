@@ -58,12 +58,36 @@ export default async function handler(req, res) {
 
   if (req.method === "GET") {
     const limit = Math.min(500, parseInt(req.query?.limit, 10) || 200);
+    const offset = Math.max(0, parseInt(req.query?.offset, 10) || 0);
+    // Filtros opcionales (mismos que ?agg=hourly) — reportado en vivo:
+    // "no sale paginación de nada y llevo más de 2 mil operaciones". La
+    // tabla de HISTÓRICO filtraba/paginaba sobre expTrades del lado del
+    // cliente, que: (a) solo trae 200 filas al montar, y (b) mientras esta
+    // pestaña NO es dueña del motor, se refresca con apenas 50 — ninguna de
+    // las dos ventanas alcanza para ver "ayer" entre miles de filas de hoy.
+    // Con symbol/from/to/type/result + offset, la tabla puede pedirle al
+    // SERVIDOR exactamente la página que necesita, filtrada en SQL sobre
+    // TODO exp_trades, y total le dice cuántas páginas hay de verdad.
+    const { symbol, from, to, type, result } = req.query || {};
+    const conditions = ["1=1"];
+    const params = [];
+    let i = 1;
+    if (symbol) { conditions.push(`symbol = $${i}`); params.push(symbol); i++; }
+    if (from) { conditions.push(`closed_at >= $${i}`); params.push(new Date(`${from}T00:00:00`)); i++; }
+    if (to) { conditions.push(`closed_at <= $${i}`); params.push(new Date(`${to}T23:59:59.999`)); i++; }
+    if (type) { conditions.push(`type = $${i}`); params.push(type); i++; }
+    if (result === "GANANCIA") conditions.push(`pnl >= 0`);
+    if (result === "PERDIDA") conditions.push(`pnl < 0`);
+    const where = conditions.join(" AND ");
     try {
-      const r = await db.query(
-        `SELECT symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at
-         FROM exp_trades ORDER BY closed_at DESC LIMIT $1`,
-        [limit]
-      );
+      const [r, countR] = await Promise.all([
+        db.query(
+          `SELECT symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at
+           FROM exp_trades WHERE ${where} ORDER BY closed_at DESC LIMIT $${i} OFFSET $${i + 1}`,
+          [...params, limit, offset]
+        ),
+        db.query(`SELECT COUNT(*)::int AS n FROM exp_trades WHERE ${where}`, params),
+      ]);
       const trades = r.rows.map(row => ({
         symbol: row.symbol, type: row.type,
         entry: parseFloat(row.entry_price), exit: parseFloat(row.exit_price),
@@ -77,7 +101,7 @@ export default async function handler(req, res) {
         openTime: row.opened_at ? new Date(row.opened_at).getTime() : null,
         closeTime: row.closed_at ? new Date(row.closed_at).getTime() : null,
       }));
-      return res.status(200).json({ trades });
+      return res.status(200).json({ trades, total: countR.rows[0].n });
     } catch (e) {
       return res.status(500).json({ error: e.message });
     }
