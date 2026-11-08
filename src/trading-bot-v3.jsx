@@ -2702,6 +2702,19 @@ export default function TradingBot(){
         const hbAt=parseInt(hbStr,10)||0;
         const stale=!hbAt||(Date.now()-hbAt)>15000;
         const mine=owner===expSessionIdRef.current;
+        // exp_deriv_live FRESCO de la DB en CADA chequeo — antes solo se leía
+        // una vez al montar la página (ver el efecto de sincronización
+        // inicial). Una pestaña/ventana vieja abierta ANTES de activar "EN
+        // VIVO" en otro lado seguía creyendo (para siempre) que el modo
+        // simulado seguía activo, reclamaba el motor cuando le tocaba, y
+        // abría posiciones SIMULADAS mientras el servidor abría REALES —
+        // reportado en vivo: "se están turnando, abre deriv, cierra y
+        // después abre simulado con otros parámetros". Actualiza el ref
+        // (y el estado visual del interruptor) ANTES de decidir si puede
+        // reclamar, así cualquier pestaña obedece el modo real aunque
+        // nunca haya tocado el interruptor ella misma.
+        const freshDerivLive=d.exp_deriv_live==="1";
+        if(freshDerivLive!==expDerivLiveRef.current){ expDerivLiveRef.current=freshDerivLive; setExpDerivLive(freshDerivLive); }
         // En modo "en vivo" (Deriv real) el navegador NUNCA reclama el motor
         // — solo el servidor ejecuta órdenes reales (ver nota junto a
         // expDerivLive arriba). Evita que dos instancias puedan abrir/cerrar
