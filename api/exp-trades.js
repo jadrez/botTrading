@@ -17,6 +17,45 @@ export default async function handler(req, res) {
   const db = getPool();
   if (!db) return res.status(500).json({ error: "DATABASE_URL not set" });
 
+  // ── RENDIMIENTO POR HORA — agregado en SQL sobre TODO el histórico, no
+  // solo los últimos N que trae el GET normal. Reportado en vivo: "las
+  // horas se están actualizando pero no me las está guardando... solo me
+  // deja ver 2 horas" — no es que se perdieran datos, es que el GET normal
+  // trae como máximo 500 filas (ORDER BY closed_at DESC), y con una
+  // estrategia de piso tan chico generando decenas de trades por minuto,
+  // esas 500 filas más recientes caben enteras dentro de 1-2 horas,
+  // empujando fuera de esa ventana todo lo de "anoche". El gráfico de
+  // RENDIMIENTO POR HORA necesita ver TODO el histórico agrupado, no una
+  // ventana acotada de filas — por eso vive en una query aparte, con los
+  // mismos filtros (fechas/símbolo/tipo/resultado) que ya usa el filtro
+  // de arriba. tzOffsetMin es getTimezoneOffset() del navegador (positivo
+  // si la hora local va detrás de UTC) — se resta de closed_at (UTC) para
+  // agrupar por la hora LOCAL del usuario, no UTC del servidor.
+  if (req.method === "GET" && req.query?.agg === "hourly") {
+    const tzOffsetMin = parseInt(req.query?.tzOffsetMin, 10) || 0;
+    const { symbol, from, to, type, result } = req.query || {};
+    const conditions = ["closed_at IS NOT NULL"];
+    const params = [tzOffsetMin];
+    let i = 2;
+    if (symbol) { conditions.push(`symbol = $${i}`); params.push(symbol); i++; }
+    if (from) { conditions.push(`closed_at >= $${i}`); params.push(new Date(`${from}T00:00:00`)); i++; }
+    if (to) { conditions.push(`closed_at <= $${i}`); params.push(new Date(`${to}T23:59:59.999`)); i++; }
+    if (type) { conditions.push(`type = $${i}`); params.push(type); i++; }
+    if (result === "GANANCIA") conditions.push(`pnl >= 0`);
+    if (result === "PERDIDA") conditions.push(`pnl < 0`);
+    try {
+      const r = await db.query(
+        `SELECT EXTRACT(HOUR FROM (closed_at - make_interval(mins => $1)))::int AS hour,
+                COUNT(*)::int AS trades, SUM(CASE WHEN pnl >= 0 THEN 1 ELSE 0 END)::int AS wins, SUM(pnl)::float AS pnl
+         FROM exp_trades WHERE ${conditions.join(" AND ")} GROUP BY hour ORDER BY hour`,
+        params
+      );
+      return res.status(200).json({ hours: r.rows });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
   if (req.method === "GET") {
     const limit = Math.min(500, parseInt(req.query?.limit, 10) || 200);
     try {

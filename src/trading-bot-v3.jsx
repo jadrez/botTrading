@@ -1852,6 +1852,29 @@ export default function TradingBot(){
   const [expHistResult,setExpHistResult] = useState("TODOS");
   const [expHistPage,setExpHistPage]     = useState(1); // paginación del HISTÓRICO — vuelve a 1 cada vez que cambia el filtro
   useEffect(()=>{setExpHistPage(1);},[expHistFrom,expHistTo,expHistSymbol,expHistType,expHistResult]);
+  // RENDIMIENTO POR HORA — agregado en el SERVIDOR sobre TODO el histórico
+  // (no solo los últimos N que trae expTrades). Reportado en vivo: "las
+  // horas se están actualizando pero no me las está guardando... solo me
+  // deja ver 2 horas" — con una estrategia de piso chico generando muchos
+  // trades por minuto, los últimos ~500 que trae expTrades caben enteros
+  // en 1-2 horas, empujando fuera "lo de anoche". Ver GET /api/exp-trades
+  // ?agg=hourly en api/exp-trades.js. Se re-pide cada vez que cambia el
+  // filtro O cuando expTrades crece (cierra un trade nuevo) — así el
+  // mejor/peor horario sigue siendo dinámico, no una foto fija.
+  const [expHourlyStats,setExpHourlyStats]=useState(null); // null=cargando, []=sin datos
+  useEffect(()=>{
+    let alive=true;
+    const qs=new URLSearchParams({agg:"hourly",tzOffsetMin:String(new Date().getTimezoneOffset())});
+    if(expHistSymbol!=="TODOS") qs.set("symbol",expHistSymbol);
+    if(expHistFrom) qs.set("from",expHistFrom);
+    if(expHistTo) qs.set("to",expHistTo);
+    if(expHistType!=="TODOS") qs.set("type",expHistType);
+    if(expHistResult!=="TODOS") qs.set("result",expHistResult);
+    fetch(`/api/exp-trades?${qs.toString()}`).then(r=>r.ok?r.json():null).then(d=>{
+      if(alive&&d?.hours) setExpHourlyStats(d.hours);
+    }).catch(()=>{});
+    return()=>{alive=false;};
+  },[expHistSymbol,expHistFrom,expHistTo,expHistType,expHistResult,expTrades.length]);
   const [expHedgePos,setExpHedgePos] = useState(null); // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   // Deliberadamente SIN localStorage (a diferencia de los demás exp_*): no
   // queremos que un navegador muestre "en vivo" por una caché vieja antes de
@@ -6469,30 +6492,28 @@ export default function TradingBot(){
                   learningStats.byHour más arriba) para que se lea igual,
                   pero en HORA LOCAL del navegador (no UTC) — lo que importa
                   aquí es la hora del reloj del usuario, no normalizar entre
-                  dispositivos. Usa expFilteredTrades (el filtro de arriba),
-                  NO expTrades directo — así "mejor hora" es dinámico según
-                  el PAR/fechas/tipo elegidos, no siempre la mezcla completa.
-                  Se recalcula en CADA render (no hay caché/snapshot): apenas
-                  cierra un trade nuevo y expTrades cambia, las barras y el
-                  mejor/peor horario se actualizan solos, sin recargar. */}
+                  dispositivos. Agregado en el SERVIDOR sobre TODO el
+                  histórico (expHourlyStats, ver el efecto que lo carga más
+                  arriba) — NO sobre expTrades/expFilteredTrades directo:
+                  esos solo traen los últimos ~500 trades, y con un piso
+                  chico generando muchos por minuto esa ventana cabía
+                  entera en 1-2 horas, perdiendo "lo de anoche" (reportado
+                  en vivo: "solo me deja ver 2 horas"). Se vuelve a pedir
+                  solo cada vez que cambia el filtro o crece expTrades, así
+                  el mejor/peor horario sigue siendo dinámico. */}
               <div style={{marginBottom:16}}>
                 <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:4}}>
                   RENDIMIENTO POR HORA (hora local{expHistSymbol!=="TODOS"?` · ${expHistSymbol}`:""})
                 </div>
-                {expFilteredTrades.length===0?(
+                {expHourlyStats===null?(
+                  <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>Cargando…</div>
+                ):expHourlyStats.length===0?(
                   <div style={{fontSize:10,color:T.muted,fontStyle:"italic"}}>
                     {expHasFilters?"Ningún trade coincide con el filtro de arriba.":"Sin historial todavía — el patrón aparece con los primeros cierres."}
                   </div>
                 ):(()=>{
                   const byH={};
-                  for(const t of expFilteredTrades){
-                    if(!t.closeTime) continue;
-                    const h=new Date(t.closeTime).getHours();
-                    if(!byH[h]) byH[h]={t:0,wins:0,pnl:0};
-                    byH[h].t++;
-                    if(t.pnl>=0) byH[h].wins++;
-                    byH[h].pnl+=t.pnl;
-                  }
+                  for(const row of expHourlyStats) byH[row.hour]={t:row.trades,wins:row.wins,pnl:row.pnl};
                   const hours=Array.from({length:24},(_,h)=>{
                     const s=byH[h]||{t:0,wins:0,pnl:0};
                     return {hour:h,t:s.t,wr:s.t?Math.round(s.wins/s.t*100):0,pnl:s.pnl};
