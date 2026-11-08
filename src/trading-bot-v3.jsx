@@ -1904,6 +1904,29 @@ export default function TradingBot(){
   // filas de hoy, así que nunca había más de una página que mostrar.
   const [expHistRows,setExpHistRows]=useState([]);
   const [expHistTotal,setExpHistTotal]=useState(0);
+  // Histórico REAL de Deriv (profit_table) — pedido explícito: "¿puedo ver
+  // el histórico de Deriv aquí?" para comparar contra nuestro propio
+  // registro. A DIFERENCIA de todo lo demás en esta página, esto NO se
+  // auto-actualiza con un useEffect/polling — ya pasamos un día entero
+  // chocando contra el límite de velocidad de Deriv por llamadas de más;
+  // se pide manualmente con el botón "Actualizar". profit_table no trae
+  // symbol/type por contrato (ver comentario en api/deriv-order.js) — para
+  // verlos habría que consultar "contract" UNA VEZ POR FILA, exactamente
+  // el patrón de llamadas que causó el problema de hoy, así que se deja
+  // fuera a propósito; compara por precio/hora contra nuestro HISTÓRICO.
+  const [expDerivHistory,setExpDerivHistory]=useState(null); // null=nunca cargado
+  const [expDerivHistoryLoading,setExpDerivHistoryLoading]=useState(false);
+  const loadExpDerivHistory=async()=>{
+    setExpDerivHistoryLoading(true);
+    try{
+      const r=await fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({action:"history",limit:30})});
+      const d=await r.json();
+      if(r.ok&&d.transactions) setExpDerivHistory(d.transactions);
+      else setExpDerivHistory({error:d.error||"Error desconocido"});
+    }catch(e){ setExpDerivHistory({error:e.message}); }
+    setExpDerivHistoryLoading(false);
+  };
   useEffect(()=>{
     let alive=true;
     const qs=new URLSearchParams({limit:"50",offset:String((expHistPage-1)*50)});
@@ -7016,6 +7039,63 @@ export default function TradingBot(){
                   🗑 Borrar historial del experimento
                 </button>
               )}
+
+              {/* HISTÓRICO REAL DE DERIV — pedido explícito: "¿puedo ver el
+                  histórico de Deriv aquí?" para comparar contra lo nuestro.
+                  Se carga a mano (botón), NUNCA solo — hoy completo se fue
+                  en encontrar y arreglar choques contra el límite de
+                  velocidad de Deriv por llamadas automáticas de más. */}
+              <div style={{marginTop:24,paddingTop:16,borderTop:`1px solid ${T.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>HISTÓRICO REAL DE DERIV</div>
+                  <button onClick={loadExpDerivHistory} disabled={expDerivHistoryLoading}
+                    style={{background:T.accent,color:"#fff",border:"none",borderRadius:4,padding:"5px 12px",
+                      cursor:expDerivHistoryLoading?"default":"pointer",fontSize:10,fontWeight:700,opacity:expDerivHistoryLoading?0.6:1}}>
+                    {expDerivHistoryLoading?"Cargando…":"🔄 Actualizar"}
+                  </button>
+                </div>
+                <div style={{fontSize:8,color:T.muted,marginBottom:8}}>
+                  Últimos contratos liquidados en TU cuenta de Deriv (profit_table real) — incluye cualquier
+                  operación, del Experimento o manual en DTrader. No trae símbolo/dirección por fila (evita
+                  consultas extra a Deriv) — compara por precio/hora contra el histórico de arriba.
+                </div>
+                {expDerivHistory===null&&!expDerivHistoryLoading&&(
+                  <div style={{background:T.dim,borderRadius:8,padding:"14px",textAlign:"center",fontSize:10,color:T.muted}}>
+                    Dale "Actualizar" para traer el historial real de Deriv.
+                  </div>
+                )}
+                {expDerivHistory?.error&&(
+                  <div style={{background:`${T.red}10`,border:`1px solid ${T.red}40`,borderRadius:8,padding:"14px",textAlign:"center",fontSize:10,color:T.red}}>
+                    {expDerivHistory.error}
+                  </div>
+                )}
+                {Array.isArray(expDerivHistory)&&expDerivHistory.length===0&&(
+                  <div style={{background:T.dim,borderRadius:8,padding:"14px",textAlign:"center",fontSize:10,color:T.muted}}>
+                    Sin contratos liquidados todavía.
+                  </div>
+                )}
+                {Array.isArray(expDerivHistory)&&expDerivHistory.length>0&&(
+                  <div className="table-scroll">
+                    <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:760}}>
+                      <div style={{display:"grid",gridTemplateColumns:"110px 130px 130px 100px 100px 100px",
+                        gap:8,padding:"0 10px 4px",fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700}}>
+                        <div>CONTRATO</div><div>APERTURA</div><div>CIERRE</div><div>STAKE</div><div>VALOR FINAL</div><div>PNL</div>
+                      </div>
+                      {expDerivHistory.map(t=>(
+                        <div key={t.contractId} style={{display:"grid",gridTemplateColumns:"110px 130px 130px 100px 100px 100px",
+                          gap:8,alignItems:"center",background:`${t.profit>=0?T.green:T.red}08`,border:`1px solid ${t.profit>=0?T.green:T.red}25`,borderRadius:6,padding:"6px 10px"}}>
+                          <span className="mono" style={{fontSize:9,color:T.muted}}>{t.contractId}</span>
+                          <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.openTime)}</span>
+                          <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime)}</span>
+                          <span className="mono" style={{fontSize:10}}>{fUSD(t.buyPrice,false)}</span>
+                          <span className="mono" style={{fontSize:10}}>{fUSD(t.sellPrice,false)}</span>
+                          <span className="mono" style={{fontSize:10,fontWeight:700,color:t.profit>=0?T.green:T.red}}>{fUSD(t.profit)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </ConfigCard>
 
           </div>
