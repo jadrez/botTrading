@@ -7069,19 +7069,34 @@ export default function TradingBot(){
                     {expDerivHistory.error}
                   </div>
                 )}
-                {Array.isArray(expDerivHistory)&&expDerivHistory.length===0&&(
-                  <div style={{background:T.dim,borderRadius:8,padding:"14px",textAlign:"center",fontSize:10,color:T.muted}}>
-                    Sin contratos liquidados todavía.
-                  </div>
-                )}
-                {Array.isArray(expDerivHistory)&&expDerivHistory.length>0&&(
+                {Array.isArray(expDerivHistory)&&(()=>{
+                  // Mismo filtro de arriba (fechas/resultado) — PAR/TIPO no
+                  // se puede, profit_table no los trae por fila. Se filtra
+                  // en el navegador sobre lo YA descargado, sin pedirle
+                  // nada nuevo a Deriv — pedido explícito: "también debemos
+                  // pasar por el mismo filtro de arriba... ¿es correcto?".
+                  const fromMs=expHistFrom?new Date(`${expHistFrom}T00:00:00`).getTime():null;
+                  const toMs=expHistTo?new Date(`${expHistTo}T23:59:59.999`).getTime():null;
+                  const filtered=expDerivHistory.filter(t=>{
+                    if(fromMs!=null&&(!t.closeTime||t.closeTime<fromMs)) return false;
+                    if(toMs!=null&&(!t.closeTime||t.closeTime>toMs)) return false;
+                    if(expHistResult==="GANANCIA"&&!(t.profit>=0)) return false;
+                    if(expHistResult==="PERDIDA"&&!(t.profit<0)) return false;
+                    return true;
+                  });
+                  if(filtered.length===0) return(
+                    <div style={{background:T.dim,borderRadius:8,padding:"14px",textAlign:"center",fontSize:10,color:T.muted}}>
+                      {expDerivHistory.length===0?"Sin contratos liquidados todavía.":"Ningún contrato coincide con el filtro de arriba (fechas/resultado)."}
+                    </div>
+                  );
+                  return(
                   <div className="table-scroll">
                     <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:760}}>
                       <div style={{display:"grid",gridTemplateColumns:"110px 130px 130px 100px 100px 100px",
                         gap:8,padding:"0 10px 4px",fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700}}>
                         <div>CONTRATO</div><div>APERTURA</div><div>CIERRE</div><div>STAKE</div><div>VALOR FINAL</div><div>PNL</div>
                       </div>
-                      {expDerivHistory.map(t=>(
+                      {filtered.map(t=>(
                         <div key={t.contractId} style={{display:"grid",gridTemplateColumns:"110px 130px 130px 100px 100px 100px",
                           gap:8,alignItems:"center",background:`${t.profit>=0?T.green:T.red}08`,border:`1px solid ${t.profit>=0?T.green:T.red}25`,borderRadius:6,padding:"6px 10px"}}>
                           <span className="mono" style={{fontSize:9,color:T.muted}}>{t.contractId}</span>
@@ -7094,7 +7109,8 @@ export default function TradingBot(){
                       ))}
                     </div>
                   </div>
-                )}
+                  );
+                })()}
               </div>
             </ConfigCard>
 
