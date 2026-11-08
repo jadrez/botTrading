@@ -306,7 +306,10 @@ export default async function handler(req, res) {
       const { msg } = await derivAction(token, appId, accountType, { active_symbols: "full" });
       const list = msg.active_symbols || [];
       const match = derivSymbol ? list.find(s => s.symbol === derivSymbol) : null;
-      return res.status(200).json({ tradeable: !!match, match, totalSymbols: list.length });
+      return res.status(200).json({
+        tradeable: !!match, match, totalSymbols: list.length,
+        allSymbols: list.map(s => ({ symbol: s.symbol, market: s.market, submarket: s.submarket })),
+      });
     }
 
     // ── OPEN (buy)
