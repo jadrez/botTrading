@@ -293,6 +293,27 @@ export default async function handler(req, res) {
       return res.status(200).json({ price, time: msg.history?.times?.at(-1) });
     }
 
+    // ── SYMBOL-CHECK — diagnóstico de solo lectura: ¿esta cuenta/landing
+    // company puede de verdad abrir Multiplicadores en este symbol? "tick"
+    // (ticks_history) puede devolver precio para un symbol que ya no está
+    // listado para nuevas posiciones — active_symbols con
+    // product_type:"multipliers" es la lista real de lo que SÍ se puede
+    // comprar. Agregado tras la pregunta en vivo "Deriv tiene bitcoin? no
+    // lo veo en su interfaz" — para confirmar antes de intentar un "open"
+    // real con dinero (aunque sea demo).
+    if (action === "symbol_check") {
+      const derivSymbol = req.body?.derivSymbol;
+      const { msg } = await derivAction(token, appId, accountType, { active_symbols: "brief", product_type: "multipliers" });
+      const list = msg.active_symbols || [];
+      const match = derivSymbol ? list.find(s => s.symbol === derivSymbol) : null;
+      return res.status(200).json({
+        tradeable: !!match,
+        match: match ? { symbol: match.symbol, display_name: match.display_name, market: match.market, submarket: match.submarket } : null,
+        cryptoSymbols: list.filter(s => s.market === "cryptocurrency").map(s => ({ symbol: s.symbol, display_name: s.display_name })),
+        totalTradeable: list.length,
+      });
+    }
+
     // ── OPEN (buy)
     if (action === "open") {
       const derivSymbol = SYMBOL_MAP[symbol];
