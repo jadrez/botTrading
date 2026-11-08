@@ -420,6 +420,28 @@ export function startExpEngine() {
         }
       }
     }
+    // Canario inmediato: el de arriba exige que la última posición PRIMERO
+    // haya llegado a +$5 antes de voltear por su retroceso — con piso/paso
+    // chicos (pedido explícito de probar ganancias de centavos), la última
+    // casi nunca llega a esos +$5 antes de girar, así que esa protección no
+    // alcanza a activarse y las posiciones VIEJAS, ya ganando fuerte,
+    // esconden la reversión en el agregado durante un rato. Reportado en
+    // vivo con datos reales: una pila de 5 cerró junta en -$67.63 pese a
+    // tener una posición ganadora adentro — "es importante que el último
+    // siempre detecte que bajó y cierre todo". Si la ÚLTIMA posición SOLA
+    // ya perdió tanto como el piso configurado, voltea ya, sin esperar a
+    // que el agregado (con las viejas ganadoras pesando) también lo cruce.
+    // No evita la pérdida de un salto de precio que ocurre DENTRO del
+    // mismo segundo entre un chequeo y el siguiente (límite real de
+    // revisar por sondeo, no de esta regla) — sí reacciona más rápido
+    // cuando el giro no es instantáneo.
+    if (positions.length >= 2) {
+      const lastPnlNow = posPnL(positions.at(-1), price);
+      if (lastPnlNow <= floor) {
+        log(`canario inmediato — la última posición sola ya perdió ${lastPnlNow.toFixed(2)} (piso ${floor.toFixed(2)}) — voltea sin esperar al agregado`);
+        await flip(price); return;
+      }
+    }
     await persistLive();
     if (stackPnl <= floor) { await flip(price); return; }
     // Apilar otra posición exige que el PRECIO se haya movido de verdad
