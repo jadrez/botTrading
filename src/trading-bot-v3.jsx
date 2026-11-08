@@ -1861,7 +1861,27 @@ export default function TradingBot(){
   // ?agg=hourly en api/exp-trades.js. Se re-pide cada vez que cambia el
   // filtro O cuando expTrades crece (cierra un trade nuevo) — así el
   // mejor/peor horario sigue siendo dinámico, no una foto fija.
-  const [expHourlyStats,setExpHourlyStats]=useState(null); // null=cargando, []=sin datos
+  const [expHourlyStats,setExpHourlyStats]=useState(null); // null=cargando, []=sin datos — el efecto que lo carga vive más abajo, DESPUÉS de declarar expTrades (lo usaba en su dependency array antes de que existiera — "Cannot access before initialization", página en blanco)
+  const [expHedgePos,setExpHedgePos] = useState(null); // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
+  // Deliberadamente SIN localStorage (a diferencia de los demás exp_*): no
+  // queremos que un navegador muestre "en vivo" por una caché vieja antes de
+  // confirmar con la DB — arranca siempre en false hasta que llegue la
+  // respuesta real del servidor. Solo el motor del SERVIDOR ejecuta órdenes
+  // reales (ver claimOrCheckOwnership) — el navegador nunca abre/cierra en
+  // Deriv por su cuenta, solo puede prender/apagar el interruptor y pedir
+  // cierres manuales.
+  const [expDerivLive,setExpDerivLive] = useState(false);
+  const expDerivLiveRef = useRef(false);
+  const [expTrades,setExpTrades]       = useState(()=>loadExpTrades());
+  // RENDIMIENTO POR HORA — agregado en el SERVIDOR sobre TODO el histórico
+  // (no solo los últimos N que trae expTrades). Reportado en vivo: "las
+  // horas se están actualizando pero no me las está guardando... solo me
+  // deja ver 2 horas" — con una estrategia de piso chico generando muchos
+  // trades por minuto, los últimos ~500 que trae expTrades caben enteros
+  // en 1-2 horas, empujando fuera "lo de anoche". Ver GET /api/exp-trades
+  // ?agg=hourly en api/exp-trades.js. Se re-pide cada vez que cambia el
+  // filtro O cuando expTrades crece (cierra un trade nuevo) — así el
+  // mejor/peor horario sigue siendo dinámico, no una foto fija.
   useEffect(()=>{
     let alive=true;
     const qs=new URLSearchParams({agg:"hourly",tzOffsetMin:String(new Date().getTimezoneOffset())});
@@ -1875,17 +1895,6 @@ export default function TradingBot(){
     }).catch(()=>{});
     return()=>{alive=false;};
   },[expHistSymbol,expHistFrom,expHistTo,expHistType,expHistResult,expTrades.length]);
-  const [expHedgePos,setExpHedgePos] = useState(null); // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
-  // Deliberadamente SIN localStorage (a diferencia de los demás exp_*): no
-  // queremos que un navegador muestre "en vivo" por una caché vieja antes de
-  // confirmar con la DB — arranca siempre en false hasta que llegue la
-  // respuesta real del servidor. Solo el motor del SERVIDOR ejecuta órdenes
-  // reales (ver claimOrCheckOwnership) — el navegador nunca abre/cierra en
-  // Deriv por su cuenta, solo puede prender/apagar el interruptor y pedir
-  // cierres manuales.
-  const [expDerivLive,setExpDerivLive] = useState(false);
-  const expDerivLiveRef = useRef(false);
-  const [expTrades,setExpTrades]       = useState(()=>loadExpTrades());
   const expEnabledRef    = useRef(expEnabled);
   const expStakeRef      = useRef(expStake);
   const expPriceRef      = useRef(null);
