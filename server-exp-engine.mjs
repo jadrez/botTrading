@@ -707,39 +707,57 @@ export function startExpEngine() {
       // igual: effExpPnL interpola el movimiento DESDE la última ancla con
       // el precio en vivo de cada segundo, así que sincronizar cada 20s en
       // vez de cada 3s no se nota en pantalla, solo gasta menos cupo.
-      if (tickCount % 20 === 0) await syncDerivProfits();
-      // El precio se actualiza SIEMPRE (lo necesita el cierre manual aunque
-      // el experimento esté pausado) — lo que si se salta cuando está
-      // apagado es la lógica automática de entrada/apilado/volteo. Antes
-      // esto estaba todo detrás de "if (!cfg.enabled) return", lo que
-      // dejaba el botón "Cerrar"/"Cerrar todo" sin efecto mientras el
-      // experimento estuviera apagado — reportado en vivo.
-      const np = await fetchExpTickPrice();
-      if (np && !isNaN(np)) {
-        price = np;
-        // Clave aparte de exp_live_state (que solo escribe cuando floor/
-        // positions cambian) — el precio cambia casi en cada tick, así que
-        // necesita su propio canal de solo-precio para que el cliente (en
-        // modo no-dueño) pueda mostrar el MISMO precio que usa el servidor
-        // para decidir, en vez de pedirle su propio feed a otra fuente.
-        // Reportado en vivo: "el actual" no se movía igual que Deriv.
-        setConfigValue(db, "exp_live_price", String(np)).catch(() => {});
-        if (cfg.enabled) {
-          const nowSec = Math.floor(Date.now() / 1000);
-          if (candles.length) {
-            const last = { ...candles[candles.length - 1] };
-            if (nowSec - last.time >= 60) {
-              candles = [...candles.slice(0, -1), last, { time: nowSec, o: np, c: np, h: np, l: np, v: 0 }];
-              await onCandleClosed(last);
-            } else {
-              last.c = np; last.h = Math.max(last.h, np); last.l = Math.min(last.l, np);
-              candles = [...candles.slice(0, -1), last];
+      // TODO lo que llama a Deriv (precio incluido) va detrás de isOwner.
+      // Fly corre 2 MÁQUINAS para esta app, y las dos ejecutan este motor —
+      // antes el precio se pedía SIEMPRE, sin importar cuál es la dueña
+      // real, duplicando sin necesidad la carga contra el límite de
+      // velocidad de Deriv (confirmado en vivo: ambas máquinas chocando con
+      // "Rate limit exceeded" cada segundo, sin parar). La NO dueña no
+      // decide nada con ese precio de todas formas (evaluateStack/
+      // checkManualCloseRequest/onCandleClosed ya exigen isOwner por su
+      // cuenta) — era trabajo puro desperdiciado, y además el motivo real
+      // de que cierres REALES se perdieran sin guardarse en el histórico:
+      // un cierre que choca con el límite reintenta su chequeo de respaldo,
+      // que TAMBIÉN choca, y la posición se queda huérfana para siempre sin
+      // escribir el registro — reportado en vivo con datos reales (15
+      // contratos reales liquidados por Deriv, cero filas en exp_trades).
+      if (isOwner) {
+        if (tickCount % 20 === 0) await syncDerivProfits();
+        // El precio se actualiza SIEMPRE que esta máquina sea la dueña (lo
+        // necesita el cierre manual aunque el experimento esté pausado) —
+        // lo que sí se salta cuando está apagado es la lógica automática de
+        // entrada/apilado/volteo. Antes esto estaba todo detrás de
+        // "if (!cfg.enabled) return", lo que dejaba el botón "Cerrar"/
+        // "Cerrar todo" sin efecto mientras el experimento estuviera
+        // apagado — reportado en vivo.
+        const np = await fetchExpTickPrice();
+        if (np && !isNaN(np)) {
+          price = np;
+          // Clave aparte de exp_live_state (que solo escribe cuando floor/
+          // positions cambian) — el precio cambia casi en cada tick, así
+          // que necesita su propio canal de solo-precio para que el
+          // cliente (en modo no-dueño) pueda mostrar el MISMO precio que
+          // usa el servidor para decidir, en vez de pedirle su propio feed
+          // a otra fuente. Reportado en vivo: "el actual" no se movía
+          // igual que Deriv.
+          setConfigValue(db, "exp_live_price", String(np)).catch(() => {});
+          if (cfg.enabled) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            if (candles.length) {
+              const last = { ...candles[candles.length - 1] };
+              if (nowSec - last.time >= 60) {
+                candles = [...candles.slice(0, -1), last, { time: nowSec, o: np, c: np, h: np, l: np, v: 0 }];
+                await onCandleClosed(last);
+              } else {
+                last.c = np; last.h = Math.max(last.h, np); last.l = Math.min(last.l, np);
+                candles = [...candles.slice(0, -1), last];
+              }
             }
+            await evaluateStack();
           }
-          await evaluateStack();
         }
+        await checkManualCloseRequest();
       }
-      await checkManualCloseRequest();
     } catch (e) {
       console.error("[exp-engine] tick error:", e.message);
     } finally {
