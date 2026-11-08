@@ -303,15 +303,10 @@ export default async function handler(req, res) {
     // real con dinero (aunque sea demo).
     if (action === "symbol_check") {
       const derivSymbol = req.body?.derivSymbol;
-      const { msg } = await derivAction(token, appId, accountType, { active_symbols: "brief", product_type: "multipliers" });
+      const { msg } = await derivAction(token, appId, accountType, { active_symbols: "full" });
       const list = msg.active_symbols || [];
       const match = derivSymbol ? list.find(s => s.symbol === derivSymbol) : null;
-      return res.status(200).json({
-        tradeable: !!match,
-        match: match ? { symbol: match.symbol, display_name: match.display_name, market: match.market, submarket: match.submarket } : null,
-        cryptoSymbols: list.filter(s => s.market === "cryptocurrency").map(s => ({ symbol: s.symbol, display_name: s.display_name })),
-        totalTradeable: list.length,
-      });
+      return res.status(200).json({ tradeable: !!match, match, totalSymbols: list.length });
     }
 
     // ── OPEN (buy)
