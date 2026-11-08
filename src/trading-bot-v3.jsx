@@ -6372,9 +6372,17 @@ export default function TradingBot(){
           const stackPnl=expPrice!=null?expPositions.reduce((s,p)=>s+effExpPnL(p,expPrice),0):0;
           const volumen=expPositions.reduce((s,p)=>s+p.allocatedSize*(p.multiplier||DEFAULT_MULTIPLIER),0)
             +(expHedgePos?expHedgePos.allocatedSize*(expHedgePos.multiplier||DEFAULT_MULTIPLIER):0);
-          const expWins=expTrades.filter(t=>t.pnl>0).length;
-          const expWr=expTrades.length?Math.round(expWins/expTrades.length*100):null;
-          const expTotalPnl=expTrades.reduce((s,t)=>s+t.pnl,0);
+          // TRADES CERRADOS/WIN RATE/P&L ACUMULADO: de expHourlyStats (el
+          // mismo agregado SQL del gráfico de horas, ya filtrado por fecha/
+          // símbolo/tipo/resultado), NO de expTrades crudo — antes mostraba
+          // SIEMPRE la mezcla completa sin importar el filtro de arriba, y
+          // además expTrades solo trae los últimos ~500 (se quedaba corto
+          // igual que le pasó al gráfico de horas). Reportado en vivo:
+          // "¿lo está haciendo por horas? si lo quiero filtrar por día me
+          // muestra?" — ahora sí, filtrar por fecha cambia estos 3 números.
+          const expSummary=(expHourlyStats||[]).reduce((a,h)=>({trades:a.trades+h.trades,wins:a.wins+h.wins,pnl:a.pnl+h.pnl}),{trades:0,wins:0,pnl:0});
+          const expWr=expSummary.trades?Math.round(expSummary.wins/expSummary.trades*100):null;
+          const expTotalPnl=expSummary.pnl;
           // Pide un cierre manual al motor dueño (SOLO el servidor ejecuta en
           // Deriv — ver nota en claimOrCheckOwnership) vía un comando en
           // bot_config que se revisa cada tick, igual que reloadConfig. No
@@ -6710,9 +6718,9 @@ export default function TradingBot(){
               <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}} className="g4">
                 {[
                   {l:"P&L PILA ABIERTA", v:fUSD(stackPnl), c:stackPnl>=0?T.green:T.red},
-                  {l:"TRADES CERRADOS", v:expTrades.length, c:T.text},
+                  {l:`TRADES CERRADOS${expHasFilters?" (filtro)":""}`, v:expHourlyStats===null?"…":expSummary.trades, c:T.text},
                   {l:"WIN RATE", v:expWr==null?"—":`${expWr}%`, c:expWr>=50?T.green:T.red},
-                  {l:"P&L ACUMULADO", v:fUSD(expTotalPnl), c:expTotalPnl>=0?T.green:T.red},
+                  {l:`P&L ACUMULADO${expHasFilters?" (filtro)":""}`, v:fUSD(expTotalPnl), c:expTotalPnl>=0?T.green:T.red},
                 ].map(({l,v,c})=>(
                   <div key={l} style={{background:T.dim,borderRadius:5,padding:"6px 8px",textAlign:"center"}}>
                     <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:2}}>{l}</div>
