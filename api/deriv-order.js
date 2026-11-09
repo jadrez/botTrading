@@ -41,6 +41,10 @@ const SYMBOL_MAP = {
   "BTC/USD": "cryBTCUSD",
 };
 const REVERSE_SYMBOL_MAP = Object.fromEntries(Object.entries(SYMBOL_MAP).map(([k, v]) => [v, k]));
+// El symbol dentro del shortcode de profit_table viene TODO EN MAYÚSCULAS
+// ("CRYBTCUSD"), no como "cryBTCUSD" (case mixto real) — REVERSE_SYMBOL_MAP
+// normal nunca hace match ahí. Versión en mayúsculas solo para ese parseo.
+const REVERSE_SYMBOL_MAP_UPPER = Object.fromEntries(Object.entries(REVERSE_SYMBOL_MAP).map(([k, v]) => [k.toUpperCase(), v]));
 // Direccional (Rise/Fall) label-only map — kept SEPARATE from SYMBOL_MAP on
 // purpose: SYMBOL_MAP gates which symbols the Multipliers "open" action will
 // accept, and synthetic indices haven't gone through that flow. This is only
@@ -281,7 +285,7 @@ export default async function handler(req, res) {
         const derivSymbol = parts[1];
         return {
           contractId: t.contract_id,
-          symbol: REVERSE_SYMBOL_MAP[derivSymbol] || SYNTHETIC_LABELS[derivSymbol] || derivSymbol || undefined,
+          symbol: REVERSE_SYMBOL_MAP_UPPER[derivSymbol] || SYNTHETIC_LABELS[derivSymbol] || derivSymbol || undefined,
           type: contractType === "MULTUP" ? "BUY" : contractType === "MULTDOWN" ? "SELL" : undefined,
           buyPrice: t.buy_price,
           sellPrice: t.sell_price,
