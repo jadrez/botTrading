@@ -2786,8 +2786,9 @@ export default function TradingBot(){
 
     // Binance klines → {time(seg), o,h,l,c,v} — mismo shape que usa el resto
     // de la app, solo que la fuente es Binance en vez de Yahoo.
+    const pileSymbol=()=>expPositionsRef.current[0]?.symbol||expHedgePosRef.current?.symbol||expSymbolRef.current;
     const fetchBinanceKlines=async(interval,limit)=>{
-      const binanceSym=EXP_SYMBOLS[expSymbolRef.current]?.binance||"PAXGUSDT";
+      const binanceSym=EXP_SYMBOLS[pileSymbol()]?.binance||"PAXGUSDT";
       const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${interval}&limit=${limit}`);
       const raw=await r.json();
       if(!Array.isArray(raw)) return null;
@@ -2938,7 +2939,9 @@ export default function TradingBot(){
       // y aquí lo tenemos 75.701", un desfase real entre el spot de Binance
       // y la cotización de Deriv (el venue que de verdad ejecutaría). Unifica
       // la fuente para que el precio mostrado sea siempre el que cuenta.
-      const derivSym=EXP_SYMBOLS[expSymbolRef.current]?.deriv;
+      // El precio SIEMPRE es del símbolo de la pila abierta (si la hay), no del selector — si no, con la pila
+      // en BTC y el selector en EUR, "ACTUAL" mostraba 1.12 contra una entrada de 74 820.
+      const derivSym=EXP_SYMBOLS[pileSymbol()]?.deriv;
       const np=derivSym?await fetchDerivTick(derivSym):null;
       if(!np||isNaN(np)||!alive) return;
       expPriceRef.current=np; setExpPrice(np);
@@ -2975,6 +2978,8 @@ export default function TradingBot(){
   useEffect(()=>{
     if(expSymbolFirstRun.current){ expSymbolFirstRun.current=false; return; }
     if(!expEnabled) return;
+    const openSym=expPositionsRef.current[0]?.symbol||expHedgePosRef.current?.symbol;
+    if(openSym&&openSym!==expSymbol) return; // hay una pila de otro símbolo: su precio/velas no se tocan
     let alive=true;
     const binanceSym=EXP_SYMBOLS[expSymbol]?.binance;
     if(!binanceSym) return;
@@ -6591,7 +6596,10 @@ export default function TradingBot(){
             const drift=posPnL({...p,entry:anchorSpot},livePrice,p.allocatedSize);
             return p.derivProfit+drift;
           };
-          const stackPnl=expPrice!=null?expPositions.reduce((s,p)=>s+effExpPnL(p,expPrice),0):0;
+          // Red de seguridad de pantalla: si el precio en vivo es de OTRO símbolo que la posición (ej. 1.12 de EUR/USD
+          // contra una entrada de 74 820 de BTC), no se usa — cae al spot de Deriv o a la entrada, nunca a un valor absurdo.
+          const priceFor=(p)=>(expPrice!=null&&p?.entry&&Math.abs(expPrice/p.entry-1)<0.3)?expPrice:(p?.derivSpot??p?.entry??null);
+          const stackPnl=expPrice!=null?expPositions.reduce((s,p)=>s+effExpPnL(p,priceFor(p)),0):0;
           const volumen=expPositions.reduce((s,p)=>s+p.allocatedSize*(p.multiplier||DEFAULT_MULTIPLIER),0)
             +(expHedgePos?expHedgePos.allocatedSize*(expHedgePos.multiplier||DEFAULT_MULTIPLIER):0);
           // TRADES CERRADOS/WIN RATE/P&L ACUMULADO: de expHourlyStats (el
@@ -7060,7 +7068,7 @@ export default function TradingBot(){
                         // viene de Deriv) — derivSpot es solo el ancla real
                         // que usa effExpPnL para corregir el PNL, no para
                         // "congelar" lo que se ve en pantalla.
-                        const livePrice=expPrice??pos.derivSpot??pos.entry;
+                        const livePrice=priceFor(pos)??pos.entry;
                         const dir=pos.type==="BUY"?1:-1;
                         const pnl=effExpPnL(pos,livePrice);
                         const pctChange=dir*(livePrice-pos.entry)/pos.entry*100;
@@ -7109,7 +7117,7 @@ export default function TradingBot(){
                         <span></span><span></span><span></span><span></span>
                       </div>
                       {expHedgePos&&(()=>{
-                        const hLive=expPrice??expHedgePos.derivSpot??expHedgePos.entry;
+                        const hLive=priceFor(expHedgePos)??expHedgePos.entry;
                         const hDir=expHedgePos.type==="BUY"?1:-1;
                         const hPnl=effExpPnL(expHedgePos,hLive);
                         const hPct=hDir*(hLive-expHedgePos.entry)/expHedgePos.entry*100;
