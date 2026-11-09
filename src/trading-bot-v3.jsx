@@ -2037,7 +2037,8 @@ export default function TradingBot(){
   useEffect(()=>{expDerivLiveRef.current=expDerivLive;
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_deriv_live",value:expDerivLive?"1":"0"})}).catch(()=>{});
   },[expDerivLive]);
-  useEffect(()=>{expSymbolRef.current=expSymbol; try{localStorage.setItem(LS_EXP_SYMBOL,expSymbol);}catch{}
+  const expSymbolChangedAtRef=useRef(0);
+  useEffect(()=>{expSymbolRef.current=expSymbol; expSymbolChangedAtRef.current=Date.now(); try{localStorage.setItem(LS_EXP_SYMBOL,expSymbol);}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_symbol",value:expSymbol})}).catch(()=>{});
   },[expSymbol]);
 
@@ -2809,6 +2810,9 @@ export default function TradingBot(){
         // reclamar tras un reinicio — mejor pausar que arriesgar duplicar.
         const freshSim=d.exp_sim==null?true:d.exp_sim==="1";
         if(freshSim!==expSimRef.current){ expSimRef.current=freshSim; setExpSim(freshSim); }
+        // El selector debe reflejar el símbolo que el motor tiene de verdad (antes podía quedar mostrando
+        // otro, p. ej. BTC/USD mientras la pila era de EUR/USD). No pisa un cambio hecho hace <8s.
+        if(d.exp_symbol&&EXP_SYMBOLS[d.exp_symbol]&&d.exp_symbol!==expSymbolRef.current&&Date.now()-expSymbolChangedAtRef.current>8000){ setExpSymbol(d.exp_symbol); }
         // Sin Simulado, esta pestaña no reclama el motor (no abre posiciones simuladas).
         const canClaim=!expDerivLiveRef.current && expSimRef.current && (!owner||mine||stale);
         if(canClaim){
@@ -6606,7 +6610,14 @@ export default function TradingBot(){
             }
             requestExpManualClose("all");
             addLog(`Cerrando la pila para cambiar ${label}…`,"info");
-            setTimeout(apply,3500);
+            // Aplica el cambio SOLO cuando la pila realmente cerró (antes se aplicaba a ciegas a los 3.5s
+            // y, si el cierre fallaba/tardaba, el selector quedaba en otro símbolo que el de la pila abierta).
+            let waited=0;
+            const iv=setInterval(()=>{
+              waited+=500;
+              if(expPositionsRef.current.length===0&&!expHedgePosRef.current){ clearInterval(iv); apply(); }
+              else if(waited>=25000){ clearInterval(iv); addLog(`No se pudo cerrar la pila a tiempo — NO se cambió ${label}.`,"info"); }
+            },500);
           };
           return(
           <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1600}}>
@@ -6957,7 +6968,7 @@ export default function TradingBot(){
                   repiten iguales en cada fila mientras la pila esté abierta. */}
               <div style={{marginBottom:16}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                  <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>POSICIONES ABIERTAS EN VIVO</div>
+                  <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>POSICIONES ABIERTAS EN VIVO{(expPositions[0]?.symbol||expHedgePos?.symbol)?` · ${expPositions[0]?.symbol||expHedgePos?.symbol}`:""}</div>
                   {(expPositions.length>0||expHedgePos)&&!expEnabled&&!expDerivLive&&(
                     <button onClick={()=>{
                       if(!window.confirm("El experimento está apagado y quedó una pila simulada abierta. ¿Descartarla (sin registrarla en el histórico)?")) return;
@@ -7020,8 +7031,8 @@ export default function TradingBot(){
                           <div key={pos.id} style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px 80px",
                             gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:7,padding:"8px 10px"}}>
                             <span style={{fontSize:10,fontWeight:700,color:dirCol}}>{pos.type==="BUY"?"▲ BUY":"▼ SELL"}{pos.contractId&&<span title="Contrato real en Deriv" style={{marginLeft:4,fontSize:8,color:T.red}}>🔴</span>}</span>
-                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(pos.entry,(EXP_SYMBOLS[expSymbol]?.dec||2))}</span>
-                            <span className="mono" style={{fontSize:10,color:T.text}}>{fP(livePrice,(EXP_SYMBOLS[expSymbol]?.dec||2))}</span>
+                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(pos.entry,(EXP_SYMBOLS[pos.symbol||expSymbol]?.dec||2))}</span>
+                            <span className="mono" style={{fontSize:10,color:T.text}}>{fP(livePrice,(EXP_SYMBOLS[pos.symbol||expSymbol]?.dec||2))}</span>
                             <span className="mono" style={{fontSize:10,fontWeight:700,color:col}}>{fPct(pctChange)}</span>
                             <span className="mono" style={{fontSize:10,color:T.green}}>{fUSD(expAddLevelRef.current+expAddStepRef.current,false)}</span>
                             <span className="mono" style={{fontSize:10,color:isProtected?T.green:T.red}}>{fUSD(expFloorRef.current)}</span>
@@ -7065,8 +7076,8 @@ export default function TradingBot(){
                           <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px 80px",
                             gap:10,alignItems:"center",background:`${hCol}10`,border:`2px dashed ${hCol}`,borderRadius:7,padding:"8px 10px"}}>
                             <span style={{fontSize:10,fontWeight:700,color:expHedgePos.type==="BUY"?T.green:T.red}}>{expHedgePos.type==="BUY"?"▲ BUY":"▼ SELL"}{expHedgePos.contractId&&<span title="Contrato real en Deriv" style={{marginLeft:4,fontSize:8,color:T.red}}>🔴</span>}</span>
-                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(expHedgePos.entry,(EXP_SYMBOLS[expSymbol]?.dec||2))}</span>
-                            <span className="mono" style={{fontSize:10,color:T.text}}>{fP(hLive,(EXP_SYMBOLS[expSymbol]?.dec||2))}</span>
+                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(expHedgePos.entry,(EXP_SYMBOLS[expHedgePos.symbol||expSymbol]?.dec||2))}</span>
+                            <span className="mono" style={{fontSize:10,color:T.text}}>{fP(hLive,(EXP_SYMBOLS[expHedgePos.symbol||expSymbol]?.dec||2))}</span>
                             <span className="mono" style={{fontSize:10,fontWeight:700,color:hCol}}>{fPct(hPct)}</span>
                             <span></span><span></span>
                             <span className="mono" style={{fontSize:11,fontWeight:700,color:hCol}}>{fUSD(hPnl)}</span>
