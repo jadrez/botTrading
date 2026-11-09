@@ -36,6 +36,13 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "key must start with exp_" });
     }
     try {
+      // Con Deriv (real) activo, SOLO el motor del servidor (que escribe directo a la DB)
+      // puede fijar el dueño y el estado vivo de la pila; un navegador (pestaña vieja,
+      // otro dispositivo) los pisaba y dejaba contratos reales huérfanos en Deriv.
+      if (key === "exp_live_state" || key === "exp_engine_owner") {
+        const lv = await db.query(`SELECT value FROM bot_config WHERE key = 'exp_deriv_live'`);
+        if (lv.rows[0]?.value === "1") return res.status(200).json({ ok: true, ignored: "deriv-live" });
+      }
       await db.query(
         `INSERT INTO bot_config (key, value, updated_at) VALUES ($1,$2,now())
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,

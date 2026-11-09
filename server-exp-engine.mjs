@@ -500,8 +500,11 @@ export function startExpEngine() {
       const hbAt = parseInt(hbStr, 10) || 0;
       const stale = !hbAt || (Date.now() - hbAt) > 15000;
       const mine = owner === SESSION_ID;
-      if (!owner || mine || stale) {
-        if (!isOwner) {
+      // En modo Deriv (real) el servidor es el ÚNICO dueño posible: aunque un navegador
+      // (pestaña vieja, otro dispositivo) escriba su heartbeat, no se cede el control
+      // ni se resincroniza desde la DB — su memoria es la verdad sobre los contratos reales.
+      if (!owner || mine || stale || cfg.derivLive) {
+        if (!isOwner && !cfg.derivLive) {
           log("tomando el control del motor");
           // Otra sesión pudo haber mutado positions/floor/peak/hedge mientras
           // nosotros no éramos dueños — si seguimos con lo que teníamos en
@@ -521,6 +524,7 @@ export function startExpEngine() {
             }
           } catch {}
         }
+        if (!isOwner && cfg.derivLive) log("modo Deriv: tomando el control del motor (sin resincronizar desde la DB)");
         isOwner = true;
         await setConfigValue(db, "exp_engine_owner", `${SESSION_ID}:${Date.now()}`);
       } else {
@@ -580,6 +584,15 @@ export function startExpEngine() {
       sim: simFlag !== "0",
       symbol: resolvedSymbol,
     };
+    if (cfg.derivLive) {
+      const before = positions.length + (hedge ? 1 : 0);
+      positions = positions.filter(p => p.contractId);
+      if (hedge && !hedge.contractId) hedge = null;
+      if (positions.length + (hedge ? 1 : 0) !== before) {
+        log("modo Deriv: se descartaron posiciones SIMULADAS (sin contrato real) del estado");
+        await persistLive(true);
+      }
+    }
     if (cfg.derivLive && !wasLive) log("⚠️ MODO EN VIVO (Deriv demo) activado — las próximas posiciones serán contratos reales");
     if (!cfg.derivLive && wasLive) log("Modo en vivo (Deriv) desactivado — vuelve a simulado");
     if (resolvedSymbol !== requestedSymbol) log(`⚠️ exp_symbol pide ${requestedSymbol} pero hay algo abierto en ${resolvedSymbol} — se mantiene ${resolvedSymbol} hasta que esa pila cierre`);
