@@ -6730,11 +6730,13 @@ export default function TradingBot(){
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
                 <div><div style={{fontSize:12,fontWeight:600}}>Activar simulado</div>
                   <div style={{fontSize:8,color:T.muted}}>
-                    {(expPositions.length>0||expHedgePos)?"No se puede cambiar de modo con la pila abierta — ciérrala primero."
-                      :`Opera ${expSymbol} con nuestra simulación (sin contratos reales). Al activarlo se apaga Deriv.`}</div></div>
-                <ConfigToggle on={!expDerivLive} disabled={expPositions.length>0||!!expHedgePos} onClick={()=>{
-                  if(expPositions.length>0||expHedgePos){ addLog("No se puede cambiar de modo con la pila abierta — ciérrala primero.","info"); return; }
-                  if(expDerivLive) setExpDerivLive(false);
+                    {(expPositions.length>0||expHedgePos)&&expEnabled?"No se puede cambiar de modo con la pila abierta — ciérrala primero."
+                      :`Enciende el experimento sobre ${expSymbol} con nuestra simulación (sin contratos reales). Al activarlo se apaga Deriv; apagarlo detiene el experimento.`}</div></div>
+                <ConfigToggle on={expEnabled&&!expDerivLive} disabled={(expPositions.length>0||!!expHedgePos)&&expEnabled} onClick={()=>{
+                  if((expPositions.length>0||expHedgePos)&&expEnabled){ addLog("No se puede cambiar de modo con la pila abierta — ciérrala primero.","info"); return; }
+                  // Encendido = experimento activo en modo simulado. Apagarlo detiene el experimento.
+                  if(expEnabled&&!expDerivLive){ setExpEnabled(false); return; }
+                  setExpDerivLive(false); setExpEnabled(true);
                 }}/>
               </div>
 
@@ -6891,6 +6893,24 @@ export default function TradingBot(){
               <div style={{marginBottom:16}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                   <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>POSICIONES ABIERTAS EN VIVO</div>
+                  {(expPositions.length>0||expHedgePos)&&!expEnabled&&!expDerivLive&&(
+                    <button onClick={()=>{
+                      if(!window.confirm("El experimento está apagado y quedó una pila simulada abierta. ¿Descartarla (sin registrarla en el histórico)?")) return;
+                      expPositionsRef.current=[]; setExpPositions([]);
+                      expHedgePosRef.current=null; setExpHedgePos(null);
+                      expDirectionRef.current=null; setExpDirection(null);
+                      expLastAddPriceRef.current=null; expLastPosPeakRef.current=0;
+                      const empty={positions:[],direction:null,floor:null,addLevel:null,peak:null,hedge:null,lastAddPrice:null,lastPosPeak:0};
+                      try{ localStorage.setItem(LS_EXP_LIVE,JSON.stringify(empty)); }catch{}
+                      fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
+                        body:JSON.stringify({key:"exp_live_state",value:JSON.stringify(empty)})}).catch(()=>{});
+                      addLog("🗑 Pila simulada huérfana descartada","info");
+                    }}
+                      style={{background:"transparent",border:`1px solid ${T.border}`,color:T.muted,borderRadius:5,
+                        padding:"4px 10px",cursor:"pointer",fontSize:9,fontWeight:700,marginRight:6}}>
+                      🗑 Descartar pila (experimento apagado)
+                    </button>
+                  )}
                   {(expPositions.length>0||expHedgePos)&&(
                     <button onClick={()=>{if(window.confirm("¿Cerrar TODA la pila (y la cobertura si hay) ahora mismo?")) requestExpManualClose("all");}}
                       style={{background:`${T.red}18`,border:`1px solid ${T.red}50`,color:T.red,borderRadius:5,
