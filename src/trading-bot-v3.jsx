@@ -1850,8 +1850,9 @@ export default function TradingBot(){
   const [expHistSymbol,setExpHistSymbol] = useState("TODOS");
   const [expHistType,setExpHistType]     = useState("TODOS");
   const [expHistResult,setExpHistResult] = useState("TODOS");
+  const [expHistMode,setExpHistMode]     = useState("SIM"); // SIM | DERIV | TODOS — separa el histórico simulado del de contratos reales
   const [expHistPage,setExpHistPage]     = useState(1); // paginación del HISTÓRICO — vuelve a 1 cada vez que cambia el filtro
-  useEffect(()=>{setExpHistPage(1);},[expHistFrom,expHistTo,expHistSymbol,expHistType,expHistResult]);
+  useEffect(()=>{setExpHistPage(1);},[expHistFrom,expHistTo,expHistSymbol,expHistType,expHistResult,expHistMode]);
   // RENDIMIENTO POR HORA — agregado en el SERVIDOR sobre TODO el histórico
   // (no solo los últimos N que trae expTrades). Reportado en vivo: "las
   // horas se están actualizando pero no me las está guardando... solo me
@@ -1890,11 +1891,12 @@ export default function TradingBot(){
     if(expHistTo) qs.set("to",expHistTo);
     if(expHistType!=="TODOS") qs.set("type",expHistType);
     if(expHistResult!=="TODOS") qs.set("result",expHistResult);
+    if(expHistMode!=="TODOS") qs.set("mode",expHistMode);
     fetch(`/api/exp-trades?${qs.toString()}`).then(r=>r.ok?r.json():null).then(d=>{
       if(alive&&d?.hours) setExpHourlyStats(d.hours);
     }).catch(()=>{});
     return()=>{alive=false;};
-  },[expHistSymbol,expHistFrom,expHistTo,expHistType,expHistResult,expTrades.length]);
+  },[expHistSymbol,expHistFrom,expHistTo,expHistType,expHistResult,expHistMode,expTrades.length]);
   // HISTÓRICO paginado — la PÁGINA exacta se le pide al SERVIDOR (filtrada
   // en SQL), no se recorta de expTrades del lado del cliente. Reportado en
   // vivo: "no sale paginación de nada y llevo más de 2 mil operaciones" —
@@ -1939,13 +1941,14 @@ export default function TradingBot(){
     if(expHistTo) qs.set("to",expHistTo);
     if(expHistType!=="TODOS") qs.set("type",expHistType);
     if(expHistResult!=="TODOS") qs.set("result",expHistResult);
+    if(expHistMode!=="TODOS") qs.set("mode",expHistMode);
     fetch(`/api/exp-trades?${qs.toString()}`).then(r=>r.ok?r.json():null).then(d=>{
       if(!alive||!d) return;
       setExpHistRows(d.trades||[]);
       setExpHistTotal(d.total??0);
     }).catch(()=>{});
     return()=>{alive=false;};
-  },[expHistSymbol,expHistFrom,expHistTo,expHistType,expHistResult,expHistPage,expTrades.length]);
+  },[expHistSymbol,expHistFrom,expHistTo,expHistType,expHistResult,expHistMode,expHistPage,expTrades.length]);
   const expEnabledRef    = useRef(expEnabled);
   const expStakeRef      = useRef(expStake);
   const expPriceRef      = useRef(null);
@@ -6604,6 +6607,15 @@ export default function TradingBot(){
                   </select>
                 </div>
                 <div>
+                  <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>MODO</div>
+                  <select value={expHistMode} onChange={e=>setExpHistMode(e.target.value)}
+                    style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
+                    <option value="SIM">Simulado</option>
+                    <option value="DERIV">Deriv (real demo)</option>
+                    <option value="TODOS">Todos</option>
+                  </select>
+                </div>
+                <div>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>RESULTADO</div>
                   <select value={expHistResult} onChange={e=>setExpHistResult(e.target.value)}
                     style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10,fontWeight:600}}>
@@ -7065,7 +7077,7 @@ export default function TradingBot(){
                                     <div className="mono" style={{fontSize:9,fontWeight:700,color:T.text}}>{volumen?`$${volumen.toFixed(0)}`:"—"}</div>
                                     <div style={{fontSize:7,color:T.muted}}>sin comisión</div>
                                   </div>
-                                  <span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.yellow,padding:"2px 7px",borderRadius:4,textAlign:"center",width:"fit-content"}}>EXPERIMENTO</span>
+                                  <span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.yellow,padding:"2px 7px",borderRadius:4,textAlign:"center",width:"fit-content"}}>{t.mode==="DERIV"?"DERIV":"SIMULADO"}</span>
                                   <span style={{fontSize:9,color:T.muted}}>{t.pattern||"—"}</span>
                                 </div>
                               );

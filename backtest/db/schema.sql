@@ -187,6 +187,8 @@ CREATE TABLE IF NOT EXISTS exp_trades (
   closed_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_exp_trades_closed ON exp_trades (closed_at DESC);
+-- 'SIM' (simulación local) | 'DERIV' (contrato real en demo). Filas anteriores = 'SIM'.
+ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'SIM';
 
 -- Live copy of SYMBOL_STRATEGY (src/lib/symbolStrategy.js), refreshed by
 -- backtest/update-strategy.mjs on a schedule (see .github/workflows) so

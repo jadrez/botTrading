@@ -141,10 +141,11 @@ export function startExpEngine() {
 
   const writeTradeRecord = async (c) => {
     try {
+      await db.query("ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'SIM'").catch(() => {});
       await db.query(
-        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-        [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.objetivo, c.stop, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime)]
+        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at, mode)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.objetivo, c.stop, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime), cfg.derivLive ? "DERIV" : "SIM"]
       );
     } catch (e) { log(`error writing exp_trades: ${e.message}`); }
   };

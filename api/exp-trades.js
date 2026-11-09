@@ -13,9 +13,13 @@ function getPool() {
 // block in trading-bot-v3.jsx. DB-backed (not just localStorage) so the
 // history is the same from any browser/device, not just the one that ran
 // the engine.
+let modeEnsured = false;
 export default async function handler(req, res) {
   const db = getPool();
   if (!db) return res.status(500).json({ error: "DATABASE_URL not set" });
+  if (!modeEnsured) {
+    try { await db.query("ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'SIM'"); modeEnsured = true; } catch {}
+  }
 
   // ── RENDIMIENTO POR HORA — agregado en SQL sobre TODO el histórico, no
   // solo los últimos N que trae el GET normal. Reportado en vivo: "las
@@ -33,7 +37,7 @@ export default async function handler(req, res) {
   // agrupar por la hora LOCAL del usuario, no UTC del servidor.
   if (req.method === "GET" && req.query?.agg === "hourly") {
     const tzOffsetMin = parseInt(req.query?.tzOffsetMin, 10) || 0;
-    const { symbol, from, to, type, result } = req.query || {};
+    const { symbol, from, to, type, result, mode } = req.query || {};
     const conditions = ["closed_at IS NOT NULL"];
     const params = [tzOffsetMin];
     let i = 2;
@@ -43,6 +47,7 @@ export default async function handler(req, res) {
     if (type) { conditions.push(`type = $${i}`); params.push(type); i++; }
     if (result === "GANANCIA") conditions.push(`pnl >= 0`);
     if (result === "PERDIDA") conditions.push(`pnl < 0`);
+    if (mode === "SIM" || mode === "DERIV") { conditions.push(`mode = $${i}`); params.push(mode); i++; }
     try {
       const r = await db.query(
         `SELECT EXTRACT(HOUR FROM (closed_at - make_interval(mins => $1)))::int AS hour,
@@ -68,7 +73,7 @@ export default async function handler(req, res) {
     // Con symbol/from/to/type/result + offset, la tabla puede pedirle al
     // SERVIDOR exactamente la página que necesita, filtrada en SQL sobre
     // TODO exp_trades, y total le dice cuántas páginas hay de verdad.
-    const { symbol, from, to, type, result } = req.query || {};
+    const { symbol, from, to, type, result, mode } = req.query || {};
     const conditions = ["1=1"];
     const params = [];
     let i = 1;
@@ -78,18 +83,19 @@ export default async function handler(req, res) {
     if (type) { conditions.push(`type = $${i}`); params.push(type); i++; }
     if (result === "GANANCIA") conditions.push(`pnl >= 0`);
     if (result === "PERDIDA") conditions.push(`pnl < 0`);
+    if (mode === "SIM" || mode === "DERIV") { conditions.push(`mode = $${i}`); params.push(mode); i++; }
     const where = conditions.join(" AND ");
     try {
       const [r, countR] = await Promise.all([
         db.query(
-          `SELECT symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at
+          `SELECT symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at, mode
            FROM exp_trades WHERE ${where} ORDER BY closed_at DESC LIMIT $${i} OFFSET $${i + 1}`,
           [...params, limit, offset]
         ),
         db.query(`SELECT COUNT(*)::int AS n FROM exp_trades WHERE ${where}`, params),
       ]);
       const trades = r.rows.map(row => ({
-        symbol: row.symbol, type: row.type,
+        symbol: row.symbol, type: row.type, mode: row.mode,
         entry: parseFloat(row.entry_price), exit: parseFloat(row.exit_price),
         pnl: parseFloat(row.pnl), reason: row.reason, pattern: row.pattern,
         objetivoPila: row.objetivo_pila != null ? parseFloat(row.objetivo_pila) : undefined,
@@ -108,18 +114,18 @@ export default async function handler(req, res) {
   }
 
   if (req.method === "POST") {
-    const { symbol, type, entryPrice, exitPrice, pnl, reason, pattern, objetivoPila, stopPila, allocatedSize, multiplier, openedAt, closedAt } = req.body || {};
+    const { symbol, type, entryPrice, exitPrice, pnl, reason, pattern, objetivoPila, stopPila, allocatedSize, multiplier, openedAt, closedAt, mode } = req.body || {};
     if (!type || entryPrice == null || exitPrice == null || pnl == null) {
       return res.status(400).json({ error: "type, entryPrice, exitPrice, pnl are required" });
     }
     try {
       await db.query(
-        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at, mode)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
         [symbol || "XAU/USD", type, entryPrice, exitPrice, pnl, reason || null, pattern || null,
          objetivoPila ?? null, stopPila ?? null,
          allocatedSize ?? null, multiplier ?? null,
-         openedAt ? new Date(openedAt) : null, closedAt ? new Date(closedAt) : new Date()]
+         openedAt ? new Date(openedAt) : null, closedAt ? new Date(closedAt) : new Date(), mode === "DERIV" ? "DERIV" : "SIM"]
       );
       return res.status(200).json({ ok: true });
     } catch (e) {
