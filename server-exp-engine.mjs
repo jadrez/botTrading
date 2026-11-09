@@ -65,9 +65,14 @@ function getPool() {
   return pool;
 }
 
+// PnL de un multiplicador. Si la posición trae `fee` (comisión de Deriv en USD, fijada al abrir) se
+// descuenta, y la pérdida se topa en el stake (stop out de Deriv = stake) — así el simulado y las
+// decisiones sobre contratos reales miden lo mismo que Deriv.
 function posPnL(pos, price) {
   const dir = pos.type === "BUY" ? 1 : -1;
-  return (dir * (price - pos.entry) / pos.entry) * pos.allocatedSize * (pos.multiplier || DEFAULT_MULTIPLIER);
+  const gross = (dir * (price - pos.entry) / pos.entry) * pos.allocatedSize * (pos.multiplier || DEFAULT_MULTIPLIER);
+  if (pos.fee == null) return gross;
+  return Math.max(gross - pos.fee, -pos.allocatedSize);
 }
 
 // Llama al propio /api/deriv-order (mismo proceso, mismo puerto) — reusa el
@@ -117,7 +122,7 @@ export function startExpEngine() {
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
   let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
@@ -164,7 +169,7 @@ export function startExpEngine() {
       // (sin spread, comisión ni latencia) — solo para operaciones reales (con contrato).
       const isReal = !!c.contractId;
       const ourEntry = c.simEntry ?? c.entry;
-      const simPnl = isReal ? posPnL({ type: c.type, entry: ourEntry, allocatedSize: c.allocatedSize, multiplier: c.multiplier }, c.exit) : null;
+      const simPnl = isReal ? posPnL({ type: c.type, entry: ourEntry, allocatedSize: c.allocatedSize, multiplier: c.multiplier, fee: c.fee }, c.exit) : null;
       await db.query(
         `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at, mode, contract_id, sim_pnl)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
@@ -213,7 +218,7 @@ export function startExpEngine() {
     // PnL mezclando el precio nuevo contra la entrada vieja (ver guard en
     // reloadConfig/bootstrap). Con esto, aunque ese guard fallara, cualquier
     // posición puede verificar contra QUÉ símbolo se abrió de verdad.
-    let pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: cfg.multiplier, openTime: Date.now(), pattern, symbol: cfg.symbol };
+    let pos = { id: Date.now() + Math.random(), type, entry: price, allocatedSize: cfg.stake, multiplier: cfg.multiplier, fee: cfg.commPct * cfg.stake * cfg.multiplier, openTime: Date.now(), pattern, symbol: cfg.symbol };
     if (cfg.derivLive) {
       try {
         const r = await derivOrderCall("open", {
@@ -445,7 +450,7 @@ export function startExpEngine() {
     // posición en la dirección contraria, mismo stake, aparte de la pila.
     if (!hedge && peak === 0 && stackPnl <= cfg.floorStart * EXP_HEDGE_TRIGGER_PCT) {
       const hedgeType = direction === "BUY" ? "SELL" : "BUY";
-      let h = { id: Date.now() + Math.random(), type: hedgeType, entry: price, allocatedSize: cfg.stake, multiplier: cfg.multiplier, openTime: Date.now(), pattern: "COBERTURA", symbol: cfg.symbol };
+      let h = { id: Date.now() + Math.random(), type: hedgeType, entry: price, allocatedSize: cfg.stake, multiplier: cfg.multiplier, fee: cfg.commPct * cfg.stake * cfg.multiplier, openTime: Date.now(), pattern: "COBERTURA", symbol: cfg.symbol };
       if (cfg.derivLive) {
         try {
           const r = await derivOrderCall("open", {
@@ -603,7 +608,7 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag] = await Promise.all([
 
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
@@ -614,6 +619,7 @@ export function startExpEngine() {
       getConfigValue(db, "exp_symbol", EXP_SYMBOL_DEFAULT),
       getConfigValue(db, "exp_sim", "1"),
       getConfigValue(db, "exp_multiplier", String(DEFAULT_MULTIPLIER)),
+      getConfigValue(db, "exp_commission_pct", "0"),
     ]);
     const wasLive = cfg.derivLive;
     const wasSymbol = cfg.symbol;
@@ -642,6 +648,7 @@ export function startExpEngine() {
       derivLive: derivLive === "1",
       sim: simFlag !== "0",
       multiplier: Math.max(1, parseInt(multFlag, 10) || DEFAULT_MULTIPLIER),
+      commPct: Math.max(0, parseFloat(commFlag) || 0),
       symbol: resolvedSymbol,
     };
     if (cfg.derivLive) {

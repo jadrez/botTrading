@@ -108,7 +108,10 @@ const fDateTime = ms => ms
 function posPnL(pos, price, stake=DEFAULT_STAKE){
   const dir  = pos.type==="BUY" ? 1 : -1;
   const mult = pos.multiplier || DEFAULT_MULTIPLIER;
-  return dir * (price - pos.entry) / pos.entry * stake * mult;
+  const gross = dir * (price - pos.entry) / pos.entry * stake * mult;
+  // Experimento: si la posición trae `fee` (comisión de Deriv en USD) se descuenta y la pérdida se topa en el stake (stop out).
+  if(pos.fee!=null) return Math.max(gross-pos.fee,-stake);
+  return gross;
 }
 
 // For a real (Deriv) position, prefer the profit Deriv itself last reported
@@ -1829,6 +1832,8 @@ export default function TradingBot(){
   const [expMultiplier,setExpMultiplier] = useState(()=>parseInt(localStorage.getItem(LS_EXP_MULT)||String(DEFAULT_MULTIPLIER),10)||DEFAULT_MULTIPLIER);
   const [expMultiplierText,setExpMultiplierText]=useState(String(expMultiplier));
   const expMultiplierRef = useRef(expMultiplier);
+  // Comisión de Deriv como fracción del nocional (ej. 0.000308) — la usa el simulado para igualar a Deriv.
+  const expCommPctRef = useRef(parseFloat(localStorage.getItem("bot_exp_comm_pct")||"0")||0);
   // Lo que Deriv dice de un contrato con este símbolo/stake/multiplicador (comisión, stop out) — se pide al escribir.
   const [expDerivInfo,setExpDerivInfo]   = useState(null); // {loading}|{data}|{error}
   // Presets guardados — pedido explícito: "me gustaría poderla guardar para
@@ -2029,7 +2034,16 @@ export default function TradingBot(){
       fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({action:"proposal",symbol:expSymbol,stake:expStake,multiplier:expMultiplier})})
         .then(r=>r.json().then(d=>({ok:r.ok,d})))
-        .then(({ok,d})=>{ if(alive) setExpDerivInfo(ok?{data:d}:{error:d?.error||"Deriv no respondió"}); })
+        .then(({ok,d})=>{
+          if(!alive) return;
+          setExpDerivInfo(ok?{data:d}:{error:d?.error||"Deriv no respondió"});
+          if(ok&&d?.commission!=null&&d.notional>0){
+            const pct=d.commission/d.notional;
+            expCommPctRef.current=pct;
+            try{localStorage.setItem("bot_exp_comm_pct",String(pct));}catch{}
+            fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_commission_pct",value:String(pct)})}).catch(()=>{});
+          }
+        })
         .catch(()=>{ if(alive) setExpDerivInfo({error:"No se pudo consultar a Deriv"}); });
     },1000);
     return()=>{alive=false; clearTimeout(t);};
@@ -2406,7 +2420,7 @@ export default function TradingBot(){
       // el registro y la evaluación pueden saber de verdad en qué símbolo
       // se abrió, en vez de asumir el expSymbol actual (que pudo cambiar).
       const pos={id:Date.now()+Math.random(), type, entry:price, allocatedSize:expStakeRef.current,
-        multiplier:expMultiplierRef.current, openTime:Date.now(), pattern, symbol:expSymbolRef.current};
+        multiplier:expMultiplierRef.current, fee:expCommPctRef.current*expStakeRef.current*expMultiplierRef.current, openTime:Date.now(), pattern, symbol:expSymbolRef.current};
       expPositionsRef.current=[...expPositionsRef.current,pos];
       expLastPosPeakRef.current=0; // nueva "última" posición — el canario arranca de cero para ella
       expLastAddPriceRef.current=price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
@@ -2646,7 +2660,7 @@ export default function TradingBot(){
       if(!expHedgePosRef.current && expStackPeakRef.current===0 && stackPnl<=expFloorStartRef.current*EXP_HEDGE_TRIGGER_PCT){
         const hedgeType=expDirectionRef.current==="BUY"?"SELL":"BUY";
         const hedge={id:Date.now()+Math.random(), type:hedgeType, entry:price, allocatedSize:expStakeRef.current,
-          multiplier:expMultiplierRef.current, openTime:Date.now(), pattern:"COBERTURA", symbol:expSymbolRef.current};
+          multiplier:expMultiplierRef.current, fee:expCommPctRef.current*expStakeRef.current*expMultiplierRef.current, openTime:Date.now(), pattern:"COBERTURA", symbol:expSymbolRef.current};
         expHedgePosRef.current=hedge;
         setExpHedgePos(hedge);
         persistLive();
@@ -7039,7 +7053,7 @@ export default function TradingBot(){
                             <span className="mono" style={{fontSize:11,fontWeight:700,color:col}}>{fUSD(pnl)}</span>
                             <div>
                               <div className="mono" style={{fontSize:10,fontWeight:700,color:T.text}}>${volumen.toFixed(0)}</div>
-                              <div style={{fontSize:7,color:T.muted}}>sin comisión</div>
+                              <div style={{fontSize:7,color:T.muted}}>{pos.fee?`com. sim $${pos.fee.toFixed(2)}`:"sin comisión"}</div>
                             </div>
                             <span style={{fontSize:8,fontWeight:700,color:T.bg,background:T.yellow,padding:"2px 7px",borderRadius:4,width:"fit-content"}}>EXPERIMENTO</span>
                             <span style={{fontSize:9,fontWeight:700,color:isProtected?T.green:T.muted,
