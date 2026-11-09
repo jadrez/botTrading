@@ -520,7 +520,7 @@ const EXP_HEDGE_TRIGGER_PCT=0.5; // 50% de expFloorStart
 const EXP_HEDGE_STOP_PCT=1;
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
-const LS_EXP_MAXSTACK="bot_exp_maxstack_v1", LS_EXP_MULT="bot_exp_mult_v1", LS_EXP_LOCK="bot_exp_lock_v1";
+const LS_EXP_MAXSTACK="bot_exp_maxstack_v1", LS_EXP_MULT="bot_exp_mult_v1", LS_EXP_LOCK="bot_exp_lock_v1", LS_EXP_ARM="bot_exp_arm_v1";
 const LS_EXP_SYMBOL="bot_exp_symbol_v1";
 // La pila/dirección/piso EN VIVO también se persisten (no solo el
 // historial cerrado) — verificado en vivo: sin esto, recargar la página
@@ -1836,6 +1836,10 @@ export default function TradingBot(){
   const [expLockFloor,setExpLockFloor] = useState(()=>{ const v=parseFloat(localStorage.getItem(LS_EXP_LOCK)); return isNaN(v)?1:v; });
   const [expLockFloorText,setExpLockFloorText]=useState(String(expLockFloor));
   const expLockFloorRef = useRef(expLockFloor);
+  // A qué pico (USD, neto) de la pila se activa el piso positivo.
+  const [expLockArm,setExpLockArm] = useState(()=>{ const v=parseFloat(localStorage.getItem(LS_EXP_ARM)); return isNaN(v)?2:v; });
+  const [expLockArmText,setExpLockArmText]=useState(String(expLockArm));
+  const expLockArmRef = useRef(expLockArm);
   // Comisión de Deriv como fracción del nocional (ej. 0.000308) — la usa el simulado para igualar a Deriv.
   const expCommPctRef = useRef(parseFloat(localStorage.getItem("bot_exp_comm_pct")||"0")||0);
   // Lo que Deriv dice de un contrato con este símbolo/stake/multiplicador (comisión, stop out) — se pide al escribir.
@@ -2028,6 +2032,9 @@ export default function TradingBot(){
   useEffect(()=>{expMaxStackRef.current=expMaxStack; try{localStorage.setItem(LS_EXP_MAXSTACK,String(expMaxStack));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_max_stack",value:String(expMaxStack)})}).catch(()=>{});
   },[expMaxStack]);
+  useEffect(()=>{expLockArmRef.current=expLockArm; try{localStorage.setItem(LS_EXP_ARM,String(expLockArm));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_lock_arm",value:String(expLockArm)})}).catch(()=>{});
+  },[expLockArm]);
   useEffect(()=>{expLockFloorRef.current=expLockFloor; try{localStorage.setItem(LS_EXP_LOCK,String(expLockFloor));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_lock_floor",value:String(expLockFloor)})}).catch(()=>{});
   },[expLockFloor]);
@@ -2084,6 +2091,7 @@ export default function TradingBot(){
           if(d.exp_add_step!=null){ setExpAddStep(parseFloat(d.exp_add_step)); setExpAddStepText(d.exp_add_step); }
           if(d.exp_floor_start!=null){ setExpFloorStart(parseFloat(d.exp_floor_start)); setExpFloorStartText(d.exp_floor_start); }
           if(d.exp_max_stack!=null){ setExpMaxStack(parseInt(d.exp_max_stack,10)); setExpMaxStackText(d.exp_max_stack); }
+          if(d.exp_lock_arm!=null){ const la=parseFloat(d.exp_lock_arm); if(!isNaN(la)){ setExpLockArm(la); setExpLockArmText(String(la)); } }
           if(d.exp_lock_floor!=null){ const lf=parseFloat(d.exp_lock_floor); if(!isNaN(lf)){ setExpLockFloor(lf); setExpLockFloorText(String(lf)); } }
           if(d.exp_multiplier!=null){ const m=parseInt(d.exp_multiplier,10); if(m>0){ setExpMultiplier(m); setExpMultiplierText(String(m)); } }
           if(d.exp_deriv_live!=null) setExpDerivLive(d.exp_deriv_live==="1");
@@ -2659,8 +2667,8 @@ export default function TradingBot(){
       if(expStackPeakRef.current>=EXP_FLOOR_ARM_AT){
         expFloorRef.current=Math.max(expFloorRef.current, expStackPeakRef.current*EXP_RETAIN_PCT);
       }
-      // Piso POSITIVO (neto de comisión): pico >= piso+1 → el piso sube a +expLockFloor.
-      if(expLockFloorRef.current>0 && expStackPeakRef.current>=expLockFloorRef.current+1){
+      // Piso POSITIVO (neto de comisión): pico >= expLockArm → el piso sube a +expLockFloor.
+      if(expLockFloorRef.current>0 && expStackPeakRef.current>=Math.max(expLockArmRef.current,expLockFloorRef.current+0.01)){
         expFloorRef.current=Math.max(expFloorRef.current, expLockFloorRef.current);
       }
       // Cobertura: la pila NUNCA estuvo en positivo (expStackPeakRef sigue
@@ -6866,7 +6874,7 @@ export default function TradingBot(){
                   <button onClick={()=>{
                     const name=expPresetNameInput.trim();
                     if(!name) return;
-                    const preset={name,symbol:expSymbol,stake:expStake,addStep:expAddStep,floorStart:expFloorStart,maxStack:expMaxStack,multiplier:expMultiplier,lockFloor:expLockFloor};
+                    const preset={name,symbol:expSymbol,stake:expStake,addStep:expAddStep,floorStart:expFloorStart,maxStack:expMaxStack,multiplier:expMultiplier,lockFloor:expLockFloor,lockArm:expLockArm};
                     const next=[...expPresets.filter(p=>p.name!==name),preset];
                     setExpPresets(next); setExpPresetNameInput("");
                     fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -6898,6 +6906,7 @@ export default function TradingBot(){
                           setExpMaxStack(p.maxStack); setExpMaxStackText(String(p.maxStack));
                           if(p.multiplier){ setExpMultiplier(p.multiplier); setExpMultiplierText(String(p.multiplier)); }
                           if(p.lockFloor!=null){ setExpLockFloor(p.lockFloor); setExpLockFloorText(String(p.lockFloor)); }
+                          if(p.lockArm!=null){ setExpLockArm(p.lockArm); setExpLockArmText(String(p.lockArm)); }
                           addLog(`📂 Configuración "${p.name}" cargada`,"info");
                         }} title="Cargar esta configuración"
                           style={{background:"transparent",border:"none",color:T.green,cursor:"pointer",fontSize:11,padding:"2px 4px"}}>
@@ -6919,7 +6928,7 @@ export default function TradingBot(){
                 )}
               </div>
 
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr 1fr",gap:10,marginBottom:10}} className="g4">
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr 1fr 1fr",gap:10,marginBottom:10}} className="g4">
                 <ConfigField label="STAKE POR POSICIÓN (USD, min. real Deriv $2)" type="text" inputMode="decimal" value={expStakeText}
                   onChange={e=>{const v=e.target.value; setExpStakeText(v); const n=parseFloat(v); if(!isNaN(n)) setExpStake(n);}}
                   onBlur={()=>{const n=Math.max(0.1,parseFloat(expStakeText)||1); setExpStake(n); setExpStakeText(String(n));}}/>
@@ -6932,7 +6941,10 @@ export default function TradingBot(){
                 <ConfigField label="MÁXIMO DE POSICIONES" type="text" inputMode="numeric" value={expMaxStackText}
                   onChange={e=>{const v=e.target.value; setExpMaxStackText(v); const n=parseInt(v,10); if(!isNaN(n)) setExpMaxStack(n);}}
                   onBlur={()=>{const n=Math.max(1,Math.min(10,parseInt(expMaxStackText,10)||10)); setExpMaxStack(n); setExpMaxStackText(String(n));}}/>
-                <ConfigField label="PISO POSITIVO (USD, al pasar a +)" type="text" inputMode="decimal" value={expLockFloorText}
+                <ConfigField label="ACTIVAR PISO + CUANDO LA PILA LLEGUE A (USD)" type="text" inputMode="decimal" value={expLockArmText}
+                  onChange={e=>{const v=e.target.value; setExpLockArmText(v); const n=parseFloat(v); if(!isNaN(n)&&n>=0) setExpLockArm(n);}}
+                  onBlur={()=>{const n=Math.max(0,isNaN(parseFloat(expLockArmText))?2:parseFloat(expLockArmText)); setExpLockArm(n); setExpLockArmText(String(n));}}/>
+                <ConfigField label="PISO POSITIVO (USD, SL al pasar a +)" type="text" inputMode="decimal" value={expLockFloorText}
                   onChange={e=>{const v=e.target.value; setExpLockFloorText(v); const n=parseFloat(v); if(!isNaN(n)&&n>=0) setExpLockFloor(n);}}
                   onBlur={()=>{const n=Math.max(0,isNaN(parseFloat(expLockFloorText))?1:parseFloat(expLockFloorText)); setExpLockFloor(n); setExpLockFloorText(String(n));}}/>
                 <ConfigField label="MULTIPLICADOR (x)" type="text" inputMode="numeric" value={expMultiplierText}

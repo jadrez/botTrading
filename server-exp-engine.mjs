@@ -122,7 +122,7 @@ export function startExpEngine() {
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
   let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
@@ -447,7 +447,7 @@ export function startExpEngine() {
     if (peak >= EXP_FLOOR_ARM_AT) floor = Math.max(floor, peak * EXP_RETAIN_PCT);
     // Piso POSITIVO (cfg.lockFloor, neto de comisión): apenas la pila pasa a positivo con margen
     // (pico >= lockFloor + 1) el piso sube a +lockFloor y ya no puede volver al negativo inicial.
-    if (cfg.lockFloor > 0 && peak >= cfg.lockFloor + 1) floor = Math.max(floor, cfg.lockFloor);
+    if (cfg.lockFloor > 0 && peak >= Math.max(cfg.lockArm, cfg.lockFloor + 0.01)) floor = Math.max(floor, cfg.lockFloor);
     // Cobertura: la pila NUNCA estuvo en positivo (peak sigue en 0) y la
     // pérdida agregada ya llega al 50% de cfg.floorStart — abre UNA
     // posición en la dirección contraria, mismo stake, aparte de la pila.
@@ -611,7 +611,7 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag] = await Promise.all([
 
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
@@ -624,6 +624,7 @@ export function startExpEngine() {
       getConfigValue(db, "exp_multiplier", String(DEFAULT_MULTIPLIER)),
       getConfigValue(db, "exp_commission_pct", "0"),
       getConfigValue(db, "exp_lock_floor", "1"),
+      getConfigValue(db, "exp_lock_arm", "2"),
     ]);
     const wasLive = cfg.derivLive;
     const wasSymbol = cfg.symbol;
@@ -654,6 +655,7 @@ export function startExpEngine() {
       multiplier: Math.max(1, parseInt(multFlag, 10) || DEFAULT_MULTIPLIER),
       commPct: Math.max(0, parseFloat(commFlag) || 0),
       lockFloor: Math.max(0, isNaN(parseFloat(lockFlag)) ? 1 : parseFloat(lockFlag)),
+      lockArm: Math.max(0, isNaN(parseFloat(armFlag)) ? 2 : parseFloat(armFlag)),
       symbol: resolvedSymbol,
     };
     if (cfg.derivLive) {
