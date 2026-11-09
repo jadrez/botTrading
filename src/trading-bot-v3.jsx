@@ -1840,6 +1840,9 @@ export default function TradingBot(){
   const [expLockArm,setExpLockArm] = useState(()=>{ const v=parseFloat(localStorage.getItem(LS_EXP_ARM)); return isNaN(v)?2:v; });
   const [expLockArmText,setExpLockArmText]=useState(String(expLockArm));
   const expLockArmRef = useRef(expLockArm);
+  // Cobertura (posición contraria cuando la pila nunca fue positiva): OPCIONAL, apagada por defecto.
+  const [expHedgeOn,setExpHedgeOn] = useState(()=>localStorage.getItem("bot_exp_hedge")==="1");
+  const expHedgeOnRef = useRef(expHedgeOn);
   // Comisión de Deriv como fracción del nocional (ej. 0.000308) — la usa el simulado para igualar a Deriv.
   const expCommPctRef = useRef(parseFloat(localStorage.getItem("bot_exp_comm_pct")||"0")||0);
   // Lo que Deriv dice de un contrato con este símbolo/stake/multiplicador (comisión, stop out) — se pide al escribir.
@@ -2032,6 +2035,9 @@ export default function TradingBot(){
   useEffect(()=>{expMaxStackRef.current=expMaxStack; try{localStorage.setItem(LS_EXP_MAXSTACK,String(expMaxStack));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_max_stack",value:String(expMaxStack)})}).catch(()=>{});
   },[expMaxStack]);
+  useEffect(()=>{expHedgeOnRef.current=expHedgeOn; try{localStorage.setItem("bot_exp_hedge",expHedgeOn?"1":"0");}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_hedge",value:expHedgeOn?"1":"0"})}).catch(()=>{});
+  },[expHedgeOn]);
   useEffect(()=>{expLockArmRef.current=expLockArm; try{localStorage.setItem(LS_EXP_ARM,String(expLockArm));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_lock_arm",value:String(expLockArm)})}).catch(()=>{});
   },[expLockArm]);
@@ -2091,6 +2097,7 @@ export default function TradingBot(){
           if(d.exp_add_step!=null){ setExpAddStep(parseFloat(d.exp_add_step)); setExpAddStepText(d.exp_add_step); }
           if(d.exp_floor_start!=null){ setExpFloorStart(parseFloat(d.exp_floor_start)); setExpFloorStartText(d.exp_floor_start); }
           if(d.exp_max_stack!=null){ setExpMaxStack(parseInt(d.exp_max_stack,10)); setExpMaxStackText(d.exp_max_stack); }
+          if(d.exp_hedge!=null) setExpHedgeOn(d.exp_hedge==="1");
           if(d.exp_lock_arm!=null){ const la=parseFloat(d.exp_lock_arm); if(!isNaN(la)){ setExpLockArm(la); setExpLockArmText(String(la)); } }
           if(d.exp_lock_floor!=null){ const lf=parseFloat(d.exp_lock_floor); if(!isNaN(lf)){ setExpLockFloor(lf); setExpLockFloorText(String(lf)); } }
           if(d.exp_multiplier!=null){ const m=parseInt(d.exp_multiplier,10); if(m>0){ setExpMultiplier(m); setExpMultiplierText(String(m)); } }
@@ -2677,7 +2684,9 @@ export default function TradingBot(){
       // 50% de expFloorStart — abre UNA posición en la dirección contraria,
       // mismo stake, aparte de la pila (que sigue con su piso normal sin
       // tocarla). Solo una vez por ciclo — expHedgePosRef como gate.
-      if(!expHedgePosRef.current && expStackPeakRef.current===0 && stackPnl<=expFloorStartRef.current*EXP_HEDGE_TRIGGER_PCT){
+      const stackFee=expPositionsRef.current.reduce((s,p)=>s+(p.fee||0),0);
+      const hedgeTrigger=-stackFee+(expFloorStartRef.current+stackFee)*EXP_HEDGE_TRIGGER_PCT;
+      if(expHedgeOnRef.current && !expHedgePosRef.current && expStackPeakRef.current===0 && stackPnl<=hedgeTrigger){
         const hedgeType=expDirectionRef.current==="BUY"?"SELL":"BUY";
         const hedge={id:Date.now()+Math.random(), type:hedgeType, entry:price, allocatedSize:expStakeRef.current,
           multiplier:expMultiplierRef.current, fee:expCommPctRef.current*expStakeRef.current*expMultiplierRef.current, openTime:Date.now(), pattern:"COBERTURA", symbol:expSymbolRef.current};
@@ -6863,6 +6872,12 @@ export default function TradingBot(){
                   if(!expDerivLive && !window.confirm(`Esto hace que el Experimento abra y cierre contratos REALES (Multiplicadores, ${expSymbol}) en tu cuenta DEMO de Deriv, usando saldo demo real. ¿Continuar?`)) return;
                   changeWithPile("el modo",()=>setExpDerivLive(p=>!p));
                 }}/>
+              </div>
+
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
+                <div><div style={{fontSize:12,fontWeight:600}}>Activar cobertura</div>
+                  <div style={{fontSize:8,color:T.muted}}>Abre una posición contraria cuando la pila nunca fue positiva y cae a la mitad del margen hasta el piso inicial. Cuesta otra comisión por ciclo — apagada por defecto.</div></div>
+                <ConfigToggle on={expHedgeOn} onClick={()=>setExpHedgeOn(p=>!p)}/>
               </div>
 
               {/* Presets — pedido explícito: "me gustaría poderla guardar

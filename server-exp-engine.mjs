@@ -122,7 +122,7 @@ export function startExpEngine() {
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, hedgeOn: false, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
   let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
@@ -451,7 +451,11 @@ export function startExpEngine() {
     // Cobertura: la pila NUNCA estuvo en positivo (peak sigue en 0) y la
     // pérdida agregada ya llega al 50% de cfg.floorStart — abre UNA
     // posición en la dirección contraria, mismo stake, aparte de la pila.
-    if (!hedge && peak === 0 && stackPnl <= cfg.floorStart * EXP_HEDGE_TRIGGER_PCT) {
+    // La cobertura es OPCIONAL (cfg.hedgeOn) y su disparo es neto de comisión: una pila recién abierta ya parte en
+    // -(comisión), así que el umbral es la mitad del margen que queda entre -(comisión) y el piso inicial.
+    const stackFee = positions.reduce((s, p) => s + (p.fee || 0), 0);
+    const hedgeTrigger = -stackFee + (cfg.floorStart + stackFee) * EXP_HEDGE_TRIGGER_PCT;
+    if (cfg.hedgeOn && !hedge && peak === 0 && stackPnl <= hedgeTrigger) {
       const hedgeType = direction === "BUY" ? "SELL" : "BUY";
       let h = { id: Date.now() + Math.random(), type: hedgeType, entry: price, allocatedSize: cfg.stake, multiplier: cfg.multiplier, fee: cfg.commPct * cfg.stake * cfg.multiplier, openTime: Date.now(), pattern: "COBERTURA", symbol: cfg.symbol };
       if (cfg.derivLive) {
@@ -611,7 +615,7 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag, hedgeFlag] = await Promise.all([
 
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
@@ -625,6 +629,7 @@ export function startExpEngine() {
       getConfigValue(db, "exp_commission_pct", "0"),
       getConfigValue(db, "exp_lock_floor", "1"),
       getConfigValue(db, "exp_lock_arm", "2"),
+      getConfigValue(db, "exp_hedge", "0"),
     ]);
     const wasLive = cfg.derivLive;
     const wasSymbol = cfg.symbol;
@@ -656,6 +661,7 @@ export function startExpEngine() {
       commPct: Math.max(0, parseFloat(commFlag) || 0),
       lockFloor: Math.max(0, isNaN(parseFloat(lockFlag)) ? 1 : parseFloat(lockFlag)),
       lockArm: Math.max(0, isNaN(parseFloat(armFlag)) ? 2 : parseFloat(armFlag)),
+      hedgeOn: hedgeFlag === "1",
       symbol: resolvedSymbol,
     };
     if (cfg.derivLive) {
