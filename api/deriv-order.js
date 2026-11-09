@@ -355,6 +355,29 @@ export default async function handler(req, res) {
       return res.status(200).json({ contractId: b?.contract_id, buyPrice: b?.buy_price, stake, multiplier, status: "OPEN", raw: b });
     }
 
+    // ── PROPOSAL — pregunta a Deriv cómo quedaría un contrato (comisión, stop out) para
+    // un símbolo/stake/multiplicador, SIN comprar nada. Si el multiplicador no es válido para ese
+    // símbolo, Deriv responde con el error y los valores aceptados (se devuelve tal cual).
+    if (action === "proposal") {
+      const derivSymbol = SYMBOL_MAP[symbol];
+      if (!derivSymbol) return res.status(400).json({ error: `Symbol not supported: ${symbol}` });
+      const { msg } = await derivAction(token, appId, accountType, {
+        proposal: 1, amount: Number(stake), basis: "stake", contract_type: "MULTUP", currency: "USD",
+        multiplier: Number(multiplier), underlying_symbol: derivSymbol,
+      });
+      const p = msg.proposal;
+      if (!p) return res.status(404).json({ error: "No proposal returned" });
+      return res.status(200).json({
+        multiplier: Number(multiplier), stake: Number(stake),
+        commission: p.commission != null ? parseFloat(p.commission) : undefined,
+        askPrice: p.ask_price != null ? parseFloat(p.ask_price) : undefined,
+        spot: p.spot != null ? parseFloat(p.spot) : undefined,
+        stopOut: p.limit_order?.stop_out?.order_amount != null ? Math.abs(parseFloat(p.limit_order.stop_out.order_amount)) : undefined,
+        stopOutLevel: p.limit_order?.stop_out?.value != null ? parseFloat(p.limit_order.stop_out.value) : undefined,
+        notional: Number(stake) * Number(multiplier),
+      });
+    }
+
     // ── CLOSE (sell)
     if (action === "close") {
       if (!contractId) return res.status(400).json({ error: "contractId required" });

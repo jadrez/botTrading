@@ -517,7 +517,7 @@ const EXP_HEDGE_TRIGGER_PCT=0.5; // 50% de expFloorStart
 const EXP_HEDGE_STOP_PCT=1;
 const LS_EXP_ENABLED="bot_exp_enabled_v1", LS_EXP_STAKE="bot_exp_stake_v1", LS_EXP_TRADES="bot_exp_trades_v1";
 const LS_EXP_ADDSTEP="bot_exp_addstep_v1", LS_EXP_FLOORSTART="bot_exp_floorstart_v1";
-const LS_EXP_MAXSTACK="bot_exp_maxstack_v1";
+const LS_EXP_MAXSTACK="bot_exp_maxstack_v1", LS_EXP_MULT="bot_exp_mult_v1";
 const LS_EXP_SYMBOL="bot_exp_symbol_v1";
 // La pila/dirección/piso EN VIVO también se persisten (no solo el
 // historial cerrado) — verificado en vivo: sin esto, recargar la página
@@ -1826,6 +1826,11 @@ export default function TradingBot(){
   const [expAddStepText,setExpAddStepText]=useState(String(expAddStep));
   const [expFloorStartText,setExpFloorStartText]=useState(String(expFloorStart));
   const [expMaxStackText,setExpMaxStackText]=useState(String(expMaxStack));
+  const [expMultiplier,setExpMultiplier] = useState(()=>parseInt(localStorage.getItem(LS_EXP_MULT)||String(DEFAULT_MULTIPLIER),10)||DEFAULT_MULTIPLIER);
+  const [expMultiplierText,setExpMultiplierText]=useState(String(expMultiplier));
+  const expMultiplierRef = useRef(expMultiplier);
+  // Lo que Deriv dice de un contrato con este símbolo/stake/multiplicador (comisión, stop out) — se pide al escribir.
+  const [expDerivInfo,setExpDerivInfo]   = useState(null); // {loading}|{data}|{error}
   // Presets guardados — pedido explícito: "me gustaría poderla guardar para
   // ir guardando mis configuraciones". Un array de {name,symbol,stake,
   // addStep,floorStart,maxStack} persistido en bot_config (exp_presets),
@@ -2014,6 +2019,21 @@ export default function TradingBot(){
   useEffect(()=>{expMaxStackRef.current=expMaxStack; try{localStorage.setItem(LS_EXP_MAXSTACK,String(expMaxStack));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_max_stack",value:String(expMaxStack)})}).catch(()=>{});
   },[expMaxStack]);
+  useEffect(()=>{expMultiplierRef.current=expMultiplier; try{localStorage.setItem(LS_EXP_MULT,String(expMultiplier));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_multiplier",value:String(expMultiplier)})}).catch(()=>{});
+  },[expMultiplier]);
+  useEffect(()=>{
+    let alive=true;
+    setExpDerivInfo({loading:true});
+    const t=setTimeout(()=>{
+      fetch("/api/deriv-order",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({action:"proposal",symbol:expSymbol,stake:expStake,multiplier:expMultiplier})})
+        .then(r=>r.json().then(d=>({ok:r.ok,d})))
+        .then(({ok,d})=>{ if(alive) setExpDerivInfo(ok?{data:d}:{error:d?.error||"Deriv no respondió"}); })
+        .catch(()=>{ if(alive) setExpDerivInfo({error:"No se pudo consultar a Deriv"}); });
+    },1000);
+    return()=>{alive=false; clearTimeout(t);};
+  },[expSymbol,expStake,expMultiplier]);
   useEffect(()=>{expDerivLiveRef.current=expDerivLive;
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_deriv_live",value:expDerivLive?"1":"0"})}).catch(()=>{});
   },[expDerivLive]);
@@ -2042,6 +2062,7 @@ export default function TradingBot(){
           if(d.exp_add_step!=null){ setExpAddStep(parseFloat(d.exp_add_step)); setExpAddStepText(d.exp_add_step); }
           if(d.exp_floor_start!=null){ setExpFloorStart(parseFloat(d.exp_floor_start)); setExpFloorStartText(d.exp_floor_start); }
           if(d.exp_max_stack!=null){ setExpMaxStack(parseInt(d.exp_max_stack,10)); setExpMaxStackText(d.exp_max_stack); }
+          if(d.exp_multiplier!=null){ const m=parseInt(d.exp_multiplier,10); if(m>0){ setExpMultiplier(m); setExpMultiplierText(String(m)); } }
           if(d.exp_deriv_live!=null) setExpDerivLive(d.exp_deriv_live==="1");
           if(d.exp_sim!=null) setExpSim(d.exp_sim==="1");
           // El símbolo restaurado se lee ANTES de aplicar exp_symbol — mismo
@@ -2384,7 +2405,7 @@ export default function TradingBot(){
       // el registro y la evaluación pueden saber de verdad en qué símbolo
       // se abrió, en vez de asumir el expSymbol actual (que pudo cambiar).
       const pos={id:Date.now()+Math.random(), type, entry:price, allocatedSize:expStakeRef.current,
-        multiplier:DEFAULT_MULTIPLIER, openTime:Date.now(), pattern, symbol:expSymbolRef.current};
+        multiplier:expMultiplierRef.current, openTime:Date.now(), pattern, symbol:expSymbolRef.current};
       expPositionsRef.current=[...expPositionsRef.current,pos];
       expLastPosPeakRef.current=0; // nueva "última" posición — el canario arranca de cero para ella
       expLastAddPriceRef.current=price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
@@ -2624,7 +2645,7 @@ export default function TradingBot(){
       if(!expHedgePosRef.current && expStackPeakRef.current===0 && stackPnl<=expFloorStartRef.current*EXP_HEDGE_TRIGGER_PCT){
         const hedgeType=expDirectionRef.current==="BUY"?"SELL":"BUY";
         const hedge={id:Date.now()+Math.random(), type:hedgeType, entry:price, allocatedSize:expStakeRef.current,
-          multiplier:DEFAULT_MULTIPLIER, openTime:Date.now(), pattern:"COBERTURA", symbol:expSymbolRef.current};
+          multiplier:expMultiplierRef.current, openTime:Date.now(), pattern:"COBERTURA", symbol:expSymbolRef.current};
         expHedgePosRef.current=hedge;
         setExpHedgePos(hedge);
         persistLive();
@@ -2706,7 +2727,7 @@ export default function TradingBot(){
       // ya se le explica al usuario arriba: expAddStep/(stake×100)), así
       // que apilar de verdad requiere que el precio avance, no que la
       // suma crezca por el peso de las posiciones anteriores.
-      const priceStepPct=expAddStepRef.current/(expStakeRef.current*DEFAULT_MULTIPLIER);
+      const priceStepPct=expAddStepRef.current/(expStakeRef.current*expMultiplierRef.current);
       const movedEnough=expLastAddPriceRef.current!=null && (
         expDirectionRef.current==="BUY"
           ? price>=expLastAddPriceRef.current*(1+priceStepPct)
@@ -6601,7 +6622,7 @@ export default function TradingBot(){
                 ({fUSD(expFloorStart*EXP_QUICK_REVERSAL_FRACTION)} en vez de {fUSD(expFloorStart)}) — si resulta ser
                 un error, vuelve rápido a la dirección que sí funcionaba en vez de esperar el piso completo otra vez.
                 El stake es lo que determina qué tan rápido se mueven estos $: PnL($) = %movimiento_del_precio × stake × 100 —
-                con este stake, {expSymbol} necesita moverse <b>{((expAddStep/(expStake*DEFAULT_MULTIPLIER))*100).toFixed(3)}%</b> para
+                con este stake, {expSymbol} necesita moverse <b>{((expAddStep/(expStake*expMultiplier))*100).toFixed(3)}%</b> para
                 el próximo apilado/volteo (sube el stake si lo quieres más rápido, es solo Simulado).
                 <br/>Precio en vivo cada 1s vía Deriv ({EXP_SYMBOLS[expSymbol]?.deriv}) — el mismo tick que usa el
                 servidor para decidir y el mismo venue que ejecutaría de verdad, así el número que ves siempre
@@ -6808,7 +6829,7 @@ export default function TradingBot(){
                   <button onClick={()=>{
                     const name=expPresetNameInput.trim();
                     if(!name) return;
-                    const preset={name,symbol:expSymbol,stake:expStake,addStep:expAddStep,floorStart:expFloorStart,maxStack:expMaxStack};
+                    const preset={name,symbol:expSymbol,stake:expStake,addStep:expAddStep,floorStart:expFloorStart,maxStack:expMaxStack,multiplier:expMultiplier};
                     const next=[...expPresets.filter(p=>p.name!==name),preset];
                     setExpPresets(next); setExpPresetNameInput("");
                     fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -6838,6 +6859,7 @@ export default function TradingBot(){
                           setExpAddStep(p.addStep); setExpAddStepText(String(p.addStep));
                           setExpFloorStart(p.floorStart); setExpFloorStartText(String(p.floorStart));
                           setExpMaxStack(p.maxStack); setExpMaxStackText(String(p.maxStack));
+                          if(p.multiplier){ setExpMultiplier(p.multiplier); setExpMultiplierText(String(p.multiplier)); }
                           addLog(`📂 Configuración "${p.name}" cargada`,"info");
                         }} title="Cargar esta configuración"
                           style={{background:"transparent",border:"none",color:T.green,cursor:"pointer",fontSize:11,padding:"2px 4px"}}>
@@ -6859,7 +6881,7 @@ export default function TradingBot(){
                 )}
               </div>
 
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:10}} className="g4">
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:10,marginBottom:10}} className="g4">
                 <ConfigField label="STAKE POR POSICIÓN (USD, min. real Deriv $2)" type="text" inputMode="decimal" value={expStakeText}
                   onChange={e=>{const v=e.target.value; setExpStakeText(v); const n=parseFloat(v); if(!isNaN(n)) setExpStake(n);}}
                   onBlur={()=>{const n=Math.max(0.1,parseFloat(expStakeText)||1); setExpStake(n); setExpStakeText(String(n));}}/>
@@ -6872,6 +6894,22 @@ export default function TradingBot(){
                 <ConfigField label="MÁXIMO DE POSICIONES" type="text" inputMode="numeric" value={expMaxStackText}
                   onChange={e=>{const v=e.target.value; setExpMaxStackText(v); const n=parseInt(v,10); if(!isNaN(n)) setExpMaxStack(n);}}
                   onBlur={()=>{const n=Math.max(1,Math.min(10,parseInt(expMaxStackText,10)||10)); setExpMaxStack(n); setExpMaxStackText(String(n));}}/>
+                <ConfigField label="MULTIPLICADOR (x)" type="text" inputMode="numeric" value={expMultiplierText}
+                  onChange={e=>{const v=e.target.value; setExpMultiplierText(v); const n=parseInt(v,10); if(n>0) setExpMultiplier(n);}}
+                  onBlur={()=>{const n=Math.max(1,parseInt(expMultiplierText,10)||DEFAULT_MULTIPLIER); setExpMultiplier(n); setExpMultiplierText(String(n));}}/>
+              </div>
+              {/* Lo que Deriv responde para ESTE símbolo/stake/multiplicador (se consulta solo al escribir, sin comprar). */}
+              <div style={{marginBottom:10,padding:"7px 10px",background:T.dim,borderRadius:6,fontSize:10,color:T.muted}}>
+                {!expDerivInfo||expDerivInfo.loading?"Consultando a Deriv…"
+                  :expDerivInfo.error?<span style={{color:T.red}}>⚠️ Deriv ({expSymbol}, x{expMultiplier}, ${expStake}): {expDerivInfo.error}</span>
+                  :<span>
+                    <b style={{color:T.text}}>Deriv · {expSymbol} · x{expDerivInfo.data.multiplier} · ${expDerivInfo.data.stake}</b>
+                    {" — "}nocional <b className="mono">${expDerivInfo.data.notional.toFixed(0)}</b>
+                    {expDerivInfo.data.commission!=null&&<> · comisión <b className="mono" style={{color:T.red}}>${expDerivInfo.data.commission.toFixed(2)}</b></>}
+                    {expDerivInfo.data.stopOut!=null&&<> · stop out <b className="mono">${expDerivInfo.data.stopOut.toFixed(2)}</b></>}
+                    {expDerivInfo.data.stopOutLevel!=null&&<> (nivel {expDerivInfo.data.stopOutLevel})</>}
+                    {expDerivInfo.data.commission!=null&&expDerivInfo.data.notional>0&&<> · la comisión equivale a <b className="mono">{(expDerivInfo.data.commission/expDerivInfo.data.notional*100).toFixed(4)}%</b> de movimiento</>}
+                  </span>}
               </div>
 
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}} className="g4">
