@@ -7144,6 +7144,11 @@ export default function TradingBot(){
                   </div>
                 </div>
               )}
+              {expHistMode!=="SIM"&&!expCompare&&(
+                <div style={{marginTop:12,padding:"8px 12px",background:T.dim,border:`1px dashed ${T.border}`,borderRadius:8,fontSize:9,color:T.muted}}>
+                  VALIDACIÓN SIMULADO vs DERIV — aún sin operaciones reales cerradas con datos de validación. Aparecerá aquí apenas cierre la primera con Deriv activo.
+                </div>
+              )}
               {expCompare&&(()=>{
                 const c=expCompare, diff=(c.sim_pnl||0)-(c.real_pnl||0);
                 const other=diff-(c.entry_cost||0)-(c.exit_cost||0)-(c.commission||0);
