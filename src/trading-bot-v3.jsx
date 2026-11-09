@@ -1797,6 +1797,9 @@ export default function TradingBot(){
   // ── Experimento: pirámide XAU/USD (ver constantes EXP_* arriba) — 100%
   // aislado de Simulado/Crecimiento, su propio feed/estado/historial.
   const [expEnabled,setExpEnabled]     = useState(()=>localStorage.getItem(LS_EXP_ENABLED)==="1");
+  // Simulado: interruptor INDEPENDIENTE (por defecto encendido, como era antes). Con él apagado y Deriv apagado, el experimento no abre posiciones automáticas.
+  const [expSim,setExpSim]               = useState(()=>localStorage.getItem("bot_exp_sim")!=="0");
+  const expSimRef = useRef(expSim);
   const [expStake,setExpStake]         = useState(()=>parseFloat(localStorage.getItem(LS_EXP_STAKE)||"1"));
   // Editables en vivo junto al stake — ver nota en la constante EXP_ADD_STEP
   // arriba sobre por qué estos dos dependen directamente del stake elegido.
@@ -1983,6 +1986,9 @@ export default function TradingBot(){
   useEffect(()=>{expEnabledRef.current=expEnabled; try{localStorage.setItem(LS_EXP_ENABLED,expEnabled?"1":"0");}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_enabled",value:expEnabled?"1":"0"})}).catch(()=>{});
   },[expEnabled]);
+  useEffect(()=>{expSimRef.current=expSim; try{localStorage.setItem("bot_exp_sim",expSim?"1":"0");}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_sim",value:expSim?"1":"0"})}).catch(()=>{});
+  },[expSim]);
   useEffect(()=>{expStakeRef.current=expStake; try{localStorage.setItem(LS_EXP_STAKE,String(expStake));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_stake",value:String(expStake)})}).catch(()=>{});
   },[expStake]);
@@ -2024,6 +2030,7 @@ export default function TradingBot(){
           if(d.exp_floor_start!=null){ setExpFloorStart(parseFloat(d.exp_floor_start)); setExpFloorStartText(d.exp_floor_start); }
           if(d.exp_max_stack!=null){ setExpMaxStack(parseInt(d.exp_max_stack,10)); setExpMaxStackText(d.exp_max_stack); }
           if(d.exp_deriv_live!=null) setExpDerivLive(d.exp_deriv_live==="1");
+          if(d.exp_sim!=null) setExpSim(d.exp_sim==="1");
           // El símbolo restaurado se lee ANTES de aplicar exp_symbol — mismo
           // motivo que el guard del servidor: si hay una posición/cobertura
           // abierta en OTRO símbolo, el de la DB (exp_symbol) se ignora y se
@@ -2766,7 +2773,10 @@ export default function TradingBot(){
         // expDerivLive arriba). Evita que dos instancias puedan abrir/cerrar
         // la MISMA posición real a la vez, incluso si el servidor tarda en
         // reclamar tras un reinicio — mejor pausar que arriesgar duplicar.
-        const canClaim=!expDerivLiveRef.current && (!owner||mine||stale);
+        const freshSim=d.exp_sim==null?true:d.exp_sim==="1";
+        if(freshSim!==expSimRef.current){ expSimRef.current=freshSim; setExpSim(freshSim); }
+        // Sin Simulado, esta pestaña no reclama el motor (no abre posiciones simuladas).
+        const canClaim=!expDerivLiveRef.current && expSimRef.current && (!owner||mine||stale);
         if(canClaim){
           if(!expIsOwnerRef.current && d.exp_live_state){
             // Otra sesión pudo haber mutado positions/floor/peak/hedge mientras
@@ -6547,6 +6557,23 @@ export default function TradingBot(){
           const expHasFilters=expHistFrom||expHistTo||expHistSymbol!=="TODOS"||expHistType!=="TODOS"||expHistResult!=="TODOS";
           const expHistTotalPages=Math.max(1,Math.ceil(expHistTotal/50));
           const expHistPageSafe=Math.min(expHistPage,expHistTotalPages);
+          // Cambiar símbolo/modo con una pila abierta: pide confirmación, cierra la pila
+          // (el dueño del motor la procesa en ~2s) y recién entonces aplica el cambio.
+          const changeWithPile=(label,apply)=>{
+            if(!(expPositions.length>0||expHedgePos)){ apply(); return; }
+            if(!window.confirm(`Hay una pila abierta. Para cambiar ${label} se cerrará primero. ¿Continuar?`)) return;
+            if(!expEnabled&&!expDerivLive){
+              expPositionsRef.current=[]; setExpPositions([]); expHedgePosRef.current=null; setExpHedgePos(null);
+              expDirectionRef.current=null; setExpDirection(null); expLastAddPriceRef.current=null; expLastPosPeakRef.current=0;
+              const empty={positions:[],direction:null,floor:null,addLevel:null,peak:null,hedge:null,lastAddPrice:null,lastPosPeak:0};
+              try{ localStorage.setItem(LS_EXP_LIVE,JSON.stringify(empty)); }catch{}
+              fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_live_state",value:JSON.stringify(empty)})}).catch(()=>{});
+              apply(); return;
+            }
+            requestExpManualClose("all");
+            addLog(`Cerrando la pila para cambiar ${label}…`,"info");
+            setTimeout(apply,3500);
+          };
           return(
           <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16,maxWidth:1600}}>
 
@@ -6707,13 +6734,9 @@ export default function TradingBot(){
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
                 <div><div style={{fontSize:12,fontWeight:600}}>Símbolo</div>
                   <div style={{fontSize:8,color:T.muted}}>
-                    {(expPositions.length>0||expHedgePos)?"No se puede cambiar con la pila abierta — ciérrala primero."
-                      :"Cuál instrumento opera el Experimento (afecta precio en vivo y, si aplica, el contrato real en Deriv)."}</div></div>
-                <select value={expSymbol} disabled={expPositions.length>0||!!expHedgePos}
-                  onChange={e=>{
-                    if(expPositions.length>0||expHedgePos){ addLog("No se puede cambiar de símbolo con la pila abierta — ciérrala primero.","info"); return; }
-                    setExpSymbol(e.target.value);
-                  }}
+                    Cuál instrumento opera el Experimento. Con una pila abierta, se cierra primero (te pide confirmar).</div></div>
+                <select value={expSymbol}
+                  onChange={e=>{ const v=e.target.value; changeWithPile("el símbolo",()=>setExpSymbol(v)); }}
                   style={{background:T.dim,color:T.text,border:`1px solid ${T.border}`,borderRadius:5,padding:"6px 10px",fontSize:11,fontWeight:600}}>
                   {Object.keys(EXP_SYMBOLS).map(s=><option key={s} value={s}>{s}</option>)}
                 </select>
@@ -6721,7 +6744,7 @@ export default function TradingBot(){
 
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
                 <div><div style={{fontSize:12,fontWeight:600}}>Activar experimento</div>
-                  <div style={{fontSize:8,color:T.muted}}>Enciende toda la lógica (pirámide, piso, volteo, cobertura) sobre {expSymbol}, con su propio feed. La ejecución la define el modo de abajo.</div></div>
+                  <div style={{fontSize:8,color:T.muted}}>Enciende toda la lógica (pirámide, piso, volteo, cobertura) sobre {expSymbol}, con su propio feed. Opera según Simulado y/o Deriv.</div></div>
                 <ConfigToggle on={expEnabled} onClick={()=>setExpEnabled(p=>!p)}/>
               </div>
 
@@ -6730,14 +6753,8 @@ export default function TradingBot(){
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
                 <div><div style={{fontSize:12,fontWeight:600}}>Activar simulado</div>
                   <div style={{fontSize:8,color:T.muted}}>
-                    {(expPositions.length>0||expHedgePos)&&expEnabled?"No se puede cambiar de modo con la pila abierta — ciérrala primero."
-                      :`Enciende el experimento sobre ${expSymbol} con nuestra simulación (sin contratos reales). Al activarlo se apaga Deriv; apagarlo detiene el experimento.`}</div></div>
-                <ConfigToggle on={expEnabled&&!expDerivLive} disabled={(expPositions.length>0||!!expHedgePos)&&expEnabled} onClick={()=>{
-                  if((expPositions.length>0||expHedgePos)&&expEnabled){ addLog("No se puede cambiar de modo con la pila abierta — ciérrala primero.","info"); return; }
-                  // Encendido = experimento activo en modo simulado. Apagarlo detiene el experimento.
-                  if(expEnabled&&!expDerivLive){ setExpEnabled(false); return; }
-                  setExpDerivLive(false); setExpEnabled(true);
-                }}/>
+                    {`Opera ${expSymbol} con nuestra simulación (sin contratos reales). Independiente de los otros dos; si Deriv también está encendido, Deriv tiene prioridad.`}</div></div>
+                <ConfigToggle on={expSim} onClick={()=>setExpSim(p=>!p)}/>
               </div>
 
               {/* Modo en vivo: la MISMA lógica de piso/pirámide/canario/cobertura
@@ -6753,14 +6770,11 @@ export default function TradingBot(){
                 <div><div style={{fontSize:12,fontWeight:600,color:expDerivLive?T.red:T.text}}>
                   {expDerivLive?"🔴 EN VIVO — Deriv demo (dinero demo real)":"Activar Deriv (demo)"}</div>
                   <div style={{fontSize:8,color:T.muted}}>
-                    {(expPositions.length>0||expHedgePos)?"No se puede cambiar con la pila abierta — ciérrala primero (evita mezclar real y simulado a mitad de ciclo)."
-                      :expDerivLive?`Cada apertura/cierre es un contrato REAL en tu cuenta demo de Deriv (${expSymbol}).`
+                    {expDerivLive?`Cada apertura/cierre es un contrato REAL en tu cuenta demo de Deriv (${expSymbol}).`
                       :"Apagado: solo simula. Al activar, abre/cierra contratos reales de Multiplicadores en tu cuenta DEMO de Deriv."}</div></div>
-                <ConfigToggle on={expDerivLive} disabled={expPositions.length>0||!!expHedgePos} onClick={()=>{
-                  if(expPositions.length>0||expHedgePos){ addLog("No se puede cambiar de modo con la pila abierta — ciérrala primero.","info"); return; }
+                <ConfigToggle on={expDerivLive} onClick={()=>{
                   if(!expDerivLive && !window.confirm(`Esto hace que el Experimento abra y cierre contratos REALES (Multiplicadores, ${expSymbol}) en tu cuenta DEMO de Deriv, usando saldo demo real. ¿Continuar?`)) return;
-                  // Exclusivo con Simulado: apagar Deriv equivale a volver a Simulado.
-                  setExpDerivLive(p=>!p);
+                  changeWithPile("el modo",()=>setExpDerivLive(p=>!p));
                 }}/>
               </div>
 

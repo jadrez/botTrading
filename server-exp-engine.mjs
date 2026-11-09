@@ -117,7 +117,7 @@ export function startExpEngine() {
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, derivLive: false, symbol: EXP_SYMBOL_DEFAULT };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
   let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
@@ -542,7 +542,7 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag] = await Promise.all([
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
       getConfigValue(db, "exp_add_step", "50"),
@@ -550,6 +550,7 @@ export function startExpEngine() {
       getConfigValue(db, "exp_max_stack", "10"),
       getConfigValue(db, "exp_deriv_live", "0"),
       getConfigValue(db, "exp_symbol", EXP_SYMBOL_DEFAULT),
+      getConfigValue(db, "exp_sim", "1"),
     ]);
     const wasLive = cfg.derivLive;
     const wasSymbol = cfg.symbol;
@@ -576,6 +577,7 @@ export function startExpEngine() {
       enabled: enabled === "1", stake: parseFloat(stake) || 1, addStep: parseFloat(addStep) || 50,
       floorStart: parseFloat(floorStart) || -50, maxStack: parseInt(maxStack, 10) || 10,
       derivLive: derivLive === "1",
+      sim: simFlag !== "0",
       symbol: resolvedSymbol,
     };
     if (cfg.derivLive && !wasLive) log("⚠️ MODO EN VIVO (Deriv demo) activado — las próximas posiciones serán contratos reales");
@@ -759,7 +761,8 @@ export function startExpEngine() {
           // a otra fuente. Reportado en vivo: "el actual" no se movía
           // igual que Deriv.
           setConfigValue(db, "exp_live_price", String(np)).catch(() => {});
-          if (cfg.enabled) {
+          // Lógica automática solo si hay algún modo de ejecución encendido (Simulado y/o Deriv).
+          if (cfg.enabled && (cfg.derivLive || cfg.sim)) {
             const nowSec = Math.floor(Date.now() / 1000);
             if (candles.length) {
               const last = { ...candles[candles.length - 1] };
