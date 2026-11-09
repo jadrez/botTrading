@@ -2825,7 +2825,10 @@ export default function TradingBot(){
           ? price>=expLastAddPriceRef.current*(1+priceStepPct)
           : price<=expLastAddPriceRef.current*(1-priceStepPct)
       );
-      if(movedEnough && expPositionsRef.current.length<expMaxStackRef.current){
+      // No apilar si, al pagar la comisión de la nueva posición, la pila quedaría por DEBAJO del piso (evita voltear todo al instante).
+      const newFee=expCommPctRef.current*expStakeRef.current*expMultiplierRef.current;
+      const canAffordStack=(stackPnl-newFee)>expFloorRef.current;
+      if(movedEnough && canAffordStack && expPositionsRef.current.length<expMaxStackRef.current){
         expAddLevelRef.current+=expAddStepRef.current; // solo informativo para la UI (OBJETIVO PILA)
         addExpPos(expDirectionRef.current,"PIRÁMIDE");
       }

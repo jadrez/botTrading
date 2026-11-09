@@ -570,7 +570,11 @@ export function startExpEngine() {
     const movedEnough = lastAddPrice != null && (
       direction === "BUY" ? price >= lastAddPrice * (1 + priceStepPct) : price <= lastAddPrice * (1 - priceStepPct)
     );
-    if (movedEnough && positions.length < cfg.maxStack) {
+    // No apilar si, al pagar la comisión de la nueva posición, la pila quedaría por DEBAJO del piso (con piso positivo
+    // activo, la comisión de la nueva bajaría el PnL neto de la pila bajo el piso y voltearía todo al instante).
+    const newFee = cfg.commPct * cfg.stake * cfg.multiplier;
+    const canAffordStack = (stackPnl - newFee) > floor;
+    if (movedEnough && canAffordStack && positions.length < cfg.maxStack) {
       addLevel += cfg.addStep; // solo informativo para la UI (OBJETIVO PILA)
       await addExpPos(direction, "PIRÁMIDE");
     }
