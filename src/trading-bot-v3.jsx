@@ -1853,6 +1853,7 @@ export default function TradingBot(){
   const [expHistSymbol,setExpHistSymbol] = useState("TODOS");
   const [expHistType,setExpHistType]     = useState("TODOS");
   const [expHistResult,setExpHistResult] = useState("TODOS");
+  const [expCompare,setExpCompare]       = useState(null); // validación simulado vs Deriv
   const [expHistMode,setExpHistMode]     = useState("SIM"); // SIM | DERIV | TODOS — separa el histórico simulado del de contratos reales
   const [expHistPage,setExpHistPage]     = useState(1); // paginación del HISTÓRICO — vuelve a 1 cada vez que cambia el filtro
   useEffect(()=>{setExpHistPage(1);},[expHistFrom,expHistTo,expHistSymbol,expHistType,expHistResult,expHistMode]);
@@ -1900,6 +1901,16 @@ export default function TradingBot(){
     }).catch(()=>{});
     return()=>{alive=false;};
   },[expHistSymbol,expHistFrom,expHistTo,expHistType,expHistResult,expHistMode,expTrades.length]);
+  useEffect(()=>{
+    if(expHistMode==="SIM"){ setExpCompare(null); return; }
+    let alive=true;
+    const qs=new URLSearchParams({agg:"compare"});
+    if(expHistSymbol!=="TODOS") qs.set("symbol",expHistSymbol);
+    if(expHistFrom) qs.set("from",expHistFrom);
+    if(expHistTo) qs.set("to",expHistTo);
+    fetch(`/api/exp-trades?${qs.toString()}`).then(r=>r.ok?r.json():null).then(d=>{ if(alive) setExpCompare(d&&d.n>0?d:null); }).catch(()=>{});
+    return()=>{alive=false;};
+  },[expHistMode,expHistSymbol,expHistFrom,expHistTo,expTrades.length]);
   // HISTÓRICO paginado — la PÁGINA exacta se le pide al SERVIDOR (filtrada
   // en SQL), no se recorta de expTrades del lado del cliente. Reportado en
   // vivo: "no sale paginación de nada y llevo más de 2 mil operaciones" —
@@ -7105,7 +7116,10 @@ export default function TradingBot(){
                                   <span className="mono" style={{fontSize:9,fontWeight:700,color:tPct>=0?T.green:T.red}}>{fPct(tPct)}</span>
                                   <span className="mono" style={{fontSize:9,color:T.green}}>{t.objetivoPila!=null?fUSD(t.objetivoPila,false):"—"}</span>
                                   <span className="mono" style={{fontSize:9,color:t.stopPila>=0?T.green:T.red}}>{t.stopPila!=null?fUSD(t.stopPila):"—"}</span>
-                                  <span className="mono" style={{fontSize:10,fontWeight:700,color:t.pnl>=0?T.green:T.red}}>{fUSD(t.pnl)}</span>
+                                  <div>
+                                    <span className="mono" style={{fontSize:10,fontWeight:700,color:t.pnl>=0?T.green:T.red}}>{fUSD(t.pnl)}</span>
+                                    {t.simPnl!=null&&<div className="mono" style={{fontSize:7,color:T.muted}} title="Lo que habría dado la simulación pura con nuestro precio, sin spread/comisión/latencia">sim {fUSD(t.simPnl)}</div>}
+                                  </div>
                                   <span style={{fontSize:8,fontWeight:700,color:t.pnl>=0?T.green:T.red,background:`${t.pnl>=0?T.green:T.red}18`,padding:"2px 7px",borderRadius:4,textAlign:"center"}}>{t.reason||"—"}</span>
                                   <div>
                                     <div className="mono" style={{fontSize:9,fontWeight:700,color:T.text}}>{volumen?`$${volumen.toFixed(0)}`:"—"}</div>
@@ -7130,6 +7144,28 @@ export default function TradingBot(){
                   </div>
                 </div>
               )}
+              {expCompare&&(()=>{
+                const c=expCompare, diff=(c.sim_pnl||0)-(c.real_pnl||0);
+                const other=diff-(c.entry_cost||0)-(c.exit_cost||0)-(c.commission||0);
+                const f=v=>fUSD(v||0);
+                return(
+                  <div style={{marginTop:12,padding:"10px 12px",background:T.dim,border:`1px solid ${T.border}`,borderRadius:8}}>
+                    <div style={{fontSize:9,fontWeight:700,color:T.accent,letterSpacing:1,marginBottom:6}}>VALIDACIÓN SIMULADO vs DERIV · {c.n} operaciones reales</div>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:14,fontSize:10}}>
+                      <span>PnL real Deriv: <b className="mono" style={{color:c.real_pnl>=0?T.green:T.red}}>{f(c.real_pnl)}</b> · WR {Math.round(100*c.real_wins/c.n)}%</span>
+                      <span>PnL simulado (mismas operaciones): <b className="mono" style={{color:c.sim_pnl>=0?T.green:T.red}}>{f(c.sim_pnl)}</b> · WR {Math.round(100*c.sim_wins/c.n)}%</span>
+                      <span>Diferencia: <b className="mono" style={{color:T.red}}>{f(-diff)}</b></span>
+                    </div>
+                    <div style={{fontSize:9,color:T.muted,marginTop:4}}>
+                      Dónde se va la diferencia ({c.n_detail} con detalle de Deriv):
+                      {" "}entrada peor <b className="mono">{f(-c.entry_cost)}</b>
+                      {" · "}salida peor <b className="mono">{f(-c.exit_cost)}</b>
+                      {" · "}comisión <b className="mono">{f(-c.commission)}</b>
+                      {" · "}otros (spread interno del contrato, etc.) <b className="mono">{f(-other)}</b>
+                    </div>
+                  </div>
+                );
+              })()}
               {expHistTotalPages>1&&(
                 <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:10,marginTop:10}}>
                   <button disabled={expHistPageSafe<=1} onClick={()=>setExpHistPage(p=>Math.max(1,p-1))}

@@ -142,11 +142,35 @@ export function startExpEngine() {
   const writeTradeRecord = async (c) => {
     try {
       await db.query("ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'SIM'").catch(() => {});
+      await db.query("ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS contract_id TEXT, ADD COLUMN IF NOT EXISTS sim_pnl NUMERIC, ADD COLUMN IF NOT EXISTS real_entry NUMERIC, ADD COLUMN IF NOT EXISTS real_exit NUMERIC, ADD COLUMN IF NOT EXISTS commission NUMERIC").catch(() => {});
+      // Validación: lo que habría dado la simulación pura con NUESTRO precio de entrada/salida
+      // (sin spread, comisión ni latencia) — solo para operaciones reales (con contrato).
+      const isReal = !!c.contractId;
+      const simPnl = isReal ? posPnL({ type: c.type, entry: c.entry, allocatedSize: c.allocatedSize, multiplier: c.multiplier }, c.exit) : null;
       await db.query(
-        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at, mode)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-        [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.objetivo, c.stop, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime), cfg.derivLive ? "DERIV" : "SIM"]
+        `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at, mode, contract_id, sim_pnl)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+        [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.objetivo, c.stop, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime), cfg.derivLive ? "DERIV" : "SIM",
+         isReal ? String(c.contractId) : null, simPnl]
       );
+      if (isReal) {
+        // Sin bloquear el ciclo: trae de Deriv el entry/exit spot y la comisión REALES del contrato
+        // y los completa en la fila (reintenta un par de veces por si Deriv aún no los publica).
+        (async () => {
+          for (let k = 0; k < 3; k++) {
+            try {
+              const d = await derivOrderCall("contract", { contractId: c.contractId });
+              if (d && d.isSold && d.entry != null && d.exitSpot != null) {
+                await db.query(`UPDATE exp_trades SET real_entry=$1, real_exit=$2, commission=$3 WHERE contract_id=$4`,
+                  [d.entry, d.exitSpot, d.commission ?? 0, String(c.contractId)]);
+                log(`validación ${c.contractId}: nuestro ${c.entry.toFixed(2)}→${Number(c.exit).toFixed(2)} | Deriv ${d.entry}→${d.exitSpot} | PnL sim ${simPnl.toFixed(2)} vs real ${c.pnl.toFixed(2)}`);
+                return;
+              }
+            } catch {}
+            await new Promise(r => setTimeout(r, 3000));
+          }
+        })();
+      }
     } catch (e) { log(`error writing exp_trades: ${e.message}`); }
   };
 

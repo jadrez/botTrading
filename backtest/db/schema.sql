@@ -189,6 +189,9 @@ CREATE TABLE IF NOT EXISTS exp_trades (
 CREATE INDEX IF NOT EXISTS idx_exp_trades_closed ON exp_trades (closed_at DESC);
 -- 'SIM' (simulación local) | 'DERIV' (contrato real en demo). Filas anteriores = 'SIM'.
 ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'SIM';
+-- Validación simulado-vs-Deriv (solo filas DERIV): contrato, PnL que habría dado la simulación pura,
+-- y lo que Deriv realmente ejecutó (entry/exit spot y comisión).
+ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS contract_id TEXT, ADD COLUMN IF NOT EXISTS sim_pnl NUMERIC, ADD COLUMN IF NOT EXISTS real_entry NUMERIC, ADD COLUMN IF NOT EXISTS real_exit NUMERIC, ADD COLUMN IF NOT EXISTS commission NUMERIC;
 
 -- Live copy of SYMBOL_STRATEGY (src/lib/symbolStrategy.js), refreshed by
 -- backtest/update-strategy.mjs on a schedule (see .github/workflows) so

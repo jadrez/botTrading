@@ -18,7 +18,11 @@ export default async function handler(req, res) {
   const db = getPool();
   if (!db) return res.status(500).json({ error: "DATABASE_URL not set" });
   if (!modeEnsured) {
-    try { await db.query("ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'SIM'"); modeEnsured = true; } catch {}
+    try {
+      await db.query("ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'SIM'");
+      await db.query("ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS contract_id TEXT, ADD COLUMN IF NOT EXISTS sim_pnl NUMERIC, ADD COLUMN IF NOT EXISTS real_entry NUMERIC, ADD COLUMN IF NOT EXISTS real_exit NUMERIC, ADD COLUMN IF NOT EXISTS commission NUMERIC");
+      modeEnsured = true;
+    } catch {}
   }
 
   // ── RENDIMIENTO POR HORA — agregado en SQL sobre TODO el histórico, no
@@ -61,6 +65,43 @@ export default async function handler(req, res) {
     }
   }
 
+  // ── COMPARACIÓN simulado vs Deriv (solo operaciones reales con datos de validación).
+  // sim_pnl = lo que habría dado la simulación pura (sin spread/comisión/latencia) con NUESTRO
+  // precio de entrada/salida. Descomposición de la diferencia en $:
+  //   costo_entrada = dir*(entrada_real - entrada_nuestra)/entrada_nuestra * nocional  (+ = peor)
+  //   costo_salida  = dir*(salida_nuestra - salida_real)/entrada_nuestra * nocional     (+ = peor)
+  //   comisión      = commission de Deriv
+  if (req.method === "GET" && req.query?.agg === "compare") {
+    const { symbol, from, to } = req.query || {};
+    const conditions = ["mode = 'DERIV'", "sim_pnl IS NOT NULL"];
+    const params = [];
+    let i = 1;
+    if (symbol) { conditions.push(`symbol = $${i}`); params.push(symbol); i++; }
+    if (from) { conditions.push(`closed_at >= $${i}`); params.push(new Date(`${from}T00:00:00`)); i++; }
+    if (to) { conditions.push(`closed_at <= $${i}`); params.push(new Date(`${to}T23:59:59.999`)); i++; }
+    try {
+      const r = await db.query(
+        `WITH t AS (
+           SELECT pnl, sim_pnl, commission,
+                  CASE WHEN type = 'BUY' THEN 1 ELSE -1 END AS dir,
+                  entry_price, exit_price, real_entry, real_exit, allocated_size * multiplier AS notional
+           FROM exp_trades WHERE ${conditions.join(" AND ")}
+         )
+         SELECT COUNT(*)::int AS n,
+                SUM(pnl)::float AS real_pnl, SUM(sim_pnl)::float AS sim_pnl,
+                SUM(CASE WHEN pnl >= 0 THEN 1 ELSE 0 END)::int AS real_wins,
+                SUM(CASE WHEN sim_pnl >= 0 THEN 1 ELSE 0 END)::int AS sim_wins,
+                COUNT(real_entry)::int AS n_detail,
+                SUM(dir * (real_entry - entry_price) / entry_price * notional)::float AS entry_cost,
+                SUM(dir * (exit_price - real_exit) / entry_price * notional)::float AS exit_cost,
+                SUM(commission)::float AS commission
+         FROM t`, params);
+      return res.status(200).json(r.rows[0]);
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
   if (req.method === "GET") {
     const limit = Math.min(500, parseInt(req.query?.limit, 10) || 200);
     const offset = Math.max(0, parseInt(req.query?.offset, 10) || 0);
@@ -88,7 +129,7 @@ export default async function handler(req, res) {
     try {
       const [r, countR] = await Promise.all([
         db.query(
-          `SELECT symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at, mode
+          `SELECT symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at, mode, contract_id, sim_pnl, real_entry, real_exit, commission
            FROM exp_trades WHERE ${where} ORDER BY closed_at DESC LIMIT $${i} OFFSET $${i + 1}`,
           [...params, limit, offset]
         ),
@@ -96,6 +137,10 @@ export default async function handler(req, res) {
       ]);
       const trades = r.rows.map(row => ({
         symbol: row.symbol, type: row.type, mode: row.mode,
+        simPnl: row.sim_pnl != null ? parseFloat(row.sim_pnl) : undefined,
+        realEntry: row.real_entry != null ? parseFloat(row.real_entry) : undefined,
+        realExit: row.real_exit != null ? parseFloat(row.real_exit) : undefined,
+        derivCommission: row.commission != null ? parseFloat(row.commission) : undefined,
         entry: parseFloat(row.entry_price), exit: parseFloat(row.exit_price),
         pnl: parseFloat(row.pnl), reason: row.reason, pattern: row.pattern,
         objetivoPila: row.objetivo_pila != null ? parseFloat(row.objetivo_pila) : undefined,
