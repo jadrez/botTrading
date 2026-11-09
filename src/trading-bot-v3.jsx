@@ -417,8 +417,10 @@ const EXP_SYMBOL="XAU/USD"; // valor por defecto — ver expSymbol más abajo (e
 // ("ayúdame a saber cuáles son los datos de 0.01 que se maneja en
 // volumen"), daba un número sin sentido para cripto.
 const EXP_SYMBOLS={
-  "XAU/USD":{binance:"PAXGUSDT",deriv:"frxXAUUSD",lotUnit:100},
-  "BTC/USD":{binance:"BTCUSDT",deriv:"cryBTCUSD",lotUnit:1},
+  "XAU/USD":{binance:"PAXGUSDT",deriv:"frxXAUUSD",lotUnit:100,dec:2},
+  "BTC/USD":{binance:"BTCUSDT",deriv:"cryBTCUSD",lotUnit:1,dec:2},
+  // Forex: mucho menos volátil/caro que BTC para estos parámetros chicos. 1 lote estándar = 100 000 unidades; 5 decimales.
+  "EUR/USD":{binance:"EURUSDT",deriv:"frxEURUSD",lotUnit:100000,dec:5},
 };
 // Fuente de precio EN VIVO del motor: PAXG/USDT en Binance (oro tokenizado,
 // respaldado 1:1 por una onza de oro físico), NO el GC=F de Yahoo de arriba.
@@ -2388,7 +2390,7 @@ export default function TradingBot(){
       expLastAddPriceRef.current=price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
       setExpPositions(expPositionsRef.current);
       persistLive();
-      addLog(`🧪 Experimento ${type} ${expSymbolRef.current} @ ${fP(price,2)} — pila ${expPositionsRef.current.length}/${expMaxStackRef.current}`,type==="BUY"?"buy":"sell");
+      addLog(`🧪 Experimento ${type} ${expSymbolRef.current} @ ${fP(price,EXP_SYMBOLS[expSymbolRef.current]?.dec||2)} — pila ${expPositionsRef.current.length}/${expMaxStackRef.current}`,type==="BUY"?"buy":"sell");
     };
 
     const closeAllExpPos=(exitPrice,reason)=>{
@@ -2626,7 +2628,7 @@ export default function TradingBot(){
         expHedgePosRef.current=hedge;
         setExpHedgePos(hedge);
         persistLive();
-        addLog(`🛡️ Experimento: cobertura ${hedgeType} abierta @ ${fP(price,2)} (pila en ${fUSD(stackPnl)})`,hedgeType==="BUY"?"buy":"sell");
+        addLog(`🛡️ Experimento: cobertura ${hedgeType} abierta @ ${fP(price,EXP_SYMBOLS[expSymbolRef.current]?.dec||2)} (pila en ${fUSD(stackPnl)})`,hedgeType==="BUY"?"buy":"sell");
       }
       // SL propio de la cobertura — independiente del piso de la pila
       // principal. Sin esto, si la pila principal empieza a recuperarse
@@ -6980,8 +6982,8 @@ export default function TradingBot(){
                           <div key={pos.id} style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px 80px",
                             gap:10,alignItems:"center",background:`${col}08`,border:`1px solid ${col}35`,borderRadius:7,padding:"8px 10px"}}>
                             <span style={{fontSize:10,fontWeight:700,color:dirCol}}>{pos.type==="BUY"?"▲ BUY":"▼ SELL"}{pos.contractId&&<span title="Contrato real en Deriv" style={{marginLeft:4,fontSize:8,color:T.red}}>🔴</span>}</span>
-                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(pos.entry,2)}</span>
-                            <span className="mono" style={{fontSize:10,color:T.text}}>{fP(livePrice,2)}</span>
+                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(pos.entry,(EXP_SYMBOLS[expSymbol]?.dec||2))}</span>
+                            <span className="mono" style={{fontSize:10,color:T.text}}>{fP(livePrice,(EXP_SYMBOLS[expSymbol]?.dec||2))}</span>
                             <span className="mono" style={{fontSize:10,fontWeight:700,color:col}}>{fPct(pctChange)}</span>
                             <span className="mono" style={{fontSize:10,color:T.green}}>{fUSD(expAddLevelRef.current+expAddStepRef.current,false)}</span>
                             <span className="mono" style={{fontSize:10,color:isProtected?T.green:T.red}}>{fUSD(expFloorRef.current)}</span>
@@ -7025,8 +7027,8 @@ export default function TradingBot(){
                           <div style={{display:"grid",gridTemplateColumns:"70px 90px 90px 70px 100px 100px 100px 100px 100px 110px 100px 80px",
                             gap:10,alignItems:"center",background:`${hCol}10`,border:`2px dashed ${hCol}`,borderRadius:7,padding:"8px 10px"}}>
                             <span style={{fontSize:10,fontWeight:700,color:expHedgePos.type==="BUY"?T.green:T.red}}>{expHedgePos.type==="BUY"?"▲ BUY":"▼ SELL"}{expHedgePos.contractId&&<span title="Contrato real en Deriv" style={{marginLeft:4,fontSize:8,color:T.red}}>🔴</span>}</span>
-                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(expHedgePos.entry,2)}</span>
-                            <span className="mono" style={{fontSize:10,color:T.text}}>{fP(hLive,2)}</span>
+                            <span className="mono" style={{fontSize:10,color:T.muted}}>{fP(expHedgePos.entry,(EXP_SYMBOLS[expSymbol]?.dec||2))}</span>
+                            <span className="mono" style={{fontSize:10,color:T.text}}>{fP(hLive,(EXP_SYMBOLS[expSymbol]?.dec||2))}</span>
                             <span className="mono" style={{fontSize:10,fontWeight:700,color:hCol}}>{fPct(hPct)}</span>
                             <span></span><span></span>
                             <span className="mono" style={{fontSize:11,fontWeight:700,color:hCol}}>{fUSD(hPnl)}</span>
@@ -7111,8 +7113,8 @@ export default function TradingBot(){
                                   <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime)}</span>
                                   <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||expSymbol}</span>
                                   <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:T.red}}>{t.type}</span>
-                                  <span className="mono" style={{fontSize:9}}>{fP(t.entry,2)}</span>
-                                  <span className="mono" style={{fontSize:9}}>{fP(t.exit,2)}</span>
+                                  <span className="mono" style={{fontSize:9}}>{fP(t.entry,(EXP_SYMBOLS[t.symbol||expSymbol]?.dec||2))}</span>
+                                  <span className="mono" style={{fontSize:9}}>{fP(t.exit,(EXP_SYMBOLS[t.symbol||expSymbol]?.dec||2))}</span>
                                   <span className="mono" style={{fontSize:9,fontWeight:700,color:tPct>=0?T.green:T.red}}>{fPct(tPct)}</span>
                                   <span className="mono" style={{fontSize:9,color:T.green}}>{t.objetivoPila!=null?fUSD(t.objetivoPila,false):"—"}</span>
                                   <span className="mono" style={{fontSize:9,color:t.stopPila>=0?T.green:T.red}}>{t.stopPila!=null?fUSD(t.stopPila):"—"}</span>

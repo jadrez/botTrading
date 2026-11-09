@@ -24,7 +24,7 @@ const EXP_SYMBOL_DEFAULT = "XAU/USD"; // ver cfg.symbol (editable en vivo vía e
 // probando el motor (simulado) mientras XAU/USD está cerrado por fin de
 // semana/feriado — cripto opera 24/7, el símbolo verificado en vivo vía
 // "tick" antes de registrarlo (cryBTCUSD devolvió un precio real).
-const EXP_SYMBOL_TICK = { "XAU/USD": "frxXAUUSD", "BTC/USD": "cryBTCUSD" };
+const EXP_SYMBOL_TICK = { "XAU/USD": "frxXAUUSD", "BTC/USD": "cryBTCUSD", "EUR/USD": "frxEURUSD" };
 const DEFAULT_MULTIPLIER = 100;
 const EXP_RETAIN_PCT = 0.8;
 const EXP_FLOOR_ARM_AT = 10;
