@@ -150,7 +150,7 @@ export function startExpEngine() {
       if (d && d.isSold && d.entry != null && d.exitSpot != null) {
         await db.query(`UPDATE exp_trades SET real_entry=$1, real_exit=$2, commission=$3 WHERE contract_id=$4`,
           [d.entry, d.exitSpot, d.commission ?? 0, String(it.c.contractId)]);
-        log(`validación ${it.c.contractId}: nuestro ${Number(it.c.entry).toFixed(2)}→${Number(it.c.exit).toFixed(2)} | Deriv ${d.entry}→${d.exitSpot} | PnL sim ${it.simPnl.toFixed(2)} vs real ${Number(it.c.pnl).toFixed(2)}`);
+        log(`validación ${it.c.contractId}: nuestro ${Number(it.c.simEntry ?? it.c.entry).toFixed(2)}→${Number(it.c.exit).toFixed(2)} | Deriv ${d.entry}→${d.exitSpot} | PnL sim ${it.simPnl.toFixed(2)} vs real ${Number(it.c.pnl).toFixed(2)}`);
       } else if (++it.tries < 3) enrichQueue.push(it);
     } catch { if (++it.tries < 3) enrichQueue.push(it); }
     enrichBusy = false;
@@ -163,11 +163,12 @@ export function startExpEngine() {
       // Validación: lo que habría dado la simulación pura con NUESTRO precio de entrada/salida
       // (sin spread, comisión ni latencia) — solo para operaciones reales (con contrato).
       const isReal = !!c.contractId;
-      const simPnl = isReal ? posPnL({ type: c.type, entry: c.entry, allocatedSize: c.allocatedSize, multiplier: c.multiplier }, c.exit) : null;
+      const ourEntry = c.simEntry ?? c.entry;
+      const simPnl = isReal ? posPnL({ type: c.type, entry: ourEntry, allocatedSize: c.allocatedSize, multiplier: c.multiplier }, c.exit) : null;
       await db.query(
         `INSERT INTO exp_trades (symbol, type, entry_price, exit_price, pnl, reason, pattern, objetivo_pila, stop_pila, allocated_size, multiplier, opened_at, closed_at, mode, contract_id, sim_pnl)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-        [c.symbol, c.type, c.entry, c.exit, c.pnl, c.reason, c.pattern, c.objetivo, c.stop, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime), cfg.derivLive ? "DERIV" : "SIM",
+        [c.symbol, c.type, ourEntry, c.exit, c.pnl, c.reason, c.pattern, c.objetivo, c.stop, c.allocatedSize, c.multiplier, new Date(c.openTime), new Date(c.closeTime), cfg.derivLive ? "DERIV" : "SIM",
          isReal ? String(c.contractId) : null, simPnl]
       );
       if (isReal) {
@@ -176,6 +177,32 @@ export function startExpEngine() {
         enrichQueue.push({ c, simPnl, tries: 0 });
       }
     } catch (e) { log(`error writing exp_trades: ${e.message}`); }
+  };
+
+  // La entrada REAL de un contrato de Deriv (entry_spot) casi nunca coincide con el precio de
+  // NUESTRO tick al decidir (latencia de la orden + espera del tick de entrada + spread). Si la pila
+  // sigue midiendo contra NUESTRO precio, "ganamos" mientras Deriv pierde (visto en vivo: +$0.74 vs
+  // -$0.01). Apenas Deriv publica el entry_spot, la posición pasa a usar ESE precio como entrada
+  // (el nuestro queda en simEntry para la validación simulado-vs-Deriv).
+  const fixedEntry = new Set();
+  const scheduleEntryFix = (id, contractId) => {
+    const attempt = async (k) => {
+      if (fixedEntry.has(id)) return;
+      try {
+        const d = await derivOrderCall("contract", { contractId });
+        if (d && typeof d.entry === "number" && !isNaN(d.entry)) {
+          fixedEntry.add(id);
+          const apply = (p) => (p && p.id === id) ? { ...p, simEntry: p.simEntry ?? p.entry, entry: d.entry } : p;
+          positions = positions.map(apply);
+          if (hedge) hedge = apply(hedge);
+          log(`entrada real Deriv ${d.entry} (nuestro tick era ${positions.concat(hedge ? [hedge] : []).find(p => p.id === id)?.simEntry ?? "?"})`);
+          await persistLive(true);
+          return;
+        }
+      } catch {}
+      if (k < 2) setTimeout(() => attempt(k + 1), 4000);
+    };
+    setTimeout(() => attempt(0), 2500);
   };
 
   const addExpPos = async (type, pattern = "VELA ANTERIOR") => {
@@ -201,6 +228,7 @@ export function startExpEngine() {
       }
     }
     positions = [...positions, pos];
+    if (pos.contractId) scheduleEntryFix(pos.id, pos.contractId);
     lastPosPeak = 0; // nueva "última" posición — el canario arranca de cero para ella
     lastAddPrice = price; // próxima apilada exige moverse desde ESTE precio, no desde el agregado
     log(`${type} ${cfg.symbol} @ ${price.toFixed(2)} — pila ${positions.length}/${cfg.maxStack}`);
@@ -432,6 +460,7 @@ export function startExpEngine() {
         }
       }
       hedge = h;
+      if (h.contractId) scheduleEntryFix(h.id, h.contractId);
       log(`cobertura ${hedgeType} abierta @ ${price.toFixed(2)} (pila en ${stackPnl.toFixed(2)})`);
       await persistLive(true);
     }
