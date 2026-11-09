@@ -2881,6 +2881,33 @@ export default function TradingBot(){
     return()=>{alive=false; clearInterval(iv);};
   },[expEnabled,addLog]);
 
+  /* Cambio de símbolo con el experimento activo: el efecto del motor NO se
+     reinicia (solo depende de expEnabled), así que sin esto las velas y el
+     precio seguían siendo del símbolo ANTERIOR (p. ej. velas de oro con tick
+     de BTC) hasta recargar. Recarga las velas del símbolo elegido y limpia
+     el precio para que el siguiente tick (que ya lee expSymbolRef) lo fije. */
+  const expSymbolFirstRun=useRef(true);
+  useEffect(()=>{
+    if(expSymbolFirstRun.current){ expSymbolFirstRun.current=false; return; }
+    if(!expEnabled) return;
+    let alive=true;
+    const binanceSym=EXP_SYMBOLS[expSymbol]?.binance;
+    if(!binanceSym) return;
+    expPriceRef.current=0; setExpPrice(0); setExpCandles([]);
+    (async()=>{
+      try{
+        const r=await fetch(`https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=1m&limit=300`);
+        const raw=await r.json();
+        if(!alive||!Array.isArray(raw)||raw.length<=5) return;
+        const candles=raw.map(k=>({time:Math.floor(k[0]/1000),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5])}));
+        setExpCandles(candles);
+        const last=candles.at(-1);
+        if(!expPriceRef.current){ expPriceRef.current=last.c; setExpPrice(last.c); }
+      }catch{}
+    })();
+    return()=>{alive=false;};
+  },[expSymbol,expEnabled]);
+
   /* ── Deriv balance polling ──────────────────────────────────────────── */
   useEffect(()=>{
     if(!derivEnabled) return;
@@ -6682,8 +6709,21 @@ export default function TradingBot(){
 
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
                 <div><div style={{fontSize:12,fontWeight:600}}>Activar experimento</div>
-                  <div style={{fontSize:8,color:T.muted}}>Corre en segundo plano con su propio feed de {expSymbol}</div></div>
+                  <div style={{fontSize:8,color:T.muted}}>Enciende toda la lógica (pirámide, piso, volteo, cobertura) sobre {expSymbol}, con su propio feed. La ejecución la define el modo de abajo.</div></div>
                 <ConfigToggle on={expEnabled} onClick={()=>setExpEnabled(p=>!p)}/>
+              </div>
+
+              {/* Modo de ejecución — mutuamente excluyentes: Simulado (nuestra
+                  simulación local) o Deriv (contratos reales en demo). */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
+                <div><div style={{fontSize:12,fontWeight:600}}>Activar simulado</div>
+                  <div style={{fontSize:8,color:T.muted}}>
+                    {(expPositions.length>0||expHedgePos)?"No se puede cambiar de modo con la pila abierta — ciérrala primero."
+                      :`Opera ${expSymbol} con nuestra simulación (sin contratos reales). Al activarlo se apaga Deriv.`}</div></div>
+                <ConfigToggle on={!expDerivLive} disabled={expPositions.length>0||!!expHedgePos} onClick={()=>{
+                  if(expPositions.length>0||expHedgePos){ addLog("No se puede cambiar de modo con la pila abierta — ciérrala primero.","info"); return; }
+                  if(expDerivLive) setExpDerivLive(false);
+                }}/>
               </div>
 
               {/* Modo en vivo: la MISMA lógica de piso/pirámide/canario/cobertura
@@ -6697,7 +6737,7 @@ export default function TradingBot(){
                 borderBottom:`1px solid ${T.border}`,marginBottom:11,background:expDerivLive?`${T.red}0e`:"transparent",
                 border:expDerivLive?`1px solid ${T.red}40`:"none",borderRadius:expDerivLive?8:0,padding:expDerivLive?"8px 10px":0}}>
                 <div><div style={{fontSize:12,fontWeight:600,color:expDerivLive?T.red:T.text}}>
-                  {expDerivLive?"🔴 EN VIVO — Deriv demo (dinero demo real)":"Operar en vivo (Deriv demo)"}</div>
+                  {expDerivLive?"🔴 EN VIVO — Deriv demo (dinero demo real)":"Activar Deriv (demo)"}</div>
                   <div style={{fontSize:8,color:T.muted}}>
                     {(expPositions.length>0||expHedgePos)?"No se puede cambiar con la pila abierta — ciérrala primero (evita mezclar real y simulado a mitad de ciclo)."
                       :expDerivLive?`Cada apertura/cierre es un contrato REAL en tu cuenta demo de Deriv (${expSymbol}).`
@@ -6705,6 +6745,7 @@ export default function TradingBot(){
                 <ConfigToggle on={expDerivLive} disabled={expPositions.length>0||!!expHedgePos} onClick={()=>{
                   if(expPositions.length>0||expHedgePos){ addLog("No se puede cambiar de modo con la pila abierta — ciérrala primero.","info"); return; }
                   if(!expDerivLive && !window.confirm(`Esto hace que el Experimento abra y cierre contratos REALES (Multiplicadores, ${expSymbol}) en tu cuenta DEMO de Deriv, usando saldo demo real. ¿Continuar?`)) return;
+                  // Exclusivo con Simulado: apagar Deriv equivale a volver a Simulado.
                   setExpDerivLive(p=>!p);
                 }}/>
               </div>
