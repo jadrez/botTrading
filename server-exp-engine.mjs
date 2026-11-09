@@ -139,6 +139,23 @@ export function startExpEngine() {
     await setConfigValue(db, "exp_live_state", JSON.stringify({ positions, direction, floor, addLevel, peak, hedge, lastAddPrice, lastPosPeak }));
   };
 
+  const enrichQueue = [];
+  let enrichBusy = false;
+  setInterval(async () => {
+    if (enrichBusy || !enrichQueue.length) return;
+    enrichBusy = true;
+    const it = enrichQueue.shift();
+    try {
+      const d = await derivOrderCall("contract", { contractId: it.c.contractId });
+      if (d && d.isSold && d.entry != null && d.exitSpot != null) {
+        await db.query(`UPDATE exp_trades SET real_entry=$1, real_exit=$2, commission=$3 WHERE contract_id=$4`,
+          [d.entry, d.exitSpot, d.commission ?? 0, String(it.c.contractId)]);
+        log(`validación ${it.c.contractId}: nuestro ${Number(it.c.entry).toFixed(2)}→${Number(it.c.exit).toFixed(2)} | Deriv ${d.entry}→${d.exitSpot} | PnL sim ${it.simPnl.toFixed(2)} vs real ${Number(it.c.pnl).toFixed(2)}`);
+      } else if (++it.tries < 3) enrichQueue.push(it);
+    } catch { if (++it.tries < 3) enrichQueue.push(it); }
+    enrichBusy = false;
+  }, 5000);
+
   const writeTradeRecord = async (c) => {
     try {
       await db.query("ALTER TABLE exp_trades ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'SIM'").catch(() => {});
@@ -154,22 +171,9 @@ export function startExpEngine() {
          isReal ? String(c.contractId) : null, simPnl]
       );
       if (isReal) {
-        // Sin bloquear el ciclo: trae de Deriv el entry/exit spot y la comisión REALES del contrato
-        // y los completa en la fila (reintenta un par de veces por si Deriv aún no los publica).
-        (async () => {
-          for (let k = 0; k < 3; k++) {
-            try {
-              const d = await derivOrderCall("contract", { contractId: c.contractId });
-              if (d && d.isSold && d.entry != null && d.exitSpot != null) {
-                await db.query(`UPDATE exp_trades SET real_entry=$1, real_exit=$2, commission=$3 WHERE contract_id=$4`,
-                  [d.entry, d.exitSpot, d.commission ?? 0, String(c.contractId)]);
-                log(`validación ${c.contractId}: nuestro ${c.entry.toFixed(2)}→${Number(c.exit).toFixed(2)} | Deriv ${d.entry}→${d.exitSpot} | PnL sim ${simPnl.toFixed(2)} vs real ${c.pnl.toFixed(2)}`);
-                return;
-              }
-            } catch {}
-            await new Promise(r => setTimeout(r, 3000));
-          }
-        })();
+        // Cola lenta (1 consulta cada ~5s, máx. 3 intentos por contrato): Deriv ya devuelve 429
+        // (límite de velocidad) y esta validación NUNCA debe quitarle cupo a abrir/cerrar contratos.
+        enrichQueue.push({ c, simPnl, tries: 0 });
       }
     } catch (e) { log(`error writing exp_trades: ${e.message}`); }
   };
