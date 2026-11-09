@@ -119,10 +119,11 @@ export function startExpEngine() {
   let addLevel = 0;
   let peak = 0;
   let lastPosPeak = 0; // pico propio de la ÚLTIMA posición apilada (canario)
+  let realized = 0; // PnL YA cerrado por SL de posición dentro del ciclo actual (cuenta para el piso/pico de la pila)
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, hedgeOn: false, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, hedgeOn: false, posArm: 0.5, posRetain: 80, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
   let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
@@ -305,7 +306,7 @@ export function startExpEngine() {
     return { totalPnl: closedRecords.reduce((s, c) => s + c.pnl, 0), allClosed: remaining.length === 0 };
   };
 
-  const resetStackTracking = () => { floor = cfg.floorStart; addLevel = 0; peak = 0; };
+  const resetStackTracking = () => { floor = cfg.floorStart; addLevel = 0; peak = 0; realized = 0; };
 
   // Cierra la cobertura (si existe) junto con la pila principal — sin piso/
   // objetivo propio, vive y muere con el ciclo que la disparó (ver
@@ -442,7 +443,29 @@ export function startExpEngine() {
       log(`⚠️ hay posiciones abiertas en un símbolo distinto a cfg.symbol (${cfg.symbol}) — se detiene evaluateStack hasta resolverlo`);
       return;
     }
-    const stackPnl = positions.reduce((s, p) => s + posPnL(p, price), 0);
+    // SL PROPIO POR POSICIÓN (trailing, neto de comisión): cuando el PnL neto de UNA posición llega a posArm,
+    // se conserva posRetain% de su pico; si cae de ahí se cierra SOLO esa posición (el resto de la pila sigue).
+    // Lo ya cerrado cuenta en `realized`, para que el piso/pico de la pila siga siendo coherente.
+    if (cfg.posRetain > 0) {
+      for (const p of [...positions]) {
+        const pn = posPnL(p, price);
+        const pk = Math.max(p.pkNet ?? -Infinity, pn);
+        p.pkNet = pk;
+        if (pk >= cfg.posArm && pn <= pk * cfg.posRetain / 100) {
+          log(`SL propio de posición ${p.type} — pico ${pk.toFixed(2)} → ${pn.toFixed(2)} (retiene ${cfg.posRetain}%) — se cierra solo esa posición`);
+          const objetivo = addLevel + cfg.addStep, stop = floor;
+          const { ok, record } = await closeOnePosition(p, price, { symbol: p.symbol || cfg.symbol, reason: "SL POS", objetivo, stop });
+          if (!ok) continue; // se reintenta en el próximo tick
+          positions = positions.filter(x => x.id !== p.id);
+          realized += record.pnl;
+          await persistLive(true);
+          await writeTradeRecord(record);
+        }
+      }
+      if (!positions.length && !hedge) { resetStackTracking(); lastAddPrice = null; await persistLive(true); return; }
+      if (!positions.length) return;
+    }
+    const stackPnl = realized + positions.reduce((s, p) => s + posPnL(p, price), 0);
     peak = Math.max(peak, stackPnl);
     if (peak >= EXP_FLOOR_ARM_AT) floor = Math.max(floor, peak * EXP_RETAIN_PCT);
     // Piso POSITIVO (cfg.lockFloor, neto de comisión): apenas la pila pasa a positivo con margen
@@ -615,7 +638,7 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag, hedgeFlag] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag, hedgeFlag, posArmFlag, posRetainFlag] = await Promise.all([
 
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
@@ -630,6 +653,8 @@ export function startExpEngine() {
       getConfigValue(db, "exp_lock_floor", "1"),
       getConfigValue(db, "exp_lock_arm", "2"),
       getConfigValue(db, "exp_hedge", "0"),
+      getConfigValue(db, "exp_pos_arm", "0.5"),
+      getConfigValue(db, "exp_pos_retain", "80"),
     ]);
     const wasLive = cfg.derivLive;
     const wasSymbol = cfg.symbol;
@@ -662,6 +687,8 @@ export function startExpEngine() {
       lockFloor: Math.max(0, isNaN(parseFloat(lockFlag)) ? 1 : parseFloat(lockFlag)),
       lockArm: Math.max(0, isNaN(parseFloat(armFlag)) ? 2 : parseFloat(armFlag)),
       hedgeOn: hedgeFlag === "1",
+      posArm: Math.max(0, isNaN(parseFloat(posArmFlag)) ? 0.5 : parseFloat(posArmFlag)),
+      posRetain: Math.min(99, Math.max(0, isNaN(parseFloat(posRetainFlag)) ? 80 : parseFloat(posRetainFlag))),
       symbol: resolvedSymbol,
     };
     if (cfg.derivLive) {

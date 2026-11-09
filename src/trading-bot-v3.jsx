@@ -1843,6 +1843,14 @@ export default function TradingBot(){
   // Cobertura (posición contraria cuando la pila nunca fue positiva): OPCIONAL, apagada por defecto.
   const [expHedgeOn,setExpHedgeOn] = useState(()=>localStorage.getItem("bot_exp_hedge")==="1");
   const expHedgeOnRef = useRef(expHedgeOn);
+  // SL propio por posición (trailing, neto de comisión): se activa al llegar a expPosArm (USD) y conserva expPosRetain % del pico.
+  const [expPosArm,setExpPosArm] = useState(()=>{ const v=parseFloat(localStorage.getItem("bot_exp_posarm")); return isNaN(v)?0.5:v; });
+  const [expPosArmText,setExpPosArmText]=useState(String(expPosArm));
+  const expPosArmRef = useRef(expPosArm);
+  const [expPosRetain,setExpPosRetain] = useState(()=>{ const v=parseFloat(localStorage.getItem("bot_exp_posretain")); return isNaN(v)?80:v; });
+  const [expPosRetainText,setExpPosRetainText]=useState(String(expPosRetain));
+  const expPosRetainRef = useRef(expPosRetain);
+  const expRealizedRef = useRef(0); // PnL ya cerrado por SL de posición en el ciclo actual
   // Comisión de Deriv como fracción del nocional (ej. 0.000308) — la usa el simulado para igualar a Deriv.
   const expCommPctRef = useRef(parseFloat(localStorage.getItem("bot_exp_comm_pct")||"0")||0);
   // Lo que Deriv dice de un contrato con este símbolo/stake/multiplicador (comisión, stop out) — se pide al escribir.
@@ -2035,6 +2043,12 @@ export default function TradingBot(){
   useEffect(()=>{expMaxStackRef.current=expMaxStack; try{localStorage.setItem(LS_EXP_MAXSTACK,String(expMaxStack));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_max_stack",value:String(expMaxStack)})}).catch(()=>{});
   },[expMaxStack]);
+  useEffect(()=>{expPosArmRef.current=expPosArm; try{localStorage.setItem("bot_exp_posarm",String(expPosArm));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_pos_arm",value:String(expPosArm)})}).catch(()=>{});
+  },[expPosArm]);
+  useEffect(()=>{expPosRetainRef.current=expPosRetain; try{localStorage.setItem("bot_exp_posretain",String(expPosRetain));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_pos_retain",value:String(expPosRetain)})}).catch(()=>{});
+  },[expPosRetain]);
   useEffect(()=>{expHedgeOnRef.current=expHedgeOn; try{localStorage.setItem("bot_exp_hedge",expHedgeOn?"1":"0");}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_hedge",value:expHedgeOn?"1":"0"})}).catch(()=>{});
   },[expHedgeOn]);
@@ -2098,6 +2112,8 @@ export default function TradingBot(){
           if(d.exp_floor_start!=null){ setExpFloorStart(parseFloat(d.exp_floor_start)); setExpFloorStartText(d.exp_floor_start); }
           if(d.exp_max_stack!=null){ setExpMaxStack(parseInt(d.exp_max_stack,10)); setExpMaxStackText(d.exp_max_stack); }
           if(d.exp_hedge!=null) setExpHedgeOn(d.exp_hedge==="1");
+          if(d.exp_pos_arm!=null){ const v=parseFloat(d.exp_pos_arm); if(!isNaN(v)){ setExpPosArm(v); setExpPosArmText(String(v)); } }
+          if(d.exp_pos_retain!=null){ const v=parseFloat(d.exp_pos_retain); if(!isNaN(v)){ setExpPosRetain(v); setExpPosRetainText(String(v)); } }
           if(d.exp_lock_arm!=null){ const la=parseFloat(d.exp_lock_arm); if(!isNaN(la)){ setExpLockArm(la); setExpLockArmText(String(la)); } }
           if(d.exp_lock_floor!=null){ const lf=parseFloat(d.exp_lock_floor); if(!isNaN(lf)){ setExpLockFloor(lf); setExpLockFloorText(String(lf)); } }
           if(d.exp_multiplier!=null){ const m=parseInt(d.exp_multiplier,10); if(m>0){ setExpMultiplier(m); setExpMultiplierText(String(m)); } }
@@ -2481,7 +2497,7 @@ export default function TradingBot(){
     };
 
     const resetStackTracking=()=>{
-      expFloorRef.current=expFloorStartRef.current; expAddLevelRef.current=0; expStackPeakRef.current=0;
+      expFloorRef.current=expFloorStartRef.current; expAddLevelRef.current=0; expStackPeakRef.current=0; expRealizedRef.current=0;
     };
 
     // Cierra la cobertura (si existe) junto con la pila principal — ver
@@ -2660,7 +2676,39 @@ export default function TradingBot(){
         addLog(`⚠️ Experimento: hay posiciones abiertas en otro símbolo distinto a ${expSymbolRef.current} — evaluación detenida hasta resolverlo`,"info");
         return;
       }
-      const stackPnl=expPositionsRef.current.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize),0);
+      // SL PROPIO POR POSICIÓN (trailing, neto de comisión) — mismo criterio que el servidor: al llegar a expPosArm se
+      // conserva expPosRetain% del pico; si cae de ahí se cierra SOLO esa posición. Lo cerrado cuenta en expRealizedRef.
+      if(expPosRetainRef.current>0){
+        for(const p of [...expPositionsRef.current]){
+          const pn=posPnL(p,price,p.allocatedSize);
+          const pk=Math.max(p.pkNet??-Infinity,pn);
+          p.pkNet=pk;
+          if(pk>=expPosArmRef.current && pn<=pk*expPosRetainRef.current/100){
+            const objetivo=expAddLevelRef.current+expAddStepRef.current, stop=expFloorRef.current;
+            expPositionsRef.current=expPositionsRef.current.filter(x=>x.id!==p.id);
+            setExpPositions(expPositionsRef.current);
+            expRealizedRef.current+=pn;
+            persistLive();
+            const closedAt=Date.now();
+            const record={...p,symbol:p.symbol||expSymbolRef.current,exit:price,pnl:pn,reason:"SL POS",objetivo,stop,
+              time:now(),closeTime:closedAt,tradeTime:Math.floor(closedAt/1000)};
+            setExpTrades(prev=>{const next=[record,...prev].slice(0,200); saveExpTrades(next); return next;});
+            fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({
+                symbol:record.symbol, type:record.type, entryPrice:record.entry, exitPrice:price, pnl:pn, reason:"SL POS",
+                pattern:record.pattern, objetivoPila:objetivo, stopPila:stop, allocatedSize:record.allocatedSize, multiplier:record.multiplier,
+                openedAt:record.openTime?new Date(record.openTime).toISOString():undefined,
+                closedAt:new Date(closedAt).toISOString(),
+              })}).catch(()=>{});
+            addLog(`🔒 Experimento: SL propio de posición ${p.type} — pico ${fUSD(pk)} → ${fUSD(pn)} — cierra solo esa`,pn>=0?"buy":"sell");
+          }
+        }
+        if(!expPositionsRef.current.length && !expHedgePosRef.current){
+          resetStackTracking(); expLastAddPriceRef.current=null; persistLive(); return;
+        }
+        if(!expPositionsRef.current.length) return;
+      }
+      const stackPnl=expRealizedRef.current+expPositionsRef.current.reduce((s,p)=>s+posPnL(p,price,p.allocatedSize),0);
       expStackPeakRef.current=Math.max(expStackPeakRef.current,stackPnl);
       // Piso continuo, DESACOPLADO del apilado: mientras el pico de la pila
       // no haya alcanzado EXP_FLOOR_ARM_AT ($10 — el número del pedido
@@ -6973,6 +7021,18 @@ export default function TradingBot(){
                 <ConfigField label="MULTIPLICADOR (x)" type="text" inputMode="numeric" value={expMultiplierText}
                   onChange={e=>{const v=e.target.value; setExpMultiplierText(v); const n=parseInt(v,10); if(n>0) setExpMultiplier(n);}}
                   onBlur={()=>{const n=Math.max(1,parseInt(expMultiplierText,10)||DEFAULT_MULTIPLIER); setExpMultiplier(n); setExpMultiplierText(String(n));}}/>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 2fr",gap:10,marginBottom:10}}>
+                <ConfigField label="SL POR POSICIÓN: ACTIVAR AL LLEGAR A (USD neto)" type="text" inputMode="decimal" value={expPosArmText}
+                  onChange={e=>{const v=e.target.value; setExpPosArmText(v); const n=parseFloat(v); if(!isNaN(n)&&n>=0) setExpPosArm(n);}}
+                  onBlur={()=>{const n=Math.max(0,isNaN(parseFloat(expPosArmText))?0.5:parseFloat(expPosArmText)); setExpPosArm(n); setExpPosArmText(String(n));}}/>
+                <ConfigField label="SL POR POSICIÓN: RETENER % DEL PICO (0 = apagado)" type="text" inputMode="decimal" value={expPosRetainText}
+                  onChange={e=>{const v=e.target.value; setExpPosRetainText(v); const n=parseFloat(v); if(!isNaN(n)&&n>=0&&n<100) setExpPosRetain(n);}}
+                  onBlur={()=>{const n=Math.min(99,Math.max(0,isNaN(parseFloat(expPosRetainText))?80:parseFloat(expPosRetainText))); setExpPosRetain(n); setExpPosRetainText(String(n));}}/>
+                <div style={{fontSize:9,color:T.muted,alignSelf:"center"}}>
+                  Cada posición tiene su propio SL de seguimiento, medido después de comisión: al llegar a +${expPosArm} conserva el {expPosRetain}% de su pico
+                  (pico +${expPosArm} → cierra si cae a +${(expPosArm*expPosRetain/100).toFixed(2)}). Al activarse cierra solo esa posición; lo cobrado cuenta para el piso de la pila.
+                </div>
               </div>
               {/* Lo que Deriv responde para ESTE símbolo/stake/multiplicador (se consulta solo al escribir, sin comprar). */}
               <div style={{marginBottom:10,padding:"7px 10px",background:T.dim,borderRadius:6,fontSize:10,color:T.muted}}>
