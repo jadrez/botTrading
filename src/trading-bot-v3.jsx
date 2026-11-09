@@ -1914,6 +1914,10 @@ export default function TradingBot(){
   // verlos habría que consultar "contract" UNA VEZ POR FILA, exactamente
   // el patrón de llamadas que causó el problema de hoy, así que se deja
   // fuera a propósito; compara por precio/hora contra nuestro HISTÓRICO.
+  // Ocultar/mostrar cada tabla — pedido explícito: "necesito que histórico
+  // y histórico de Deriv tengan un ocultar para ver mejor la información".
+  const [expHistCollapsed,setExpHistCollapsed]=useState(false);
+  const [expDerivHistCollapsed,setExpDerivHistCollapsed]=useState(false);
   const [expDerivHistory,setExpDerivHistory]=useState(null); // null=nunca cargado
   const [expDerivHistoryLoading,setExpDerivHistoryLoading]=useState(false);
   const loadExpDerivHistory=async()=>{
@@ -6957,10 +6961,15 @@ export default function TradingBot(){
                   el motivo de APERTURA de la posición (VELA ANTERIOR/
                   PIRÁMIDE/VOLTEO/COBERTURA) — distinto de MOTIVO, que es
                   el motivo de CIERRE (FLIP/HEDGE). */}
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
-                <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>HISTÓRICO</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <button onClick={()=>setExpHistCollapsed(p=>!p)}
+                  style={{display:"flex",alignItems:"center",gap:6,background:"transparent",border:"none",cursor:"pointer",padding:0}}>
+                  <span style={{fontSize:10,color:T.accent}}>{expHistCollapsed?"▶":"▼"}</span>
+                  <span style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>HISTÓRICO</span>
+                </button>
                 <div style={{fontSize:8,color:T.muted}}>Usa el filtro de arriba (fechas/PAR/tipo/resultado) · {expHistTotal} trade{expHistTotal!==1?"s":""}</div>
               </div>
+              {!expHistCollapsed&&(<>
               {expHistTotal===0&&(
                 <div style={{background:T.dim,borderRadius:8,padding:"16px",textAlign:"center",fontSize:10,color:T.muted}}>
                   {expHasFilters?"Ningún trade coincide con el filtro.":"Sin historial todavía."}
@@ -7049,6 +7058,7 @@ export default function TradingBot(){
                   </button>
                 </div>
               )}
+              </>)}
 
               {expTrades.length>0&&(
                 <button onClick={()=>{if(window.confirm("¿Borrar historial del experimento?")){setExpTrades([]);saveExpTrades([]);}}}
@@ -7065,17 +7075,24 @@ export default function TradingBot(){
                   velocidad de Deriv por llamadas automáticas de más. */}
               <div style={{marginTop:24,paddingTop:16,borderTop:`1px solid ${T.border}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                  <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>HISTÓRICO REAL DE DERIV</div>
+                  <button onClick={()=>setExpDerivHistCollapsed(p=>!p)}
+                    style={{display:"flex",alignItems:"center",gap:6,background:"transparent",border:"none",cursor:"pointer",padding:0}}>
+                    <span style={{fontSize:10,color:T.accent}}>{expDerivHistCollapsed?"▶":"▼"}</span>
+                    <span style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:1}}>HISTÓRICO REAL DE DERIV</span>
+                  </button>
                   <button onClick={loadExpDerivHistory} disabled={expDerivHistoryLoading}
                     style={{background:T.accent,color:"#fff",border:"none",borderRadius:4,padding:"5px 12px",
                       cursor:expDerivHistoryLoading?"default":"pointer",fontSize:10,fontWeight:700,opacity:expDerivHistoryLoading?0.6:1}}>
                     {expDerivHistoryLoading?"Cargando…":"🔄 Actualizar"}
                   </button>
                 </div>
+                {!expDerivHistCollapsed&&(<>
                 <div style={{fontSize:8,color:T.muted,marginBottom:8}}>
                   Últimos contratos liquidados en TU cuenta de Deriv (profit_table real) — incluye cualquier
-                  operación, del Experimento o manual en DTrader. No trae símbolo/dirección por fila (evita
-                  consultas extra a Deriv) — compara por precio/hora contra el histórico de arriba.
+                  operación, del Experimento o manual en DTrader. PAR/TIPO salen del mismo llamado (gratis);
+                  MOTIVO/ORIGEN/PATRONES/OBJETIVO PILA/STOP PILA no existen del lado de Deriv bajo ningún
+                  nombre — son conceptos propios de nuestro software, compáralos por precio/hora contra el
+                  histórico de arriba.
                 </div>
                 {expDerivHistory===null&&!expDerivHistoryLoading&&(
                   <div style={{background:T.dim,borderRadius:8,padding:"14px",textAlign:"center",fontSize:10,color:T.muted}}>
@@ -7109,17 +7126,19 @@ export default function TradingBot(){
                   );
                   return(
                   <div className="table-scroll">
-                    <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:760}}>
-                      <div style={{display:"grid",gridTemplateColumns:"110px 130px 130px 100px 100px 100px",
+                    <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:900}}>
+                      <div style={{display:"grid",gridTemplateColumns:"110px 130px 130px 80px 60px 100px 100px 100px",
                         gap:8,padding:"0 10px 4px",fontSize:7,color:T.muted,letterSpacing:1,fontWeight:700}}>
-                        <div>CONTRATO</div><div>APERTURA</div><div>CIERRE</div><div>STAKE</div><div>VALOR FINAL</div><div>PNL</div>
+                        <div>CONTRATO</div><div>APERTURA</div><div>CIERRE</div><div>PAR</div><div>TIPO</div><div>STAKE</div><div>VALOR FINAL</div><div>PNL</div>
                       </div>
                       {filtered.map(t=>(
-                        <div key={t.contractId} style={{display:"grid",gridTemplateColumns:"110px 130px 130px 100px 100px 100px",
+                        <div key={t.contractId} style={{display:"grid",gridTemplateColumns:"110px 130px 130px 80px 60px 100px 100px 100px",
                           gap:8,alignItems:"center",background:`${t.profit>=0?T.green:T.red}08`,border:`1px solid ${t.profit>=0?T.green:T.red}25`,borderRadius:6,padding:"6px 10px"}}>
                           <span className="mono" style={{fontSize:9,color:T.muted}}>{t.contractId}</span>
                           <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.openTime)}</span>
                           <span className="mono" style={{fontSize:9,color:T.muted}}>{fDateTime(t.closeTime)}</span>
+                          <span style={{fontSize:10,fontWeight:700,color:T.text}}>{t.symbol||"—"}</span>
+                          <span style={{fontSize:9,fontWeight:700,color:t.type==="BUY"?T.green:t.type==="SELL"?T.red:T.muted}}>{t.type||"—"}</span>
                           <span className="mono" style={{fontSize:10}}>{fUSD(t.buyPrice,false)}</span>
                           <span className="mono" style={{fontSize:10}}>{fUSD(t.sellPrice,false)}</span>
                           <span className="mono" style={{fontSize:10,fontWeight:700,color:t.profit>=0?T.green:T.red}}>{fUSD(t.profit)}</span>
@@ -7129,6 +7148,7 @@ export default function TradingBot(){
                   </div>
                   );
                 })()}
+                </>)}
               </div>
             </ConfigCard>
 

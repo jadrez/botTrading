@@ -266,16 +266,31 @@ export default async function handler(req, res) {
     if (action === "history") {
       const account = await pickAccount(token, appId, accountType);
       const wsUrl = await getOtpWsUrl(token, appId, account.account_id);
-      const msg = await derivWsCall(wsUrl, { profit_table: 1, limit: Math.min(100, parseInt(req.body?.limit, 10) || 50), sort: "DESC" });
-      const transactions = (msg.profit_table?.transactions || []).map(t => ({
-        contractId: t.contract_id,
-        buyPrice: t.buy_price,
-        sellPrice: t.sell_price,
-        payout: t.payout,
-        profit: t.sell_price - t.buy_price,
-        openTime: t.purchase_time * 1000,
-        closeTime: t.sell_time * 1000,
-      }));
+      // description:1 trae shortcode SIN costo extra (mismo llamado, no una
+      // consulta por fila) — pedido explícito: "el histórico real de Deriv
+      // debe llevar lo mismo que histórico" (PAR/TIPO). shortcode viene con
+      // forma "MULTUP_CRYBTCUSD_2.00_100_..." — MULTUP/MULTDOWN es la
+      // dirección, el segundo campo es el symbol de Deriv. El resto de las
+      // columnas de nuestro HISTÓRICO (MOTIVO/ORIGEN/PATRONES/OBJETIVO
+      // PILA/STOP PILA) son conceptos que SOLO existen en nuestro software
+      // — Deriv no los tiene bajo ningún nombre, ni con más llamadas.
+      const msg = await derivWsCall(wsUrl, { profit_table: 1, limit: Math.min(100, parseInt(req.body?.limit, 10) || 50), sort: "DESC", description: 1 });
+      const transactions = (msg.profit_table?.transactions || []).map(t => {
+        const parts = (t.shortcode || "").split("_");
+        const contractType = parts[0]; // MULTUP | MULTDOWN
+        const derivSymbol = parts[1];
+        return {
+          contractId: t.contract_id,
+          symbol: REVERSE_SYMBOL_MAP[derivSymbol] || SYNTHETIC_LABELS[derivSymbol] || derivSymbol || undefined,
+          type: contractType === "MULTUP" ? "BUY" : contractType === "MULTDOWN" ? "SELL" : undefined,
+          buyPrice: t.buy_price,
+          sellPrice: t.sell_price,
+          payout: t.payout,
+          profit: t.sell_price - t.buy_price,
+          openTime: t.purchase_time * 1000,
+          closeTime: t.sell_time * 1000,
+        };
+      });
       return res.status(200).json({ transactions });
     }
 
