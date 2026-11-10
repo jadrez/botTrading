@@ -1647,8 +1647,9 @@ function ConfigField({label,...props}){
   return(
     <label style={{display:"flex",flexDirection:"column",gap:3,flex:1}}>
       <span style={{fontSize:7,color:T.muted,letterSpacing:1}}>{label}</span>
-      <input {...props} style={{background:props.readOnly?T.dim:"#fff",
-        border:`1px solid ${props.readOnly?T.border:T.glow}`,borderRadius:5,color:T.text,
+      <input {...props} style={{background:(props.readOnly||props.disabled)?T.dim:"#fff",
+        border:`1px solid ${(props.readOnly||props.disabled)?T.border:T.glow}`,borderRadius:5,color:T.text,
+        opacity:props.disabled?0.45:1,cursor:props.disabled?"not-allowed":undefined,
         fontSize:11,padding:"7px 9px",fontFamily:"'IBM Plex Mono',monospace",width:"100%",boxSizing:"border-box"}}/>
     </label>
   );
@@ -7017,7 +7018,7 @@ export default function TradingBot(){
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
                 <div><div style={{fontSize:12,fontWeight:600}}>Activar cobertura</div>
                   <div style={{fontSize:8,color:T.muted}}>Abre una posición contraria cuando la pila nunca fue positiva y cae a la mitad del margen hasta el piso inicial. Cuesta otra comisión por ciclo — apagada por defecto.</div></div>
-                <ConfigToggle on={expHedgeOn} onClick={()=>setExpHedgeOn(p=>!p)}/>
+                <ConfigToggle on={expHedgeOn&&!expSimpleOn} disabled={expSimpleOn} onClick={()=>{ if(!expSimpleOn) setExpHedgeOn(p=>!p); }}/>
               </div>
 
               <div style={{paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
@@ -7143,23 +7144,26 @@ export default function TradingBot(){
                 )}
               </div>
 
+              {expSimpleOn&&<div style={{fontSize:10,color:T.yellow,background:`${T.yellow}18`,border:`1px solid ${T.yellow}40`,borderRadius:6,padding:"6px 10px",marginBottom:8}}>
+                Modo una posición activo: Apilar cada, Piso inicial, Máximo de posiciones, Piso positivo y SL por posición (y la cobertura) están desactivados y no se usan. Solo cuentan Stake, Multiplicador, Take profit / Stop loss y la Entrada.
+              </div>}
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr 1fr 1fr",gap:10,marginBottom:10}} className="g4">
                 <ConfigField label="STAKE POR POSICIÓN (USD, min. real Deriv $2)" type="text" inputMode="decimal" value={expStakeText}
                   onChange={e=>{const v=e.target.value; setExpStakeText(v); const n=parseFloat(v); if(!isNaN(n)) setExpStake(n);}}
                   onBlur={()=>{const n=Math.max(0.1,parseFloat(expStakeText)||1); setExpStake(n); setExpStakeText(String(n));}}/>
-                <ConfigField label="APILAR CADA (USD)" type="text" inputMode="decimal" value={expAddStepText}
+                <ConfigField disabled={expSimpleOn} label="APILAR CADA (USD)" type="text" inputMode="decimal" value={expAddStepText}
                   onChange={e=>{const v=e.target.value; setExpAddStepText(v); const n=parseFloat(v); if(!isNaN(n)) setExpAddStep(n);}}
                   onBlur={()=>{const n=Math.max(0.01,parseFloat(expAddStepText)||50); setExpAddStep(n); setExpAddStepText(String(n));}}/>
-                <ConfigField label="PISO INICIAL (USD, negativo)" type="text" inputMode="decimal" value={expFloorStartText}
+                <ConfigField disabled={expSimpleOn} label="PISO INICIAL (USD, negativo)" type="text" inputMode="decimal" value={expFloorStartText}
                   onChange={e=>{const v=e.target.value; setExpFloorStartText(v); const n=parseFloat(v); if(!isNaN(n)) setExpFloorStart(n);}}
                   onBlur={()=>{const n=Math.min(-0.01,parseFloat(expFloorStartText)||-50); setExpFloorStart(n); setExpFloorStartText(String(n));}}/>
-                <ConfigField label="MÁXIMO DE POSICIONES" type="text" inputMode="numeric" value={expMaxStackText}
+                <ConfigField disabled={expSimpleOn} label="MÁXIMO DE POSICIONES" type="text" inputMode="numeric" value={expMaxStackText}
                   onChange={e=>{const v=e.target.value; setExpMaxStackText(v); const n=parseInt(v,10); if(!isNaN(n)) setExpMaxStack(n);}}
                   onBlur={()=>{const n=Math.max(1,Math.min(10,parseInt(expMaxStackText,10)||10)); setExpMaxStack(n); setExpMaxStackText(String(n));}}/>
-                <ConfigField label="ACTIVAR PISO + CUANDO LA PILA LLEGUE A (USD)" type="text" inputMode="decimal" value={expLockArmText}
+                <ConfigField disabled={expSimpleOn} label="ACTIVAR PISO + CUANDO LA PILA LLEGUE A (USD)" type="text" inputMode="decimal" value={expLockArmText}
                   onChange={e=>{const v=e.target.value; setExpLockArmText(v); const n=parseFloat(v); if(!isNaN(n)&&n>=0) setExpLockArm(n);}}
                   onBlur={()=>{const n=Math.max(0,isNaN(parseFloat(expLockArmText))?2:parseFloat(expLockArmText)); setExpLockArm(n); setExpLockArmText(String(n));}}/>
-                <ConfigField label="PISO POSITIVO (USD, SL al pasar a +)" type="text" inputMode="decimal" value={expLockFloorText}
+                <ConfigField disabled={expSimpleOn} label="PISO POSITIVO (USD, SL al pasar a +)" type="text" inputMode="decimal" value={expLockFloorText}
                   onChange={e=>{const v=e.target.value; setExpLockFloorText(v); const n=parseFloat(v); if(!isNaN(n)&&n>=0) setExpLockFloor(n);}}
                   onBlur={()=>{const n=Math.max(0,isNaN(parseFloat(expLockFloorText))?1:parseFloat(expLockFloorText)); setExpLockFloor(n); setExpLockFloorText(String(n));}}/>
                 <ConfigField label="MULTIPLICADOR (x)" type="text" inputMode="numeric" value={expMultiplierText}
@@ -7167,10 +7171,10 @@ export default function TradingBot(){
                   onBlur={()=>{const n=Math.max(1,parseInt(expMultiplierText,10)||DEFAULT_MULTIPLIER); setExpMultiplier(n); setExpMultiplierText(String(n));}}/>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 2fr",gap:10,marginBottom:10}}>
-                <ConfigField label="SL POR POSICIÓN: ACTIVAR AL LLEGAR A (USD neto)" type="text" inputMode="decimal" value={expPosArmText}
+                <ConfigField disabled={expSimpleOn} label="SL POR POSICIÓN: ACTIVAR AL LLEGAR A (USD neto)" type="text" inputMode="decimal" value={expPosArmText}
                   onChange={e=>{const v=e.target.value; setExpPosArmText(v); const n=parseFloat(v); if(!isNaN(n)&&n>=0) setExpPosArm(n);}}
                   onBlur={()=>{const n=Math.max(0,isNaN(parseFloat(expPosArmText))?0.5:parseFloat(expPosArmText)); setExpPosArm(n); setExpPosArmText(String(n));}}/>
-                <ConfigField label="SL POR POSICIÓN: RETENER % DEL PICO (0 = apagado)" type="text" inputMode="decimal" value={expPosRetainText}
+                <ConfigField disabled={expSimpleOn} label="SL POR POSICIÓN: RETENER % DEL PICO (0 = apagado)" type="text" inputMode="decimal" value={expPosRetainText}
                   onChange={e=>{const v=e.target.value; setExpPosRetainText(v); const n=parseFloat(v); if(!isNaN(n)&&n>=0&&n<100) setExpPosRetain(n);}}
                   onBlur={()=>{const n=Math.min(99,Math.max(0,isNaN(parseFloat(expPosRetainText))?80:parseFloat(expPosRetainText))); setExpPosRetain(n); setExpPosRetainText(String(n));}}/>
                 <div style={{fontSize:9,color:T.muted,alignSelf:"center"}}>
