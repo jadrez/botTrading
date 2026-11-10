@@ -11,10 +11,11 @@
 //|   - Filtro opcional de tendencia (media lenta).                  |
 //|   - Filtro de spread y de horario.                               |
 //|   - Cierre por cruce contrario y reversa opcional.               |
+//|   - Filtro de regimen ADX y trailing por ATR (opcionales).        |
 //| Una sola posicion a la vez. NO garantiza ganancias: probar en    |
 //| el probador y en DEMO antes que nada.                            |
 //+------------------------------------------------------------------+
-#property version   "1.00"
+#property version   "1.10"
 #property description "Base de media movil para XAUUSD con SL por ATR y lote por riesgo. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -24,6 +25,8 @@ input ENUM_TIMEFRAMES InpTF             = PERIOD_CURRENT;  // Marco de las velas
 input int             InpMAPeriod       = 12;              // Periodo de la media movil
 input ENUM_MA_METHOD  InpMAMethod       = MODE_SMA;        // Tipo de media (SMA, EMA, ...)
 input int             InpFilterMAPeriod = 0;               // Filtro de tendencia: periodo de una EMA lenta (0 = apagado)
+input int             InpAdxPeriod      = 14;              // ADX: periodo
+input double          InpAdxMin         = 0.0;             // ADX: solo abre si el ADX es >= X (0 = apagado; 20-25 = mercado con tendencia)
 input bool            InpExitOnCross    = true;            // Cerrar la posicion si aparece la senal contraria
 input bool            InpReverse        = true;            // Despues de cerrar por senal contraria, abrir en el otro sentido
 
@@ -32,6 +35,8 @@ input double          InpRiskPct        = 1.0;             // % del saldo que se
 input int             InpAtrPeriod      = 14;              // Periodo del ATR
 input double          InpSLAtr          = 2.0;             // SL = X veces el ATR
 input double          InpTPAtr          = 0.0;             // TP = X veces el ATR (0 = sin TP)
+input double          InpTrailStartAtr  = 0.0;             // Trailing: se activa al ganar X veces el ATR (0 = apagado)
+input double          InpTrailDistAtr   = 1.5;             // Trailing: el SL sigue al precio a X veces el ATR
 input double          InpMaxRiskMult    = 1.5;             // No abrir si el lote minimo arriesga mas de X veces lo pedido
 
 input group "=== Filtros y otros ==="
@@ -44,6 +49,7 @@ CTrade   trade;
 int      g_ma      = INVALID_HANDLE;
 int      g_filter  = INVALID_HANDLE;
 int      g_atr     = INVALID_HANDLE;
+int      g_adx     = INVALID_HANDLE;
 datetime g_lastBar = 0;
 
 //+------------------------------------------------------------------+
@@ -72,6 +78,16 @@ int OnInit()
       }
    }
 
+   if(InpAdxMin > 0.0)
+   {
+      g_adx = iADX(_Symbol, InpTF, InpAdxPeriod);
+      if(g_adx == INVALID_HANDLE)
+      {
+         Print("ERROR: no se pudo crear el ADX.");
+         return(INIT_FAILED);
+      }
+   }
+
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(30);
    trade.SetTypeFillingBySymbol(_Symbol);
@@ -84,6 +100,7 @@ void OnDeinit(const int reason)
    if(g_ma     != INVALID_HANDLE) IndicatorRelease(g_ma);
    if(g_filter != INVALID_HANDLE) IndicatorRelease(g_filter);
    if(g_atr    != INVALID_HANDLE) IndicatorRelease(g_atr);
+   if(g_adx    != INVALID_HANDLE) IndicatorRelease(g_adx);
 }
 
 //+------------------------------------------------------------------+
@@ -142,7 +159,8 @@ bool InTradingHours()
 
 //+------------------------------------------------------------------+
 // 1 = compra, -1 = venta, 0 = sin senal. Usa la ultima vela cerrada (indice 1).
-int Signal()
+// forEntry = true aplica ademas los filtros (EMA lenta y ADX); para cerrar posiciones se usa el cruce sin filtros.
+int Signal(bool forEntry)
 {
    double ma = GetBuf(g_ma, 1);
    if(ma <= 0.0) return 0;
@@ -153,6 +171,14 @@ int Signal()
    if(o < ma && c > ma) s = 1;
    else if(o > ma && c < ma) s = -1;
    if(s == 0) return 0;
+   if(!forEntry) return s;
+
+   // Filtro de regimen: solo con ADX suficiente (mercado con tendencia).
+   if(g_adx != INVALID_HANDLE)
+   {
+      double adx = GetBuf(g_adx, 1);
+      if(adx < InpAdxMin) return 0;
+   }
 
    // Filtro de tendencia: solo en el sentido de la EMA lenta.
    if(g_filter != INVALID_HANDLE)
@@ -219,6 +245,36 @@ bool OpenTrade(ENUM_ORDER_TYPE type)
 }
 
 //+------------------------------------------------------------------+
+// Trailing por ATR: el SL sigue al precio una vez que la posicion gana InpTrailStartAtr veces el ATR.
+void TrailStop(ulong ticket, ENUM_POSITION_TYPE ptype)
+{
+   if(InpTrailStartAtr <= 0.0) return;
+   if(!PositionSelectByTicket(ticket)) return;
+   double atr = GetBuf(g_atr, 1);
+   if(atr <= 0.0) return;
+
+   double open    = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl      = PositionGetDouble(POSITION_SL);
+   double tp      = PositionGetDouble(POSITION_TP);
+   double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+
+   if(ptype == POSITION_TYPE_BUY)
+   {
+      double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(price - open < InpTrailStartAtr * atr) return;
+      double newSl = NormalizeDouble(price - InpTrailDistAtr * atr, _Digits);
+      if(newSl > sl && price - newSl >= minDist) trade.PositionModify(ticket, newSl, tp);
+   }
+   else
+   {
+      double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      if(open - price < InpTrailStartAtr * atr) return;
+      double newSl = NormalizeDouble(price + InpTrailDistAtr * atr, _Digits);
+      if((sl == 0.0 || newSl < sl) && newSl - price >= minDist) trade.PositionModify(ticket, newSl, tp);
+   }
+}
+
+//+------------------------------------------------------------------+
 void OnTick()
 {
    // Se evalua una sola vez por vela cerrada del marco InpTF.
@@ -226,24 +282,27 @@ void OnTick()
    if(bar == g_lastBar) return;
    g_lastBar = bar;
 
-   int s = Signal();
+   int sRaw   = Signal(false);   // cruce sin filtros (para cerrar)
+   int sEntry = Signal(true);    // cruce con filtros (para abrir)
 
    ulong ticket;
    ENUM_POSITION_TYPE ptype;
    if(FindPosition(ticket, ptype))
    {
       // Cierre por senal contraria (igual que el ejemplo de MetaQuotes).
-      bool opposite = (ptype == POSITION_TYPE_BUY && s < 0) || (ptype == POSITION_TYPE_SELL && s > 0);
+      bool opposite = (ptype == POSITION_TYPE_BUY && sRaw < 0) || (ptype == POSITION_TYPE_SELL && sRaw > 0);
       if(InpExitOnCross && opposite)
       {
-         if(trade.PositionClose(ticket) && InpReverse)
-            OpenTrade(s > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+         if(trade.PositionClose(ticket) && InpReverse && sEntry == sRaw)
+            OpenTrade(sRaw > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+         return;
       }
+      TrailStop(ticket, ptype);
       return;
    }
 
-   // Sin posicion: abrir si hay senal.
-   if(s > 0)      OpenTrade(ORDER_TYPE_BUY);
-   else if(s < 0) OpenTrade(ORDER_TYPE_SELL);
+   // Sin posicion: abrir si hay senal (con filtros).
+   if(sEntry > 0)      OpenTrade(ORDER_TYPE_BUY);
+   else if(sEntry < 0) OpenTrade(ORDER_TYPE_SELL);
 }
 //+------------------------------------------------------------------+
