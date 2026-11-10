@@ -1859,6 +1859,13 @@ export default function TradingBot(){
   const [expSchedOn,setExpSchedOn] = useState(()=>localStorage.getItem("bot_exp_sched_on")==="1");
   const [expSchedHours,setExpSchedHours] = useState(()=>localStorage.getItem("bot_exp_sched_hours")||"7-21");
   const expSchedOnRef = useRef(expSchedOn), expSchedHoursRef = useRef(expSchedHours);
+  // MODO UNA POSICIÓN: sin pirámide/piso/volteo; cierra sola al llegar a +TP o -SL (netos de comisión). Entrada: vela anterior o momentum (3 velas).
+  const [expSimpleOn,setExpSimpleOn] = useState(()=>localStorage.getItem("bot_exp_simple")==="1");
+  const [expSimpleTp,setExpSimpleTp] = useState(()=>{ const v=parseFloat(localStorage.getItem("bot_exp_simple_tp")); return isNaN(v)?4:v; });
+  const [expSimpleSl,setExpSimpleSl] = useState(()=>{ const v=parseFloat(localStorage.getItem("bot_exp_simple_sl")); return isNaN(v)?4:v; });
+  const [expEntryMode,setExpEntryMode] = useState(()=>localStorage.getItem("bot_exp_entry")==="momentum"?"momentum":"prev");
+  const expSimpleOnRef=useRef(expSimpleOn), expSimpleTpRef=useRef(expSimpleTp), expSimpleSlRef=useRef(expSimpleSl), expEntryModeRef=useRef(expEntryMode);
+  const expClosedColorsRef=useRef([]);
   // SL propio por posición (trailing, neto de comisión): se activa al llegar a expPosArm (USD) y conserva expPosRetain % del pico.
   const [expPosArm,setExpPosArm] = useState(()=>{ const v=parseFloat(localStorage.getItem("bot_exp_posarm")); return isNaN(v)?0.5:v; });
   const [expPosArmText,setExpPosArmText]=useState(String(expPosArm));
@@ -1895,7 +1902,8 @@ export default function TradingBot(){
   // chocar con el filtro ya existente del histórico del bot principal
   // (hist*, más abajo). Solo UI, nada se persiste (se resetea al recargar),
   // pedido explícito: Fechas, PAR, TIPO, ganancia/pérdida.
-  const [expHistFrom,setExpHistFrom]     = useState("");
+  // Por defecto solo HOY: las operaciones anteriores se simularon sin comisión y mezclarlas falsea las estadísticas.
+  const [expHistFrom,setExpHistFrom]     = useState(()=>new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10));
   const [expHistTo,setExpHistTo]         = useState("");
   const [expHistSymbol,setExpHistSymbol] = useState("TODOS");
   const [expHistType,setExpHistType]     = useState("TODOS");
@@ -2065,6 +2073,18 @@ export default function TradingBot(){
   useEffect(()=>{expPosRetainRef.current=expPosRetain; try{localStorage.setItem("bot_exp_posretain",String(expPosRetain));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_pos_retain",value:String(expPosRetain)})}).catch(()=>{});
   },[expPosRetain]);
+  useEffect(()=>{expSimpleOnRef.current=expSimpleOn; try{localStorage.setItem("bot_exp_simple",expSimpleOn?"1":"0");}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_simple",value:expSimpleOn?"1":"0"})}).catch(()=>{});
+  },[expSimpleOn]);
+  useEffect(()=>{expSimpleTpRef.current=expSimpleTp; try{localStorage.setItem("bot_exp_simple_tp",String(expSimpleTp));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_simple_tp",value:String(expSimpleTp)})}).catch(()=>{});
+  },[expSimpleTp]);
+  useEffect(()=>{expSimpleSlRef.current=expSimpleSl; try{localStorage.setItem("bot_exp_simple_sl",String(expSimpleSl));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_simple_sl",value:String(expSimpleSl)})}).catch(()=>{});
+  },[expSimpleSl]);
+  useEffect(()=>{expEntryModeRef.current=expEntryMode; try{localStorage.setItem("bot_exp_entry",expEntryMode);}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_entry_mode",value:expEntryMode})}).catch(()=>{});
+  },[expEntryMode]);
   useEffect(()=>{expSchedOnRef.current=expSchedOn; try{localStorage.setItem("bot_exp_sched_on",expSchedOn?"1":"0");}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_sched_on",value:expSchedOn?"1":"0"})}).catch(()=>{});
   },[expSchedOn]);
@@ -2135,6 +2155,10 @@ export default function TradingBot(){
           if(d.exp_max_stack!=null){ setExpMaxStack(parseInt(d.exp_max_stack,10)); setExpMaxStackText(d.exp_max_stack); }
           if(d.exp_hedge!=null) setExpHedgeOn(d.exp_hedge==="1");
           if(d.exp_sched_on!=null) setExpSchedOn(d.exp_sched_on==="1");
+          if(d.exp_simple!=null) setExpSimpleOn(d.exp_simple==="1");
+          if(d.exp_simple_tp!=null){ const v=parseFloat(d.exp_simple_tp); if(!isNaN(v)) setExpSimpleTp(v); }
+          if(d.exp_simple_sl!=null){ const v=parseFloat(d.exp_simple_sl); if(!isNaN(v)) setExpSimpleSl(v); }
+          if(d.exp_entry_mode!=null) setExpEntryMode(d.exp_entry_mode==="momentum"?"momentum":"prev");
           if(d.exp_sched_hours!=null) setExpSchedHours(d.exp_sched_hours);
           if(d.exp_pos_arm!=null){ const v=parseFloat(d.exp_pos_arm); if(!isNaN(v)){ setExpPosArm(v); setExpPosArmText(String(v)); } }
           if(d.exp_pos_retain!=null){ const v=parseFloat(d.exp_pos_retain); if(!isNaN(v)){ setExpPosRetain(v); setExpPosRetainText(String(v)); } }
@@ -2705,6 +2729,31 @@ export default function TradingBot(){
         addLog(`⚠️ Experimento: hay posiciones abiertas en otro símbolo distinto a ${expSymbolRef.current} — evaluación detenida hasta resolverlo`,"info");
         return;
       }
+      // MODO UNA POSICIÓN: cierra cada posición sola al llegar a +TP o -SL (netos de comisión); sin pirámide/piso/volteo.
+      if(expSimpleOnRef.current){
+        for(const p of [...expPositionsRef.current]){
+          const pn=posPnL(p,price,p.allocatedSize);
+          const hitTp=pn>=expSimpleTpRef.current, hitSl=pn<=-expSimpleSlRef.current;
+          if(!hitTp&&!hitSl) continue;
+          const reason=hitTp?"TP":"SL", objetivo=expSimpleTpRef.current, stop=-expSimpleSlRef.current;
+          expPositionsRef.current=expPositionsRef.current.filter(x=>x.id!==p.id);
+          setExpPositions(expPositionsRef.current);
+          const closedAt=Date.now();
+          const record={...p,symbol:p.symbol||expSymbolRef.current,exit:price,pnl:pn,reason,objetivo,stop,
+            time:now(),closeTime:closedAt,tradeTime:Math.floor(closedAt/1000)};
+          setExpTrades(prev=>{const next=[record,...prev].slice(0,200); saveExpTrades(next); return next;});
+          fetch("/api/exp-trades",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({
+              symbol:record.symbol, type:record.type, entryPrice:record.entry, exitPrice:price, pnl:pn, reason,
+              pattern:record.pattern, objetivoPila:objetivo, stopPila:stop, allocatedSize:record.allocatedSize, multiplier:record.multiplier,
+              openedAt:record.openTime?new Date(record.openTime).toISOString():undefined,
+              closedAt:new Date(closedAt).toISOString(),
+            })}).catch(()=>{});
+          addLog(`🎯 Experimento (modo simple): ${reason} de ${p.type} en ${fUSD(pn)}`,pn>=0?"buy":"sell");
+        }
+        if(!expPositionsRef.current.length){ resetStackTracking(); expLastAddPriceRef.current=null; expDirectionRef.current=null; setExpDirection(null); persistLive(); }
+        return;
+      }
       // SL PROPIO POR POSICIÓN (trailing, neto de comisión) — mismo criterio que el servidor: al llegar a expPosArm se
       // conserva expPosRetain% del pico; si cae de ahí se cierra SOLO esa posición. Lo cerrado cuenta en expRealizedRef.
       if(expPosRetainRef.current>0){
@@ -2848,8 +2897,14 @@ export default function TradingBot(){
 
     const onCandleClosed=(prevCandle)=>{
       if(!expIsOwnerRef.current) return; // otra pestaña/dispositivo está manejando el motor ahora
+      const colorNow=prevCandle.c<prevCandle.o?"SELL":prevCandle.c>prevCandle.o?"BUY":null;
+      expClosedColorsRef.current=[...expClosedColorsRef.current,colorNow].slice(-10);
       if(expPositionsRef.current.length>0) return; // ya hay una pila activa, se maneja sola
-      const dir=prevCandle.c<prevCandle.o?"SELL":prevCandle.c>prevCandle.o?"BUY":null;
+      let dir=colorNow;
+      if(expEntryModeRef.current==="momentum"){
+        const l3=expClosedColorsRef.current.slice(-3);
+        dir=(l3.length===3&&l3[0]&&l3.every(x=>x===l3[0]))?l3[0]:null;
+      }
       if(!dir) return;
       if(!inSchedHoursUTC(expSchedOnRef.current,expSchedHoursRef.current)) return; // fuera de horario: no abre ciclo nuevo
       expDirectionRef.current=dir; setExpDirection(dir);
@@ -6776,6 +6831,8 @@ export default function TradingBot(){
                   <input type="date" value={expHistTo} onChange={e=>setExpHistTo(e.target.value)}
                     style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 7px",fontSize:10}}/>
                 </div>
+                <button onClick={()=>{const d=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10); setExpHistFrom(d); setExpHistTo(d);}}
+                  style={{background:T.panel,color:T.text,border:`1px solid ${T.border}`,borderRadius:4,padding:"5px 10px",fontSize:10,cursor:"pointer"}}>HOY</button>
                 <div>
                   <div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>PAR</div>
                   <select value={expHistSymbol} onChange={e=>setExpHistSymbol(e.target.value)}
@@ -6954,6 +7011,29 @@ export default function TradingBot(){
                   <input value={expSchedHours} onChange={e=>setExpSchedHours(e.target.value)} placeholder="7-13,18-21"
                     style={{background:T.bg,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"6px 8px",fontSize:12,width:150}}/>
                   <span style={{fontSize:9,color:T.muted}}>Horas UTC, rangos [inicio-fin) separados por coma. Ahora: {String(new Date().getUTCHours()).padStart(2,"0")}h UTC — {inSchedHoursUTC(true,expSchedHours)?"dentro de la ventana":"fuera de la ventana"}</span>
+                </div>}
+              </div>
+
+              <div style={{paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div><div style={{fontSize:12,fontWeight:600}}>Modo una posición (TP / SL fijos)</div>
+                    <div style={{fontSize:8,color:T.muted}}>Sin pirámide, piso ni volteo: abre UNA posición con la señal de entrada y la cierra al llegar a +TP o −SL (netos de comisión). Es lo único que aguantó las pruebas del backtest (momentum, TP 4 / SL 4), con ventaja muy pequeña — úsalo en demo para medirlo.</div></div>
+                  <ConfigToggle on={expSimpleOn} onClick={()=>setExpSimpleOn(p=>!p)}/>
+                </div>
+                {expSimpleOn&&<div style={{display:"flex",alignItems:"flex-end",gap:10,marginTop:8,flexWrap:"wrap"}}>
+                  <div><div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>TAKE PROFIT (USD neto)</div>
+                    <input type="number" step="0.5" min="0.1" value={expSimpleTp} onChange={e=>{const n=parseFloat(e.target.value); if(!isNaN(n)&&n>0) setExpSimpleTp(n);}}
+                      style={{background:T.bg,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"6px 8px",fontSize:12,width:110}}/></div>
+                  <div><div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>STOP LOSS (USD neto)</div>
+                    <input type="number" step="0.5" min="0.1" value={expSimpleSl} onChange={e=>{const n=parseFloat(e.target.value); if(!isNaN(n)&&n>0) setExpSimpleSl(n);}}
+                      style={{background:T.bg,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"6px 8px",fontSize:12,width:110}}/></div>
+                  <div><div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>ENTRADA</div>
+                    <select value={expEntryMode} onChange={e=>setExpEntryMode(e.target.value)}
+                      style={{background:T.bg,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"6px 8px",fontSize:12}}>
+                      <option value="momentum">Momentum (3 velas seguidas)</option>
+                      <option value="prev">Vela anterior</option>
+                    </select></div>
+                  <span style={{fontSize:9,color:T.muted}}>Recomendado: TP 4 / SL 4 / Momentum. Con momentum espera 3 velas de 1m del mismo color antes de entrar.</span>
                 </div>}
               </div>
 

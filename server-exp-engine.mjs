@@ -138,7 +138,7 @@ export function startExpEngine() {
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, hedgeOn: false, schedOn: false, schedHours: "7-21", posArm: 0.5, posRetain: 80, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, hedgeOn: false, schedOn: false, schedHours: "7-21", simpleOn: false, simpleTp: 4, simpleSl: 4, entryMode: "prev", posArm: 0.5, posRetain: 80, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
   let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
@@ -464,6 +464,23 @@ export function startExpEngine() {
       log(`⚠️ hay posiciones abiertas en un símbolo distinto a cfg.symbol (${cfg.symbol}) — se detiene evaluateStack hasta resolverlo`);
       return;
     }
+    // MODO UNA POSICIÓN (cfg.simpleOn): sin pirámide, piso, volteo ni cobertura. Cada posición se cierra sola al
+    // llegar a +simpleTp o -simpleSl (netos de comisión); luego queda plana y espera la próxima señal de entrada.
+    if (cfg.simpleOn) {
+      for (const p of [...positions]) {
+        const pn = posPnL(p, price);
+        const hitTp = pn >= cfg.simpleTp, hitSl = pn <= -cfg.simpleSl;
+        if (!hitTp && !hitSl) continue;
+        log(`modo simple: ${hitTp ? "TP" : "SL"} de la posición ${p.type} en ${pn.toFixed(2)}`);
+        const { ok, record } = await closeOnePosition(p, price, { symbol: p.symbol || cfg.symbol, reason: hitTp ? "TP" : "SL", objetivo: cfg.simpleTp, stop: -cfg.simpleSl });
+        if (!ok) continue; // se reintenta en el próximo tick
+        positions = positions.filter(x => x.id !== p.id);
+        await persistLive(true);
+        await writeTradeRecord(record);
+      }
+      if (!positions.length) { resetStackTracking(); lastAddPrice = null; direction = null; await persistLive(true); }
+      return;
+    }
     // SL PROPIO POR POSICIÓN (trailing, neto de comisión): cuando el PnL neto de UNA posición llega a posArm,
     // se conserva posRetain% de su pico; si cae de ahí se cierra SOLO esa posición (el resto de la pila sigue).
     // Lo ya cerrado cuenta en `realized`, para que el piso/pico de la pila siga siendo coherente.
@@ -584,9 +601,17 @@ export function startExpEngine() {
     }
   };
 
+  // Colores de las últimas velas cerradas (para la entrada por momentum: 3 seguidas del mismo color).
+  const closedColors = [];
   const onCandleClosed = async (prevCandle) => {
+    closedColors.push(prevCandle.c < prevCandle.o ? "SELL" : prevCandle.c > prevCandle.o ? "BUY" : null);
+    if (closedColors.length > 10) closedColors.shift();
     if (!isOwner || positions.length > 0) return;
-    const dir = prevCandle.c < prevCandle.o ? "SELL" : prevCandle.c > prevCandle.o ? "BUY" : null;
+    let dir = prevCandle.c < prevCandle.o ? "SELL" : prevCandle.c > prevCandle.o ? "BUY" : null;
+    if (cfg.entryMode === "momentum") {
+      const last3 = closedColors.slice(-3);
+      dir = (last3.length === 3 && last3[0] && last3.every(x => x === last3[0])) ? last3[0] : null;
+    }
     if (!dir) return;
     if (!inSchedHours(cfg.schedOn, cfg.schedHours)) return; // fuera de horario: no abre ciclo nuevo
     direction = dir;
@@ -647,7 +672,7 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag, hedgeFlag, posArmFlag, posRetainFlag, schedOnFlag, schedHoursFlag] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag, hedgeFlag, posArmFlag, posRetainFlag, schedOnFlag, schedHoursFlag, simpleOnFlag, simpleTpFlag, simpleSlFlag, entryFlag] = await Promise.all([
 
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
@@ -666,6 +691,10 @@ export function startExpEngine() {
       getConfigValue(db, "exp_pos_retain", "80"),
       getConfigValue(db, "exp_sched_on", "0"),
       getConfigValue(db, "exp_sched_hours", "7-21"),
+      getConfigValue(db, "exp_simple", "0"),
+      getConfigValue(db, "exp_simple_tp", "4"),
+      getConfigValue(db, "exp_simple_sl", "4"),
+      getConfigValue(db, "exp_entry_mode", "prev"),
     ]);
     const wasLive = cfg.derivLive;
     const wasSymbol = cfg.symbol;
@@ -700,6 +729,10 @@ export function startExpEngine() {
       hedgeOn: hedgeFlag === "1",
       schedOn: schedOnFlag === "1",
       schedHours: schedHoursFlag || "7-21",
+      simpleOn: simpleOnFlag === "1",
+      simpleTp: Math.max(0.01, parseFloat(simpleTpFlag) || 4),
+      simpleSl: Math.max(0.01, parseFloat(simpleSlFlag) || 4),
+      entryMode: entryFlag === "momentum" ? "momentum" : "prev",
       posArm: Math.max(0, isNaN(parseFloat(posArmFlag)) ? 0.5 : parseFloat(posArmFlag)),
       posRetain: Math.min(99, Math.max(0, isNaN(parseFloat(posRetainFlag)) ? 80 : parseFloat(posRetainFlag))),
       symbol: resolvedSymbol,
