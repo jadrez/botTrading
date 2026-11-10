@@ -58,6 +58,21 @@ const SESSION_ID = `server:${process.env.FLY_MACHINE_ID || "local"}:${Math.rando
 const DERIV_SAFETY_TP = 40;
 const derivSafetySL = (stake) => stake;
 
+// Filtro de horario (UTC): "7-13,18-21" = horas [7,13) y [18,21). Solo restringe ENTRADAS nuevas (abrir ciclo / reabrir tras
+// voltear); una pila ya abierta se sigue gestionando normal. Apagado por defecto — sin ventana recomendada (el backtest no
+// encontró ninguna sesión con ventaja estable).
+function inSchedHours(on, text, date = new Date()) {
+  if (!on) return true;
+  const h = date.getUTCHours();
+  for (const part of String(text || "").split(",")) {
+    const m = part.trim().match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+    if (!m) continue;
+    const a = +m[1], b = +m[2];
+    if (a <= b ? (h >= a && h < b) : (h >= a || h < b)) return true;
+  }
+  return false;
+}
+
 let pool = null;
 function getPool() {
   if (!process.env.DATABASE_URL) return null;
@@ -123,7 +138,7 @@ export function startExpEngine() {
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, hedgeOn: false, posArm: 0.5, posRetain: 80, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, hedgeOn: false, schedOn: false, schedHours: "7-21", posArm: 0.5, posRetain: 80, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
   let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
@@ -379,6 +394,12 @@ export function startExpEngine() {
       note = ` · volteo rápido (piso ${floor.toFixed(2)})`;
     }
     log(`pila cerró en ${totalPnl.toFixed(2)} → voltea a ${opposite}${note}`);
+    if (!inSchedHours(cfg.schedOn, cfg.schedHours)) {
+      direction = null; lastAddPrice = null;
+      log(`fuera del horario permitido (${cfg.schedHours} UTC) — no reabre tras el volteo`);
+      await persistLive(true);
+      return;
+    }
     direction = opposite;
     await addExpPos(opposite, "VOLTEO");
   };
@@ -567,6 +588,7 @@ export function startExpEngine() {
     if (!isOwner || positions.length > 0) return;
     const dir = prevCandle.c < prevCandle.o ? "SELL" : prevCandle.c > prevCandle.o ? "BUY" : null;
     if (!dir) return;
+    if (!inSchedHours(cfg.schedOn, cfg.schedHours)) return; // fuera de horario: no abre ciclo nuevo
     direction = dir;
     resetStackTracking();
     await addExpPos(dir, "VELA ANTERIOR");
@@ -625,7 +647,7 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag, hedgeFlag, posArmFlag, posRetainFlag] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag, hedgeFlag, posArmFlag, posRetainFlag, schedOnFlag, schedHoursFlag] = await Promise.all([
 
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
@@ -642,6 +664,8 @@ export function startExpEngine() {
       getConfigValue(db, "exp_hedge", "0"),
       getConfigValue(db, "exp_pos_arm", "0.5"),
       getConfigValue(db, "exp_pos_retain", "80"),
+      getConfigValue(db, "exp_sched_on", "0"),
+      getConfigValue(db, "exp_sched_hours", "7-21"),
     ]);
     const wasLive = cfg.derivLive;
     const wasSymbol = cfg.symbol;
@@ -674,6 +698,8 @@ export function startExpEngine() {
       lockFloor: Math.max(0, isNaN(parseFloat(lockFlag)) ? 1 : parseFloat(lockFlag)),
       lockArm: Math.max(0, isNaN(parseFloat(armFlag)) ? 2 : parseFloat(armFlag)),
       hedgeOn: hedgeFlag === "1",
+      schedOn: schedOnFlag === "1",
+      schedHours: schedHoursFlag || "7-21",
       posArm: Math.max(0, isNaN(parseFloat(posArmFlag)) ? 0.5 : parseFloat(posArmFlag)),
       posRetain: Math.min(99, Math.max(0, isNaN(parseFloat(posRetainFlag)) ? 80 : parseFloat(posRetainFlag))),
       symbol: resolvedSymbol,
@@ -784,6 +810,30 @@ export function startExpEngine() {
   };
 
   let bootstrapped = false;
+  // ── Grabador de precios REALES de Deriv: vela de 1 minuto por símbolo en price_candles ──
+  // Solo la máquina dueña (la que ya pide el precio). Sirve para repetir los backtests con datos propios.
+  let recTableOk = false, rec = null;
+  const flushRec = async (c) => {
+    if (!c) return;
+    try {
+      if (!recTableOk) {
+        await db.query(`CREATE TABLE IF NOT EXISTS price_candles (symbol text NOT NULL, t bigint NOT NULL, o double precision, h double precision, l double precision, c double precision, n int DEFAULT 0, PRIMARY KEY (symbol, t))`);
+        recTableOk = true;
+      }
+      await db.query(
+        `INSERT INTO price_candles (symbol, t, o, h, l, c, n) VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (symbol, t) DO UPDATE SET h = GREATEST(price_candles.h, EXCLUDED.h), l = LEAST(price_candles.l, EXCLUDED.l), c = EXCLUDED.c, n = price_candles.n + EXCLUDED.n`,
+        [c.symbol, c.t, c.o, c.h, c.l, c.c, c.n]
+      );
+    } catch (e) { console.error("[exp-engine] grabador de precios:", e.message); }
+  };
+  const recordTick = (sym, p) => {
+    const t = Math.floor(Date.now() / 60000) * 60;
+    if (rec && (rec.t !== t || rec.symbol !== sym)) { flushRec(rec); rec = null; }
+    if (!rec) rec = { symbol: sym, t, o: p, h: p, l: p, c: p, n: 1 };
+    else { rec.h = Math.max(rec.h, p); rec.l = Math.min(rec.l, p); rec.c = p; rec.n++; }
+  };
+
   const bootstrap = async () => {
     // Restaura ANTES de reloadConfig() — el guard de cambio de símbolo ahí
     // decide mirando `positions`/`hedge` en memoria, y en el arranque siguen
@@ -860,6 +910,7 @@ export function startExpEngine() {
         const np = await fetchExpTickPrice();
         if (np && !isNaN(np)) {
           price = np;
+          recordTick(cfg.symbol, np);
           // Clave aparte de exp_live_state (que solo escribe cuando floor/
           // positions cambian) — el precio cambia casi en cada tick, así
           // que necesita su propio canal de solo-precio para que el

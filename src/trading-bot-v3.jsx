@@ -499,6 +499,18 @@ const EXP_QUICK_REVERSAL_FRACTION=0.3; // 30% del piso inicial normal
 // útil justo cuando ya hay varias posiciones viejas que podrían estar
 // escondiendo una reversión reciente detrás de su propio P&L grande.
 const EXP_CANARY_PEAK=5, EXP_CANARY_MIN_STACK=3;
+// Filtro de horario (UTC): "7-13,18-21" = horas [7,13) y [18,21). Mismo criterio que server-exp-engine.mjs.
+function inSchedHoursUTC(on,text){
+  if(!on) return true;
+  const h=new Date().getUTCHours();
+  for(const part of String(text||"").split(",")){
+    const m=part.trim().match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+    if(!m) continue;
+    const a=+m[1], b=+m[2];
+    if(a<=b ? (h>=a&&h<b) : (h>=a||h<b)) return true;
+  }
+  return false;
+}
 // Cobertura ("hedge"): pedido explícito tras confirmar que SÍ se quiere
 // cobertura real (dos direcciones abiertas a la vez, no solo voltear más
 // temprano) — si la pila principal NUNCA estuvo en positivo y su pérdida
@@ -1843,6 +1855,10 @@ export default function TradingBot(){
   // Cobertura (posición contraria cuando la pila nunca fue positiva): OPCIONAL, apagada por defecto.
   const [expHedgeOn,setExpHedgeOn] = useState(()=>localStorage.getItem("bot_exp_hedge")==="1");
   const expHedgeOnRef = useRef(expHedgeOn);
+  // Filtro de horario (UTC): solo restringe ENTRADAS nuevas. Apagado por defecto.
+  const [expSchedOn,setExpSchedOn] = useState(()=>localStorage.getItem("bot_exp_sched_on")==="1");
+  const [expSchedHours,setExpSchedHours] = useState(()=>localStorage.getItem("bot_exp_sched_hours")||"7-21");
+  const expSchedOnRef = useRef(expSchedOn), expSchedHoursRef = useRef(expSchedHours);
   // SL propio por posición (trailing, neto de comisión): se activa al llegar a expPosArm (USD) y conserva expPosRetain % del pico.
   const [expPosArm,setExpPosArm] = useState(()=>{ const v=parseFloat(localStorage.getItem("bot_exp_posarm")); return isNaN(v)?0.5:v; });
   const [expPosArmText,setExpPosArmText]=useState(String(expPosArm));
@@ -2049,6 +2065,12 @@ export default function TradingBot(){
   useEffect(()=>{expPosRetainRef.current=expPosRetain; try{localStorage.setItem("bot_exp_posretain",String(expPosRetain));}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_pos_retain",value:String(expPosRetain)})}).catch(()=>{});
   },[expPosRetain]);
+  useEffect(()=>{expSchedOnRef.current=expSchedOn; try{localStorage.setItem("bot_exp_sched_on",expSchedOn?"1":"0");}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_sched_on",value:expSchedOn?"1":"0"})}).catch(()=>{});
+  },[expSchedOn]);
+  useEffect(()=>{expSchedHoursRef.current=expSchedHours; try{localStorage.setItem("bot_exp_sched_hours",expSchedHours);}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_sched_hours",value:expSchedHours})}).catch(()=>{});
+  },[expSchedHours]);
   useEffect(()=>{expHedgeOnRef.current=expHedgeOn; try{localStorage.setItem("bot_exp_hedge",expHedgeOn?"1":"0");}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_hedge",value:expHedgeOn?"1":"0"})}).catch(()=>{});
   },[expHedgeOn]);
@@ -2112,6 +2134,8 @@ export default function TradingBot(){
           if(d.exp_floor_start!=null){ setExpFloorStart(parseFloat(d.exp_floor_start)); setExpFloorStartText(d.exp_floor_start); }
           if(d.exp_max_stack!=null){ setExpMaxStack(parseInt(d.exp_max_stack,10)); setExpMaxStackText(d.exp_max_stack); }
           if(d.exp_hedge!=null) setExpHedgeOn(d.exp_hedge==="1");
+          if(d.exp_sched_on!=null) setExpSchedOn(d.exp_sched_on==="1");
+          if(d.exp_sched_hours!=null) setExpSchedHours(d.exp_sched_hours);
           if(d.exp_pos_arm!=null){ const v=parseFloat(d.exp_pos_arm); if(!isNaN(v)){ setExpPosArm(v); setExpPosArmText(String(v)); } }
           if(d.exp_pos_retain!=null){ const v=parseFloat(d.exp_pos_retain); if(!isNaN(v)){ setExpPosRetain(v); setExpPosRetainText(String(v)); } }
           if(d.exp_lock_arm!=null){ const la=parseFloat(d.exp_lock_arm); if(!isNaN(la)){ setExpLockArm(la); setExpLockArmText(String(la)); } }
@@ -2641,6 +2665,11 @@ export default function TradingBot(){
         note=` · volteo rápido armado (piso ${fUSD(expFloorRef.current)})`;
       }
       addLog(`🔄 Experimento: pila cerró en ${fUSD(totalPnl)} → voltea a ${opposite}${note}`,"info");
+      if(!inSchedHoursUTC(expSchedOnRef.current,expSchedHoursRef.current)){
+        expDirectionRef.current=null; setExpDirection(null); expLastAddPriceRef.current=null; persistLive();
+        addLog(`⏰ Experimento: fuera del horario permitido (${expSchedHoursRef.current} UTC) — no reabre tras el volteo`,"info");
+        return;
+      }
       expDirectionRef.current=opposite; setExpDirection(opposite);
       addExpPos(opposite,"VOLTEO");
     };
@@ -2822,6 +2851,7 @@ export default function TradingBot(){
       if(expPositionsRef.current.length>0) return; // ya hay una pila activa, se maneja sola
       const dir=prevCandle.c<prevCandle.o?"SELL":prevCandle.c>prevCandle.o?"BUY":null;
       if(!dir) return;
+      if(!inSchedHoursUTC(expSchedOnRef.current,expSchedHoursRef.current)) return; // fuera de horario: no abre ciclo nuevo
       expDirectionRef.current=dir; setExpDirection(dir);
       resetStackTracking();
       addExpPos(dir,"VELA ANTERIOR");
@@ -6912,6 +6942,19 @@ export default function TradingBot(){
                 <div><div style={{fontSize:12,fontWeight:600}}>Activar cobertura</div>
                   <div style={{fontSize:8,color:T.muted}}>Abre una posición contraria cuando la pila nunca fue positiva y cae a la mitad del margen hasta el piso inicial. Cuesta otra comisión por ciclo — apagada por defecto.</div></div>
                 <ConfigToggle on={expHedgeOn} onClick={()=>setExpHedgeOn(p=>!p)}/>
+              </div>
+
+              <div style={{paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div><div style={{fontSize:12,fontWeight:600}}>Operar solo en ciertas horas (UTC)</div>
+                    <div style={{fontSize:8,color:T.muted}}>Fuera de la ventana no abre ciclos nuevos ni reabre tras un volteo; una pila ya abierta se sigue gestionando. Apagado por defecto: el backtest no encontró una sesión con ventaja estable, úsalo para medirlo con tus propias operaciones.</div></div>
+                  <ConfigToggle on={expSchedOn} onClick={()=>setExpSchedOn(p=>!p)}/>
+                </div>
+                {expSchedOn&&<div style={{display:"flex",alignItems:"center",gap:10,marginTop:8}}>
+                  <input value={expSchedHours} onChange={e=>setExpSchedHours(e.target.value)} placeholder="7-13,18-21"
+                    style={{background:T.bg,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"6px 8px",fontSize:12,width:150}}/>
+                  <span style={{fontSize:9,color:T.muted}}>Horas UTC, rangos [inicio-fin) separados por coma. Ahora: {String(new Date().getUTCHours()).padStart(2,"0")}h UTC — {inSchedHoursUTC(true,expSchedHours)?"dentro de la ventana":"fuera de la ventana"}</span>
+                </div>}
               </div>
 
               {/* Presets — pedido explícito: "me gustaría poderla guardar

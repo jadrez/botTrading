@@ -16,6 +16,7 @@ import expTrades from "./api/exp-trades.js";
 import forex from "./api/forex.js";
 import news from "./api/news.js";
 import positions from "./api/positions.js";
+import priceCandles from "./api/price-candles.js";
 import symbolStrategy from "./api/symbol-strategy.js";
 import trades from "./api/trades.js";
 import { startExpEngine } from "./server-exp-engine.mjs";
@@ -32,6 +33,7 @@ const routes = {
   "forex": forex,
   "news": news,
   "positions": positions,
+  "price-candles": priceCandles,
   "symbol-strategy": symbolStrategy,
   "trades": trades,
 };

@@ -52,7 +52,7 @@ export function simulateExp2(candles, p, ind) {
   };
   const closeAll = (price, reason, t) => {
     let tot = 0;
-    for (const pos of positions) { const pn = pnlOf(pos, price); tot += pn; trades.push({ pnl: pn, reason, t }); }
+    for (const pos of positions) { const pn = pnlOf(pos, price); tot += pn; trades.push({ pnl: pn, reason, t, ot: pos.t }); }
     positions = [];
     return tot + realized;
   };
@@ -72,7 +72,7 @@ export function simulateExp2(candles, p, ind) {
         const pn = pnlOf(pos, price);
         pos.pk = Math.max(pos.pk, pn);
         if (pos.pk >= p.posArm && pn <= pos.pk * p.posRetain / 100) {
-          trades.push({ pnl: pn, reason: "SL POS", t });
+          trades.push({ pnl: pn, reason: "SL POS", t, ot: pos.t });
           positions = positions.filter(x => x !== pos);
           realized += pn;
         }
@@ -83,7 +83,7 @@ export function simulateExp2(candles, p, ind) {
     peak = Math.max(peak, stackPnl);
     if (p.tp != null) { // modo simple: 1 posición con TP/SL fijos netos de comisión
       const pn = pnlOf(positions[0], price);
-      if (pn >= p.tp || pn <= -p.sl) { trades.push({ pnl: pn, reason: pn > 0 ? "TP" : "SL", t }); positions = []; direction = null; reset(); lastAdd = null; }
+      if (pn >= p.tp || pn <= -p.sl) { trades.push({ pnl: pn, reason: pn > 0 ? "TP" : "SL", t, ot: positions[0].t }); positions = []; direction = null; reset(); lastAdd = null; }
       return;
     }
     if (p.dynFloor !== false && peak >= FLOOR_ARM_AT) floor = Math.max(floor, peak * RETAIN);
@@ -146,5 +146,5 @@ export function simulateExp2(candles, p, ind) {
   for (const t of trades) { eq += t.pnl; pk = Math.max(pk, eq); dd = Math.min(dd, eq - pk); }
   const wins = trades.filter(t => t.pnl > 0).length;
   const fees = trades.length * fee0;
-  return { trades: trades.length, total, avg: trades.length ? total / trades.length : 0, winRate: trades.length ? wins / trades.length : 0, maxDD: dd, fees };
+  return { list: trades, trades: trades.length, total, avg: trades.length ? total / trades.length : 0, winRate: trades.length ? wins / trades.length : 0, maxDD: dd, fees };
 }
