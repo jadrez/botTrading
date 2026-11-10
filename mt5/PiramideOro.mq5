@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| PiramideOro.mq5  (v2.00)                                         |
+//| PiramideOro.mq5  (v2.01)                                         |
 //| EA para XAUUSD en cuenta Deriv MT5 (HEDGING).                    |
 //|                                                                  |
 //| Entrada (en la vela cerrada del marco InpTF):                    |
@@ -14,7 +14,7 @@
 //|                                                                  |
 //| NO garantiza ganancias. Probar en el probador y en DEMO.         |
 //+------------------------------------------------------------------+
-#property version   "2.00"
+#property version   "2.01"
 #property description "XAUUSD: entrada por momentum, SL/TP por ATR, piramide opcional. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -26,7 +26,7 @@ enum ENUM_ENTRY_MODE
 };
 
 input group "=== Senal de entrada ==="
-input ENUM_TIMEFRAMES InpTF             = PERIOD_M15;      // Marco de tiempo de las velas
+input ENUM_TIMEFRAMES InpTF             = PERIOD_CURRENT;  // Marco de las velas (CURRENT = el periodo del grafico / del probador)
 input ENUM_ENTRY_MODE InpEntry          = ENTRY_MOMENTUM;  // Modo de entrada
 input int             InpMomentumBars   = 3;               // Velas seguidas (modo momentum)
 input int             InpTrendMA        = 0;               // Filtro de tendencia: periodo de la EMA (0 = apagado)
