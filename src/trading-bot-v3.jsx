@@ -2756,24 +2756,7 @@ export default function TradingBot(){
           closeHedge(price);
         }
       }
-      // Canario: la ÚLTIMA posición apilada se revisa POR SEPARADO de la
-      // pila (solo con EXP_CANARY_MIN_STACK+ posiciones abiertas) — si su
-      // propio pico llega a EXP_CANARY_PEAK y luego retrocede al mismo %
-      // de retención que ya usa el piso agregado, voltea TODA la pila de
-      // una vez, sin esperar a que ese piso agregado (más lento porque las
-      // posiciones viejas, ya muy en positivo, lo arrastran) reaccione.
-      if(expPositionsRef.current.length>=EXP_CANARY_MIN_STACK){
-        const lastPos=expPositionsRef.current.at(-1);
-        const lastPnl=posPnL(lastPos,price,lastPos.allocatedSize);
-        expLastPosPeakRef.current=Math.max(expLastPosPeakRef.current,lastPnl);
-        if(expLastPosPeakRef.current>=EXP_CANARY_PEAK){
-          const canaryFloor=expLastPosPeakRef.current*EXP_RETAIN_PCT;
-          if(lastPnl<=canaryFloor){
-            addLog(`🐤 Experimento: canario — última posición tocó +${fUSD(expLastPosPeakRef.current,false)} y cayó a ${fUSD(lastPnl)} (piso propio ${fUSD(canaryFloor)})`,"info");
-            flip(price); return;
-          }
-        }
-      }
+      // (Canario por pico retirado: el backtest 90d/14d mostró 0 efecto; lo cubren el SL por posición y el piso de la pila.)
       // Canario inmediato: el de arriba exige que la última posición
       // PRIMERO haya llegado a +$5 antes de voltear por su retroceso — con
       // piso/paso chicos (pedido explícito de probar ganancias de
