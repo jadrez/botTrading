@@ -14,7 +14,7 @@
 //|                                                                  |
 //| NO garantiza ganancias. Probar en el probador y en DEMO.         |
 //+------------------------------------------------------------------+
-#property version   "2.01"
+#property version   "2.02"
 #property description "XAUUSD: entrada por momentum, SL/TP por ATR, piramide opcional. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -235,7 +235,18 @@ bool OpenPosition(ENUM_ORDER_TYPE type, const string comment)
       }
       slDist = InpSLAtr * atr;
       if(!InpPyramid && InpTPAtr > 0.0) tpDist = InpTPAtr * atr;   // en piramide no se pone TP fijo
-      if(InpLotByRisk) lot = LotByRisk(slDist, type, price);
+      if(InpLotByRisk)
+      {
+         lot = LotByRisk(slDist, type, price);
+         // Si el lote minimo del broker ya arriesga mucho mas que el % pedido, no se abre (evita riesgos ocultos en marcos largos).
+         double riskMoney  = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPct / 100.0;
+         double actualRisk = LossForMove(lot, type, price, slDist);
+         if(actualRisk > riskMoney * 1.5)
+         {
+            PrintFormat("No se abre: con el lote minimo %.2f el riesgo seria %.2f USD (limite %.2f USD).", lot, actualRisk, riskMoney);
+            return false;
+         }
+      }
    }
    else
    {
