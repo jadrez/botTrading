@@ -2997,7 +2997,9 @@ export default function TradingBot(){
         // otro, p. ej. BTC/USD mientras la pila era de EUR/USD). No pisa un cambio hecho hace <8s.
         if(d.exp_symbol&&EXP_SYMBOLS[d.exp_symbol]&&d.exp_symbol!==expSymbolRef.current&&Date.now()-expSymbolChangedAtRef.current>8000){ setExpSymbol(d.exp_symbol); }
         // Sin Simulado, esta pestaña no reclama el motor (no abre posiciones simuladas).
-        const canClaim=!expDerivLiveRef.current && expSimRef.current && (!owner||mine||stale);
+        // Si el servidor está vivo (latido reciente) es el dueño único también en simulado: el navegador solo muestra.
+        const serverAlive=(Date.now()-(parseInt(d.exp_server_alive,10)||0))<20000;
+        const canClaim=!serverAlive && !expDerivLiveRef.current && expSimRef.current && (!owner||mine||stale);
         if(canClaim){
           if(!expIsOwnerRef.current && d.exp_live_state){
             // Otra sesión pudo haber mutado positions/floor/peak/hedge mientras

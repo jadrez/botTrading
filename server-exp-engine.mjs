@@ -630,7 +630,10 @@ export function startExpEngine() {
       // En modo Deriv (real) el servidor es el ÚNICO dueño posible: aunque un navegador
       // (pestaña vieja, otro dispositivo) escriba su heartbeat, no se cede el control
       // ni se resincroniza desde la DB — su memoria es la verdad sobre los contratos reales.
-      if (!owner || mine || stale || cfg.derivLive) {
+      // El servidor es el dueño ÚNICO del motor en TODOS los modos (simulado y Deriv): corre 24/7 y una pestaña en segundo
+      // plano (temporizadores throttled) hacía que el control cambiara cada pocos segundos, perdiendo el historial de velas
+      // (el momentum necesita 3 seguidas). Se publica exp_server_alive para que los navegadores sepan que no deben reclamar.
+      if (true || !owner || mine || stale || cfg.derivLive) {
         if (!isOwner && !cfg.derivLive) {
           log("tomando el control del motor");
           // Otra sesión pudo haber mutado positions/floor/peak/hedge mientras
@@ -654,6 +657,7 @@ export function startExpEngine() {
         if (!isOwner && cfg.derivLive) log("modo Deriv: tomando el control del motor (sin resincronizar desde la DB)");
         isOwner = true;
         await setConfigValue(db, "exp_engine_owner", `${SESSION_ID}:${Date.now()}`);
+        await setConfigValue(db, "exp_server_alive", String(Date.now()));
       } else {
         if (isOwner) log("otra sesión tomó el control — pasando a solo lectura");
         isOwner = false;

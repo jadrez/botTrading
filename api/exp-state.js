@@ -42,6 +42,9 @@ export default async function handler(req, res) {
       if (key === "exp_live_state" || key === "exp_engine_owner") {
         const lv = await db.query(`SELECT value FROM bot_config WHERE key = 'exp_deriv_live'`);
         if (lv.rows[0]?.value === "1") return res.status(200).json({ ok: true, ignored: "deriv-live" });
+        // Servidor vivo (latido < 20 s) = dueño único también en simulado: se ignora lo que escriba un navegador.
+        const al = await db.query(`SELECT value FROM bot_config WHERE key = 'exp_server_alive'`);
+        if (Date.now() - (parseInt(al.rows[0]?.value, 10) || 0) < 20000) return res.status(200).json({ ok: true, ignored: "server-owner" });
       }
       await db.query(
         `INSERT INTO bot_config (key, value, updated_at) VALUES ($1,$2,now())

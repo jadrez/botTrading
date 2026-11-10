@@ -83,6 +83,9 @@ export function simulateExp2(candles, p, ind) {
     peak = Math.max(peak, stackPnl);
     if (p.tp != null) { // modo simple: 1 posición con TP/SL fijos netos de comisión
       const pn = pnlOf(positions[0], price);
+      positions[0].pk = Math.max(positions[0].pk, pn);
+      const trailHit = p.trailArm != null && positions[0].pk >= p.trailArm && pn <= positions[0].pk * p.trailRetain / 100;
+      if (trailHit) { trades.push({ pnl: pn, reason: "TRAIL", t, ot: positions[0].t }); positions = []; direction = null; reset(); lastAdd = null; return; }
       if (pn >= p.tp || pn <= -p.sl) { trades.push({ pnl: pn, reason: pn > 0 ? "TP" : "SL", t, ot: positions[0].t }); positions = []; direction = null; reset(); lastAdd = null; }
       return;
     }
