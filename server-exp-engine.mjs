@@ -138,7 +138,7 @@ export function startExpEngine() {
   let lastAddPrice = null; // precio de entrada de la ÚLTIMA posición apilada (exige movimiento real de precio antes de apilar otra)
   let hedge = null; // ver EXP_HEDGE_TRIGGER_PCT — null o UNA posición en la dirección contraria
   let isOwner = false;
-  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, hedgeOn: false, schedOn: false, schedHours: "7-21", simpleOn: false, simpleTp: 4, simpleSl: 4, entryMode: "prev", posArm: 0.5, posRetain: 80, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
+  let cfg = { enabled: false, stake: 1, addStep: 50, floorStart: -50, maxStack: EXP_MAX_STACK_DEFAULT, multiplier: DEFAULT_MULTIPLIER, commPct: 0, lockFloor: 1, lockArm: 2, hedgeOn: false, schedOn: false, schedHours: "7-21", sigOn: false, sigMinConf: 60, simpleOn: false, simpleTp: 4, simpleSl: 4, entryMode: "prev", posArm: 0.5, posRetain: 80, derivLive: false, sim: true, symbol: EXP_SYMBOL_DEFAULT };
   let lastDbFloor = null, lastDbPosCount = -1;
   let lastManualCloseAt = 0; // evita reprocesar la misma solicitud dos veces
 
@@ -394,7 +394,7 @@ export function startExpEngine() {
       note = ` · volteo rápido (piso ${floor.toFixed(2)})`;
     }
     log(`pila cerró en ${totalPnl.toFixed(2)} → voltea a ${opposite}${note}`);
-    if (!inSchedHours(cfg.schedOn, cfg.schedHours)) {
+    if (!inSchedHours(cfg.schedOn, cfg.schedHours) || !sigAllows(opposite)) {
       direction = null; lastAddPrice = null;
       log(`fuera del horario permitido (${cfg.schedHours} UTC) — no reabre tras el volteo`);
       await persistLive(true);
@@ -614,6 +614,7 @@ export function startExpEngine() {
     }
     if (!dir) return;
     if (!inSchedHours(cfg.schedOn, cfg.schedHours)) return; // fuera de horario: no abre ciclo nuevo
+    if (!sigAllows(dir)) return; // la señal del oro no coincide (o es débil): no abre
     direction = dir;
     resetStackTracking();
     await addExpPos(dir, "VELA ANTERIOR");
@@ -672,7 +673,7 @@ export function startExpEngine() {
   };
 
   const reloadConfig = async () => {
-    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag, hedgeFlag, posArmFlag, posRetainFlag, schedOnFlag, schedHoursFlag, simpleOnFlag, simpleTpFlag, simpleSlFlag, entryFlag] = await Promise.all([
+    const [enabled, stake, addStep, floorStart, maxStack, derivLive, symbol, simFlag, multFlag, commFlag, lockFlag, armFlag, hedgeFlag, posArmFlag, posRetainFlag, schedOnFlag, schedHoursFlag, simpleOnFlag, simpleTpFlag, simpleSlFlag, entryFlag, sigOnFlag, sigConfFlag] = await Promise.all([
 
       getConfigValue(db, "exp_enabled", "0"),
       getConfigValue(db, "exp_stake", "1"),
@@ -695,6 +696,8 @@ export function startExpEngine() {
       getConfigValue(db, "exp_simple_tp", "4"),
       getConfigValue(db, "exp_simple_sl", "4"),
       getConfigValue(db, "exp_entry_mode", "prev"),
+      getConfigValue(db, "exp_sig_on", "0"),
+      getConfigValue(db, "exp_sig_conf", "60"),
     ]);
     const wasLive = cfg.derivLive;
     const wasSymbol = cfg.symbol;
@@ -733,6 +736,8 @@ export function startExpEngine() {
       simpleTp: Math.max(0.01, parseFloat(simpleTpFlag) || 4),
       simpleSl: Math.max(0.01, parseFloat(simpleSlFlag) || 4),
       entryMode: entryFlag === "momentum" ? "momentum" : "prev",
+      sigOn: sigOnFlag === "1",
+      sigMinConf: Math.min(100, Math.max(0, parseFloat(sigConfFlag) || 60)),
       posArm: Math.max(0, isNaN(parseFloat(posArmFlag)) ? 0.5 : parseFloat(posArmFlag)),
       posRetain: Math.min(99, Math.max(0, isNaN(parseFloat(posRetainFlag)) ? 80 : parseFloat(posRetainFlag))),
       symbol: resolvedSymbol,
@@ -867,6 +872,41 @@ export function startExpEngine() {
     else { rec.h = Math.max(rec.h, p); rec.l = Math.min(rec.l, p); rec.c = p; rec.n++; }
   };
 
+  // ── SEÑAL DEL ORO (misma fórmula que "SEÑALES DE APERTURA" para materias primas en el cliente) ──
+  // Precio muestreado cada 20 s (máx 120 = ~40 min), EMA9/EMA21 + RSI14: BUY si EMA9>EMA21 y RSI<70, SELL si EMA9<EMA21 y RSI>30.
+  // Confianza 45–88. Se calcula aquí para que el filtro funcione 24/7 sin depender de un navegador abierto.
+  const goldSamples = [];
+  let lastGoldSample = 0, goldSignal = null;
+  const computeGoldSignal = () => {
+    const cl = goldSamples;
+    if (cl.length < 22) return null; // calentando (~7 min)
+    const k9 = 2 / 10, k21 = 2 / 22;
+    let e9 = cl[0], e21 = cl[0];
+    for (let i = 1; i < cl.length; i++) { e9 = cl[i] * k9 + e9 * (1 - k9); e21 = cl[i] * k21 + e21 * (1 - k21); }
+    let g = 0, l = 0;
+    for (let i = cl.length - 14; i < cl.length; i++) { const d = cl[i] - cl[i - 1]; d > 0 ? g += d : l -= d; }
+    const rsi = 100 - 100 / (1 + g / (l || 0.0001));
+    const signal = e9 > e21 && rsi < 70 ? "BUY" : e9 < e21 && rsi > 30 ? "SELL" : "HOLD";
+    const isBuy = signal === "BUY";
+    const emaSpreadPips = Math.abs(e9 - e21) / 0.01;
+    const rsiDiv = isBuy ? Math.max(0, 60 - rsi) : Math.max(0, rsi - 40);
+    const confidence = signal === "HOLD" ? 0 : Math.min(88, Math.max(45, Math.round(50 + emaSpreadPips * 0.3 + rsiDiv * 0.5)));
+    return { signal, confidence, rsi: Math.round(rsi), n: cl.length, ts: Date.now() };
+  };
+  const sampleGold = (p) => {
+    if (cfg.symbol !== "XAU/USD") { if (goldSamples.length) { goldSamples.length = 0; goldSignal = null; } return; }
+    if (Date.now() - lastGoldSample < 20000) return;
+    lastGoldSample = Date.now();
+    goldSamples.push(p); if (goldSamples.length > 120) goldSamples.shift();
+    goldSignal = computeGoldSignal();
+    if (goldSignal) setConfigValue(db, "exp_gold_signal", JSON.stringify(goldSignal)).catch(() => {});
+  };
+  // Filtro "alinear con la señal": solo deja abrir en la dirección de la señal del oro y con confianza >= sigMinConf.
+  const sigAllows = (dir) => {
+    if (!cfg.sigOn || cfg.symbol !== "XAU/USD") return true;
+    return !!(goldSignal && goldSignal.signal === dir && goldSignal.confidence >= cfg.sigMinConf);
+  };
+
   const bootstrap = async () => {
     // Restaura ANTES de reloadConfig() — el guard de cambio de símbolo ahí
     // decide mirando `positions`/`hedge` en memoria, y en el arranque siguen
@@ -944,6 +984,7 @@ export function startExpEngine() {
         if (np && !isNaN(np)) {
           price = np;
           recordTick(cfg.symbol, np);
+          sampleGold(np);
           // Clave aparte de exp_live_state (que solo escribe cuando floor/
           // positions cambian) — el precio cambia casi en cada tick, así
           // que necesita su propio canal de solo-precio para que el

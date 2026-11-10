@@ -1859,6 +1859,16 @@ export default function TradingBot(){
   const [expSchedOn,setExpSchedOn] = useState(()=>localStorage.getItem("bot_exp_sched_on")==="1");
   const [expSchedHours,setExpSchedHours] = useState(()=>localStorage.getItem("bot_exp_sched_hours")||"7-21");
   const expSchedOnRef = useRef(expSchedOn), expSchedHoursRef = useRef(expSchedHours);
+  // Filtro "alinear con SEÑALES DE APERTURA (oro)": solo abre en la dirección de la señal del oro y con confianza >= expSigConf.
+  const [expSigOn,setExpSigOn] = useState(()=>localStorage.getItem("bot_exp_sig_on")==="1");
+  const [expSigConf,setExpSigConf] = useState(()=>{ const v=parseFloat(localStorage.getItem("bot_exp_sig_conf")); return isNaN(v)?60:v; });
+  const expSigOnRef=useRef(expSigOn), expSigConfRef=useRef(expSigConf), commodityWatchRef=useRef({});
+  useEffect(()=>{commodityWatchRef.current=commodityWatch;},[commodityWatch]);
+  const expSigAllows=(dir)=>{
+    if(!expSigOnRef.current||expSymbolRef.current!=="XAU/USD") return true;
+    const w=commodityWatchRef.current["XAU/USD"];
+    return !!(w&&w.signal===dir&&(w.confidence||0)>=expSigConfRef.current);
+  };
   // MODO UNA POSICIÓN: sin pirámide/piso/volteo; cierra sola al llegar a +TP o -SL (netos de comisión). Entrada: vela anterior o momentum (3 velas).
   const [expSimpleOn,setExpSimpleOn] = useState(()=>localStorage.getItem("bot_exp_simple")==="1");
   const [expSimpleTp,setExpSimpleTp] = useState(()=>{ const v=parseFloat(localStorage.getItem("bot_exp_simple_tp")); return isNaN(v)?4:v; });
@@ -2085,6 +2095,12 @@ export default function TradingBot(){
   useEffect(()=>{expEntryModeRef.current=expEntryMode; try{localStorage.setItem("bot_exp_entry",expEntryMode);}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_entry_mode",value:expEntryMode})}).catch(()=>{});
   },[expEntryMode]);
+  useEffect(()=>{expSigOnRef.current=expSigOn; try{localStorage.setItem("bot_exp_sig_on",expSigOn?"1":"0");}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_sig_on",value:expSigOn?"1":"0"})}).catch(()=>{});
+  },[expSigOn]);
+  useEffect(()=>{expSigConfRef.current=expSigConf; try{localStorage.setItem("bot_exp_sig_conf",String(expSigConf));}catch{}
+    if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_sig_conf",value:String(expSigConf)})}).catch(()=>{});
+  },[expSigConf]);
   useEffect(()=>{expSchedOnRef.current=expSchedOn; try{localStorage.setItem("bot_exp_sched_on",expSchedOn?"1":"0");}catch{}
     if(expSyncedRef.current) fetch("/api/exp-state",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"exp_sched_on",value:expSchedOn?"1":"0"})}).catch(()=>{});
   },[expSchedOn]);
@@ -2155,6 +2171,8 @@ export default function TradingBot(){
           if(d.exp_max_stack!=null){ setExpMaxStack(parseInt(d.exp_max_stack,10)); setExpMaxStackText(d.exp_max_stack); }
           if(d.exp_hedge!=null) setExpHedgeOn(d.exp_hedge==="1");
           if(d.exp_sched_on!=null) setExpSchedOn(d.exp_sched_on==="1");
+          if(d.exp_sig_on!=null) setExpSigOn(d.exp_sig_on==="1");
+          if(d.exp_sig_conf!=null){ const v=parseFloat(d.exp_sig_conf); if(!isNaN(v)) setExpSigConf(v); }
           if(d.exp_simple!=null) setExpSimpleOn(d.exp_simple==="1");
           if(d.exp_simple_tp!=null){ const v=parseFloat(d.exp_simple_tp); if(!isNaN(v)) setExpSimpleTp(v); }
           if(d.exp_simple_sl!=null){ const v=parseFloat(d.exp_simple_sl); if(!isNaN(v)) setExpSimpleSl(v); }
@@ -2689,7 +2707,7 @@ export default function TradingBot(){
         note=` · volteo rápido armado (piso ${fUSD(expFloorRef.current)})`;
       }
       addLog(`🔄 Experimento: pila cerró en ${fUSD(totalPnl)} → voltea a ${opposite}${note}`,"info");
-      if(!inSchedHoursUTC(expSchedOnRef.current,expSchedHoursRef.current)){
+      if(!inSchedHoursUTC(expSchedOnRef.current,expSchedHoursRef.current)||!expSigAllows(opposite)){
         expDirectionRef.current=null; setExpDirection(null); expLastAddPriceRef.current=null; persistLive();
         addLog(`⏰ Experimento: fuera del horario permitido (${expSchedHoursRef.current} UTC) — no reabre tras el volteo`,"info");
         return;
@@ -2907,6 +2925,7 @@ export default function TradingBot(){
       }
       if(!dir) return;
       if(!inSchedHoursUTC(expSchedOnRef.current,expSchedHoursRef.current)) return; // fuera de horario: no abre ciclo nuevo
+      if(!expSigAllows(dir)) return; // la señal del oro no coincide (o es débil): no abre
       expDirectionRef.current=dir; setExpDirection(dir);
       resetStackTracking();
       addExpPos(dir,"VELA ANTERIOR");
@@ -7035,6 +7054,22 @@ export default function TradingBot(){
                     </select></div>
                   <span style={{fontSize:9,color:T.muted}}>Recomendado: TP 4 / SL 4 / Momentum. Con momentum espera 3 velas de 1m del mismo color antes de entrar.</span>
                 </div>}
+              </div>
+
+              <div style={{paddingBottom:11,borderBottom:`1px solid ${T.border}`,marginBottom:11}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div><div style={{fontSize:12,fontWeight:600}}>Alinear con SEÑALES DE APERTURA (oro)</div>
+                    <div style={{fontSize:8,color:T.muted}}>Solo abre cuando la señal del oro (EMA 9/21 + RSI, la de la pantalla Señales de apertura) coincide con la dirección de entrada y su confianza es suficiente. Si la señal es HOLD, contraria o aún está calentando, no abre. Solo para XAU/USD. Apagado por defecto.</div></div>
+                  <ConfigToggle on={expSigOn} onClick={()=>setExpSigOn(p=>!p)}/>
+                </div>
+                {(()=>{ const w=commodityWatch["XAU/USD"]; const sc=!w?T.muted:w.signal==="BUY"?T.green:w.signal==="SELL"?T.red:T.muted;
+                  return <div style={{display:"flex",alignItems:"flex-end",gap:12,marginTop:8,flexWrap:"wrap"}}>
+                    {expSigOn&&<div><div style={{fontSize:7,color:T.muted,letterSpacing:1,marginBottom:3}}>CONFIANZA MÍNIMA (%)</div>
+                      <input type="number" step="1" min="0" max="100" value={expSigConf} onChange={e=>{const n=parseFloat(e.target.value); if(!isNaN(n)&&n>=0&&n<=100) setExpSigConf(n);}}
+                        style={{background:T.bg,border:`1px solid ${T.border}`,color:T.text,borderRadius:6,padding:"6px 8px",fontSize:12,width:110}}/></div>}
+                    <span style={{fontSize:10,color:T.muted}}>Señal del oro ahora: <b style={{color:sc}}>{!w?"calentando…":w.signal==="BUY"?"▲ COMPRA":w.signal==="SELL"?"▼ VENTA":"— HOLD"}</b>{w&&w.signal!=="HOLD"?` · confianza ${w.confidence}%`:""}{w?` · RSI ${w.rsi}`:""}
+                      {expSigOn&&w?` → ${w.signal!=="HOLD"&&(w.confidence||0)>=expSigConf?`solo permite abrir ${w.signal==="BUY"?"BUY":"SELL"}`:"no permite abrir ahora"}`:""}</span>
+                  </div>; })()}
               </div>
 
               {/* Presets — pedido explícito: "me gustaría poderla guardar
