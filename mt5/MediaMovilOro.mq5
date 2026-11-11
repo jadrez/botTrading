@@ -12,10 +12,11 @@
 //|   - Filtro de spread y de horario.                               |
 //|   - Cierre por cruce contrario y reversa opcional.               |
 //|   - Filtro de regimen ADX y trailing por ATR (opcionales).        |
+//|   - Break-even para ganadoras y volteo tras SL en negativo (opc.).|
 //| Una sola posicion a la vez. NO garantiza ganancias: probar en    |
 //| el probador y en DEMO antes que nada.                            |
 //+------------------------------------------------------------------+
-#property version   "1.20"
+#property version   "1.30"
 #property description "Base de media movil para XAUUSD con SL por ATR y lote por riesgo. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -38,6 +39,10 @@ input double          InpSLAtr          = 2.0;             // SL = X veces el AT
 input double          InpTPAtr          = 0.0;             // TP = X veces el ATR (0 = sin TP)
 input double          InpTrailStartAtr  = 0.0;             // Trailing: se activa al ganar X veces el ATR (0 = apagado)
 input double          InpTrailDistAtr   = 1.5;             // Trailing: el SL sigue al precio a X veces el ATR
+input double          InpBreakEvenAtr   = 0.0;             // Proteger ganadoras: al ganar X veces el ATR, el SL pasa a break-even (0 = apagado)
+input double          InpBreakEvenLockAtr = 0.2;           // Break-even: el SL queda X veces el ATR POR ENCIMA de la entrada (cubre comision y spread)
+input bool            InpFlipOnSL       = false;           // Si una operacion toca el SL en NEGATIVO, abrir otra en el sentido contrario
+input int             InpMaxFlips       = 1;               // Maximo de volteos seguidos tras SL (evita cadenas de perdidas)
 input double          InpMaxRiskMult    = 1.5;             // No abrir si el lote minimo arriesga mas de X veces lo pedido
 
 input group "=== Filtros y otros ==="
@@ -52,6 +57,10 @@ int      g_filter  = INVALID_HANDLE;
 int      g_atr     = INVALID_HANDLE;
 int      g_adx     = INVALID_HANDLE;
 datetime g_lastBar = 0;
+double   g_atrCache   = 0.0;            // ATR de la ultima vela cerrada (para el break-even en cada tick)
+bool     g_flipPending = false;         // hay un volteo pendiente tras tocar el SL en negativo
+ENUM_ORDER_TYPE g_flipType = ORDER_TYPE_BUY;
+int      g_flipCount  = 0;              // volteos seguidos
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -286,26 +295,97 @@ void TrailStop(ulong ticket, ENUM_POSITION_TYPE ptype)
 }
 
 //+------------------------------------------------------------------+
+// Break-even: cuando la posicion gana InpBreakEvenAtr veces el ATR, el SL sube a la entrada mas un pequeno colchon
+// (InpBreakEvenLockAtr) para que una ganadora no termine en perdida. Se revisa en cada tick.
+void ManageBreakEven(ulong ticket, ENUM_POSITION_TYPE ptype)
+{
+   if(InpBreakEvenAtr <= 0.0 || g_atrCache <= 0.0) return;
+   if(!PositionSelectByTicket(ticket)) return;
+
+   double open    = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl      = PositionGetDouble(POSITION_SL);
+   double tp      = PositionGetDouble(POSITION_TP);
+   double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double lock    = InpBreakEvenLockAtr * g_atrCache;
+
+   if(ptype == POSITION_TYPE_BUY)
+   {
+      double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(price - open < InpBreakEvenAtr * g_atrCache) return;
+      double newSl = NormalizeDouble(open + lock, _Digits);
+      if(newSl > sl && price - newSl >= minDist) trade.PositionModify(ticket, newSl, tp);
+   }
+   else
+   {
+      double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      if(open - price < InpBreakEvenAtr * g_atrCache) return;
+      double newSl = NormalizeDouble(open - lock, _Digits);
+      if((sl == 0.0 || newSl < sl) && newSl - price >= minDist) trade.PositionModify(ticket, newSl, tp);
+   }
+}
+
+//+------------------------------------------------------------------+
+// Detecta el cierre de una posicion de este EA: si cerro por SL con perdida y InpFlipOnSL esta activo, deja un volteo
+// pendiente (abrir en el sentido contrario). Una operacion ganadora corta la cadena de volteos.
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+   if(!HistoryDealSelect(trans.deal)) return;
+   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic) return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_OUT) return;
+
+   double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) + HistoryDealGetDouble(trans.deal, DEAL_SWAP);
+   long   reason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+
+   if(profit > 0.0) { g_flipCount = 0; return; }
+
+   if(InpFlipOnSL && reason == DEAL_REASON_SL && g_flipCount < InpMaxFlips)
+   {
+      // El deal de cierre tiene el tipo contrario a la posicion; abrir en el sentido contrario a la posicion = mismo tipo que ese deal.
+      ENUM_DEAL_TYPE dt = (ENUM_DEAL_TYPE)HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+      g_flipType    = (dt == DEAL_TYPE_SELL) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      g_flipPending = true;
+   }
+}
+
+//+------------------------------------------------------------------+
 void OnTick()
 {
+   ulong ticket;
+   ENUM_POSITION_TYPE ptype;
+   bool hasPos = FindPosition(ticket, ptype);
+
+   // ---- En cada tick: break-even y volteo pendiente ----
+   if(hasPos)
+      ManageBreakEven(ticket, ptype);
+   else if(g_flipPending)
+   {
+      g_flipPending = false;
+      if(OpenTrade(g_flipType)) g_flipCount++;
+      return;
+   }
+
    // Se evalua una sola vez por vela cerrada del marco InpTF.
    datetime bar = iTime(_Symbol, InpTF, 0);
    if(bar == g_lastBar) return;
    g_lastBar = bar;
+   g_atrCache = GetBuf(g_atr, 1);
 
    int sRaw   = Signal(false);   // cruce sin filtros (para cerrar)
    int sEntry = Signal(true);    // cruce con filtros (para abrir)
 
-   ulong ticket;
-   ENUM_POSITION_TYPE ptype;
-   if(FindPosition(ticket, ptype))
+   if(hasPos)
    {
       // Cierre por senal contraria (igual que el ejemplo de MetaQuotes).
       bool opposite = (ptype == POSITION_TYPE_BUY && sRaw < 0) || (ptype == POSITION_TYPE_SELL && sRaw > 0);
       if(InpExitOnCross && opposite)
       {
          if(trade.PositionClose(ticket) && InpReverse && sEntry == sRaw)
+         {
+            g_flipCount = 0;
             OpenTrade(sRaw > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+         }
          return;
       }
       TrailStop(ticket, ptype);
@@ -313,6 +393,7 @@ void OnTick()
    }
 
    // Sin posicion: abrir si hay senal (con filtros).
+   if(sEntry != 0) g_flipCount = 0;
    if(sEntry > 0)      OpenTrade(ORDER_TYPE_BUY);
    else if(sEntry < 0) OpenTrade(ORDER_TYPE_SELL);
 }
