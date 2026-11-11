@@ -18,7 +18,7 @@
 //| Una sola posicion a la vez. NO garantiza ganancias: probar en    |
 //| el probador y en DEMO antes que nada.                            |
 //+------------------------------------------------------------------+
-#property version   "2.10"
+#property version   "2.11"
 #property description "Base de media movil para XAUUSD con SL por ATR y lote por riesgo. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -50,7 +50,7 @@ input double          InpPeakRetainPct  = 0.0;             // SL por posicion: c
 input bool            InpPyramid        = false;           // Apilar: abrir mas posiciones a favor mientras la tendencia siga
 input int             InpMaxPositions   = 5;               // Apilar: maximo de posiciones abiertas a la vez
 input double          InpAddStepAtr     = 1.0;             // Apilar: abrir otra cuando el precio avance X veces el ATR desde la ultima entrada
-input double          InpFloorUSD       = 0.0;             // PISO en USD: si la ULTIMA posicion cae X USD (mas alla del spread y la comision), se cierra solo esa (0 = apagado; ej. 1)
+input double          InpFloorUSD       = 0.0;             // PISO en USD (acepta 1 o -1): si la ULTIMA posicion cae X USD (mas alla del spread y la comision), se cierra solo esa (0 = apagado)
 input double          InpCommissionUSD  = 0.0;             // Comision estimada por posicion en USD (se suma al piso). Ej.: la que ves cobrar en una operacion
 input double          InpMaxRiskMult    = 1.5;             // No abrir si el lote minimo arriesga mas de X veces lo pedido
 
@@ -465,12 +465,13 @@ double SpreadCostFor(double volume)
 // mas hasta quedar plano.
 void ManageFloor(ulong lastTicket)
 {
-   if(InpFloorUSD <= 0.0 || lastTicket == 0) return;
+   double floorUsd = MathAbs(InpFloorUSD);   // acepta 2 o -2: es el mismo piso
+   if(floorUsd <= 0.0 || lastTicket == 0) return;
    if(!PositionSelectByTicket(lastTicket)) return;
 
    double vol    = PositionGetDouble(POSITION_VOLUME);
    double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-   double limit  = InpFloorUSD + SpreadCostFor(vol) + InpCommissionUSD;
+   double limit  = floorUsd + SpreadCostFor(vol) + InpCommissionUSD;
    if(profit < -limit)
    {
       PrintFormat("Piso: la ultima posicion cayo a %.2f USD (limite -%.2f incluye spread y comision) - se cierra solo esa.", profit, limit);
