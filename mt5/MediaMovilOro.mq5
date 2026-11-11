@@ -15,7 +15,7 @@
 //| Una sola posicion a la vez. NO garantiza ganancias: probar en    |
 //| el probador y en DEMO antes que nada.                            |
 //+------------------------------------------------------------------+
-#property version   "1.10"
+#property version   "1.20"
 #property description "Base de media movil para XAUUSD con SL por ATR y lote por riesgo. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -31,7 +31,8 @@ input bool            InpExitOnCross    = true;            // Cerrar la posicion
 input bool            InpReverse        = true;            // Despues de cerrar por senal contraria, abrir en el otro sentido
 
 input group "=== Riesgo y SL / TP ==="
-input double          InpRiskPct        = 1.0;             // % del saldo que se pierde si toca el SL
+input double          InpFixedLot       = 0.0;             // Lote FIJO (0 = calcularlo por riesgo). Ej.: 0.05
+input double          InpRiskPct        = 1.0;             // % del saldo que se pierde si toca el SL (solo si el lote fijo es 0)
 input int             InpAtrPeriod      = 14;              // Periodo del ATR
 input double          InpSLAtr          = 2.0;             // SL = X veces el ATR
 input double          InpTPAtr          = 0.0;             // TP = X veces el ATR (0 = sin TP)
@@ -209,22 +210,32 @@ bool OpenTrade(ENUM_ORDER_TYPE type)
    double slDist = InpSLAtr * atr;
    double tpDist = (InpTPAtr > 0.0) ? InpTPAtr * atr : 0.0;
 
-   // Lote para arriesgar InpRiskPct % del saldo con ese SL.
-   double riskMoney  = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPct / 100.0;
-   double lossPerLot = LossForMove(1.0, type, price, slDist);
-   if(lossPerLot <= 0.0)
+   double lot;
+   if(InpFixedLot > 0.0)
    {
-      Print("No se pudo calcular el lote (OrderCalcProfit fallo).");
-      return false;
+      // Lote fijo: se usa tal cual; el riesgo por operacion pasa a ser lote x distancia del SL.
+      lot = NormalizeLot(InpFixedLot);
+      PrintFormat("Lote fijo %.2f: riesgo aproximado si toca el SL = %.2f USD.", lot, LossForMove(lot, type, price, slDist));
    }
-   double lot = NormalizeLot(riskMoney / lossPerLot);
-
-   // Si el lote minimo ya arriesga mucho mas de lo pedido, no se abre.
-   double actualRisk = LossForMove(lot, type, price, slDist);
-   if(actualRisk > riskMoney * InpMaxRiskMult)
+   else
    {
-      PrintFormat("No se abre: con el lote minimo %.2f el riesgo seria %.2f USD (limite %.2f USD).", lot, actualRisk, riskMoney * InpMaxRiskMult);
-      return false;
+      // Lote para arriesgar InpRiskPct % del saldo con ese SL.
+      double riskMoney  = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPct / 100.0;
+      double lossPerLot = LossForMove(1.0, type, price, slDist);
+      if(lossPerLot <= 0.0)
+      {
+         Print("No se pudo calcular el lote (OrderCalcProfit fallo).");
+         return false;
+      }
+      lot = NormalizeLot(riskMoney / lossPerLot);
+
+      // Si el lote minimo ya arriesga mucho mas de lo pedido, no se abre.
+      double actualRisk = LossForMove(lot, type, price, slDist);
+      if(actualRisk > riskMoney * InpMaxRiskMult)
+      {
+         PrintFormat("No se abre: con el lote minimo %.2f el riesgo seria %.2f USD (limite %.2f USD).", lot, actualRisk, riskMoney * InpMaxRiskMult);
+         return false;
+      }
    }
 
    // Respeta la distancia minima del broker.
