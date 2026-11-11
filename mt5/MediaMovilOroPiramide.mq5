@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| MediaMovilOroPiramide.mq5  (v2.00)                                       |
+//| MediaMovilOroPiramide.mq5  (v2.10)                                       |
 //| Base nueva a partir del ejemplo "Moving Average" de MetaQuotes.  |
 //|                                                                  |
 //| Senal (al cerrar cada vela del marco InpTF), igual que el ejemplo|
@@ -18,7 +18,7 @@
 //| Una sola posicion a la vez. NO garantiza ganancias: probar en    |
 //| el probador y en DEMO antes que nada.                            |
 //+------------------------------------------------------------------+
-#property version   "2.00"
+#property version   "2.10"
 #property description "Base de media movil para XAUUSD con SL por ATR y lote por riesgo. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -50,6 +50,8 @@ input double          InpPeakRetainPct  = 0.0;             // SL por posicion: c
 input bool            InpPyramid        = false;           // Apilar: abrir mas posiciones a favor mientras la tendencia siga
 input int             InpMaxPositions   = 5;               // Apilar: maximo de posiciones abiertas a la vez
 input double          InpAddStepAtr     = 1.0;             // Apilar: abrir otra cuando el precio avance X veces el ATR desde la ultima entrada
+input double          InpFloorUSD       = 0.0;             // PISO en USD: si la ULTIMA posicion cae X USD (mas alla del spread y la comision), se cierra solo esa (0 = apagado; ej. 1)
+input double          InpCommissionUSD  = 0.0;             // Comision estimada por posicion en USD (se suma al piso). Ej.: la que ves cobrar en una operacion
 input double          InpMaxRiskMult    = 1.5;             // No abrir si el lote minimo arriesga mas de X veces lo pedido
 
 input group "=== Filtros y otros ==="
@@ -337,9 +339,10 @@ void ManageBreakEven(ulong ticket, ENUM_POSITION_TYPE ptype)
 
 //+------------------------------------------------------------------+
 // Reune las posiciones de este EA: devuelve cuantas hay, el sentido, y la entrada y ganancia de la mas reciente.
-int CollectPositions(ulong &tk[], ENUM_POSITION_TYPE &dir, double &lastOpen, double &lastProfit)
+int CollectPositions(ulong &tk[], ENUM_POSITION_TYPE &dir, double &lastOpen, double &lastProfit, ulong &lastTicket)
 {
    ArrayResize(tk, 0);
+   lastTicket = 0;
    long lastTime = 0;
    lastOpen   = 0.0;
    lastProfit = 0.0;
@@ -357,6 +360,7 @@ int CollectPositions(ulong &tk[], ENUM_POSITION_TYPE &dir, double &lastOpen, dou
       if(tm >= lastTime)
       {
          lastTime   = tm;
+         lastTicket = t;
          lastOpen   = PositionGetDouble(POSITION_PRICE_OPEN);
          lastProfit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
          dir        = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
@@ -445,6 +449,36 @@ void ManagePeakTrail(ulong ticket, ENUM_POSITION_TYPE ptype)
 }
 
 //+------------------------------------------------------------------+
+// Costo en USD de cruzar el spread con 'volume' lotes (una posicion recien abierta ya parte en ese negativo).
+double SpreadCostFor(double volume)
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double profit = 0.0;
+   if(!OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, volume, ask, bid, profit)) return 0.0;
+   return (profit < 0.0) ? -profit : 0.0;
+}
+
+// PISO en USD de la ULTIMA posicion apilada: si su beneficio (el de MT5) cae por debajo de
+// -(InpFloorUSD + spread + comision estimada), se cierra solo esa. Las demas siguen con su SL propio y la tendencia
+// se sigue validando en cada vela (si cambia, se cierra todo y se voltea). Despues de un cierre por piso no se apila
+// mas hasta quedar plano.
+void ManageFloor(ulong lastTicket)
+{
+   if(InpFloorUSD <= 0.0 || lastTicket == 0) return;
+   if(!PositionSelectByTicket(lastTicket)) return;
+
+   double vol    = PositionGetDouble(POSITION_VOLUME);
+   double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+   double limit  = InpFloorUSD + SpreadCostFor(vol) + InpCommissionUSD;
+   if(profit < -limit)
+   {
+      PrintFormat("Piso: la ultima posicion cayo a %.2f USD (limite -%.2f incluye spread y comision) - se cierra solo esa.", profit, limit);
+      if(trade.PositionClose(lastTicket)) g_pyramidBlocked = true;
+   }
+}
+
+//+------------------------------------------------------------------+
 // Apilar: si la posicion mas reciente va ganando y el precio avanzo InpAddStepAtr veces el ATR desde su entrada,
 // abre otra en el mismo sentido (hasta InpMaxPositions). Se detiene si alguna posicion cerro por SL en negativo.
 void TryPyramid(int count, ENUM_POSITION_TYPE dir, double lastOpen, double lastProfit)
@@ -496,7 +530,8 @@ void OnTick()
    ulong tk[];
    ENUM_POSITION_TYPE dir;
    double lastOpen, lastProfit;
-   int count = CollectPositions(tk, dir, lastOpen, lastProfit);
+   ulong lastTicket;
+   int count = CollectPositions(tk, dir, lastOpen, lastProfit, lastTicket);
 
    // ---- En cada tick ----
    if(count == 0)
@@ -520,6 +555,7 @@ void OnTick()
          ManageBreakEven(tk[i], pt);
          ManagePeakTrail(tk[i], pt);
       }
+      ManageFloor(lastTicket);
       TryPyramid(count, dir, lastOpen, lastProfit);
    }
 
