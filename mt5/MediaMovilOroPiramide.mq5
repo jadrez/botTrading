@@ -18,7 +18,7 @@
 //| Una sola posicion a la vez. NO garantiza ganancias: probar en    |
 //| el probador y en DEMO antes que nada.                            |
 //+------------------------------------------------------------------+
-#property version   "2.21"
+#property version   "2.22"
 #property description "Base de media movil para XAUUSD con SL por ATR y lote por riesgo. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -117,6 +117,9 @@ int OnInit()
    trade.SetDeviationInPoints(30);
    trade.SetTypeFillingBySymbol(_Symbol);
    PrintFormat("MediaMovilOro listo en %s, marco %s, media %d.", _Symbol, EnumToString(InpTF), InpMAPeriod);
+   PrintFormat("PARAMETROS EN USO: media=%d EMAfiltro=%d ADX>=%.1f | lote=%.2f riesgo%%=%.1f SL=%.1fATR TP=%.1fATR | SLpos(%.1fATR,%.0f%%) | apilar=%s max=%d paso=%.1fATR | piso=%.2f volteo=%s | magic=%I64d",
+               InpMAPeriod, InpFilterMAPeriod, InpAdxMin, InpFixedLot, InpRiskPct, InpSLAtr, InpTPAtr, InpPeakArmAtr, InpPeakRetainPct,
+               InpPyramid ? "SI" : "NO", InpMaxPositions, InpAddStepAtr, MathAbs(InpFloorUSD), InpFlipOnSL ? "SI" : "NO", InpMagic);
    return(INIT_SUCCEEDED);
 }
 
@@ -626,7 +629,11 @@ void ShowStatus(int count, double lastProfit, ulong lastTicket)
    if(MathAbs(InpFloorUSD) > 0.0 && lastTicket != 0 && PositionSelectByTicket(lastTicket))
       lim = MathAbs(InpFloorUSD) + SpreadCostFor(PositionGetDouble(POSITION_VOLUME)) + InpCommissionUSD;
 
-   Comment("MediaMovilOroPiramide v2.21\n",
+   Comment("MediaMovilOroPiramide v2.22\n",
+           "PARAMETROS: media ", InpMAPeriod, " | EMA filtro ", InpFilterMAPeriod, " | lote ", DoubleToString(InpFixedLot, 2),
+           " | SL ", DoubleToString(InpSLAtr, 1), " ATR | TP ", DoubleToString(InpTPAtr, 1), " ATR\n",
+           "Piso ", DoubleToString(MathAbs(InpFloorUSD), 2), " USD | Apilar ", InpPyramid ? "SI" : "NO",
+           " (max ", InpMaxPositions, ") | Volteo ", InpFlipOnSL ? "SI" : "NO", " | Magic ", InpMagic, "\n",
            "Posiciones abiertas: ", count, "\n",
            "Beneficio de la ultima: ", DoubleToString(lastProfit, 2), " USD\n",
            "Piso: cierra la ultima si cae a -", DoubleToString(lim, 2), " USD\n",
