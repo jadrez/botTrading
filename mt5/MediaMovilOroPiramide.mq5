@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| MediaMovilOroPiramide.mq5  (v2.20)                                       |
+//| MediaMovilOroPiramide.mq5  (v2.21)                                       |
 //| Base nueva a partir del ejemplo "Moving Average" de MetaQuotes.  |
 //|                                                                  |
 //| Senal (al cerrar cada vela del marco InpTF), igual que el ejemplo|
@@ -18,7 +18,7 @@
 //| Una sola posicion a la vez. NO garantiza ganancias: probar en    |
 //| el probador y en DEMO antes que nada.                            |
 //+------------------------------------------------------------------+
-#property version   "2.20"
+#property version   "2.21"
 #property description "Base de media movil para XAUUSD con SL por ATR y lote por riesgo. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -72,6 +72,7 @@ bool     g_flipPending = false;         // hay un volteo pendiente tras tocar el
 ENUM_ORDER_TYPE g_flipType = ORDER_TYPE_BUY;
 int      g_flipCount  = 0;              // volteos seguidos
 bool     g_pyramidBlocked = false;      // una posicion cerro por SL en negativo: no se apila mas hasta quedar plano
+datetime g_lastSlFix = 0;               // ultimo intento de poner el SL que el broker no coloco
 datetime g_lastAddTry = 0;              // para no insistir en cada tick si una apertura falla
 ulong    g_peakTicket[];                // ganancia maxima (en distancia de precio) de cada posicion abierta
 double   g_peakDist[];
@@ -576,6 +577,43 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 }
 
 //+------------------------------------------------------------------+
+// RESPALDO DE STOPS: si el broker no coloco el SL (o no lo ejecuta), el propio EA lo vigila.
+//  1) Si la posicion no tiene SL, intenta ponerlo (maximo cada 30 s) y deja el resultado en el registro.
+//  2) Respaldo en software: si el precio ya paso la distancia del SL previsto (InpSLAtr x ATR) un 5 %, cierra la
+//     posicion al precio de mercado, haya SL en el servidor o no.
+void EnforceStops(ulong ticket, ENUM_POSITION_TYPE ptype)
+{
+   if(g_atrCache <= 0.0 || InpSLAtr <= 0.0) return;
+   if(!PositionSelectByTicket(ticket)) return;
+
+   double open   = PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl     = PositionGetDouble(POSITION_SL);
+   double tp     = PositionGetDouble(POSITION_TP);
+   double price  = (ptype == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double slDist = InpSLAtr * g_atrCache;
+   double adverse = (ptype == POSITION_TYPE_BUY) ? open - price : price - open;
+
+   if(sl == 0.0 && TimeCurrent() - g_lastSlFix >= 30)
+   {
+      g_lastSlFix = TimeCurrent();
+      double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+      double d  = MathMax(slDist, minDist);
+      double newSl = (ptype == POSITION_TYPE_BUY) ? open - d : open + d;
+      newSl = NormalizeDouble(newSl, _Digits);
+      if(trade.PositionModify(ticket, newSl, tp))
+         PrintFormat("La posicion %I64u no tenia SL; se le coloco en %.2f.", ticket, newSl);
+      else
+         PrintFormat("La posicion %I64u no tiene SL y el broker NO deja ponerlo: %s. El EA la vigila por software.", ticket, trade.ResultRetcodeDescription());
+   }
+
+   if(adverse >= slDist * 1.05)
+   {
+      PrintFormat("Stop de respaldo: la posicion %I64u va %.2f en contra (SL previsto %.2f) - se cierra.", ticket, adverse, slDist);
+      trade.PositionClose(ticket);
+   }
+}
+
+//+------------------------------------------------------------------+
 // Panel en el grafico: muestra que esta viendo el EA (para comprobar el piso y el volteo en vivo).
 void ShowStatus(int count, double lastProfit, ulong lastTicket)
 {
@@ -588,7 +626,7 @@ void ShowStatus(int count, double lastProfit, ulong lastTicket)
    if(MathAbs(InpFloorUSD) > 0.0 && lastTicket != 0 && PositionSelectByTicket(lastTicket))
       lim = MathAbs(InpFloorUSD) + SpreadCostFor(PositionGetDouble(POSITION_VOLUME)) + InpCommissionUSD;
 
-   Comment("MediaMovilOroPiramide v2.20\n",
+   Comment("MediaMovilOroPiramide v2.21\n",
            "Posiciones abiertas: ", count, "\n",
            "Beneficio de la ultima: ", DoubleToString(lastProfit, 2), " USD\n",
            "Piso: cierra la ultima si cae a -", DoubleToString(lim, 2), " USD\n",
@@ -628,6 +666,7 @@ void OnTick()
       {
          if(!PositionSelectByTicket(tk[i])) continue;
          ENUM_POSITION_TYPE pt = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         EnforceStops(tk[i], pt);
          ManageBreakEven(tk[i], pt);
          ManagePeakTrail(tk[i], pt);
       }
