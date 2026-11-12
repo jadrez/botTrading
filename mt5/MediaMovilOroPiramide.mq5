@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| MediaMovilOroPiramide.mq5  (v2.10)                                       |
+//| MediaMovilOroPiramide.mq5  (v2.20)                                       |
 //| Base nueva a partir del ejemplo "Moving Average" de MetaQuotes.  |
 //|                                                                  |
 //| Senal (al cerrar cada vela del marco InpTF), igual que el ejemplo|
@@ -18,7 +18,7 @@
 //| Una sola posicion a la vez. NO garantiza ganancias: probar en    |
 //| el probador y en DEMO antes que nada.                            |
 //+------------------------------------------------------------------+
-#property version   "2.11"
+#property version   "2.20"
 #property description "Base de media movil para XAUUSD con SL por ATR y lote por riesgo. Probar siempre en demo."
 
 #include <Trade/Trade.mqh>
@@ -45,6 +45,7 @@ input double          InpBreakEvenAtr   = 0.0;             // Proteger ganadoras
 input double          InpBreakEvenLockAtr = 0.2;           // Break-even: el SL queda X veces el ATR POR ENCIMA de la entrada (cubre comision y spread)
 input bool            InpFlipOnSL       = false;           // Si una operacion toca el SL en NEGATIVO, abrir otra en el sentido contrario
 input int             InpMaxFlips       = 1;               // Maximo de volteos seguidos tras SL (evita cadenas de perdidas)
+input bool            InpFlipNeedTrend  = true;            // Volteo: solo si el precio ya esta del lado contrario de la media (y de la EMA lenta): la tendencia cambio
 input double          InpPeakArmAtr     = 0.0;             // SL por posicion: se activa al ganar X veces el ATR (solo si "retener %" > 0)
 input double          InpPeakRetainPct  = 0.0;             // SL por posicion: conservar este % de la GANANCIA MAXIMA de cada posicion (0 = apagado; ej. 70)
 input bool            InpPyramid        = false;           // Apilar: abrir mas posiciones a favor mientras la tendencia siga
@@ -120,6 +121,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   Comment("");
    if(g_ma     != INVALID_HANDLE) IndicatorRelease(g_ma);
    if(g_filter != INVALID_HANDLE) IndicatorRelease(g_filter);
    if(g_atr    != INVALID_HANDLE) IndicatorRelease(g_atr);
@@ -449,6 +451,42 @@ void ManagePeakTrail(ulong ticket, ENUM_POSITION_TYPE ptype)
 }
 
 //+------------------------------------------------------------------+
+// Cuantas posiciones de este EA hay abiertas.
+int CountMine()
+{
+   int n = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      n++;
+   }
+   return n;
+}
+
+// Validacion de tendencia para voltear: vender solo si el precio esta por debajo de la media (y de la EMA lenta si
+// esta activa); comprar solo si esta por encima.
+bool TrendAllows(ENUM_ORDER_TYPE type)
+{
+   double ma = GetBuf(g_ma, 0);
+   if(ma <= 0.0) return false;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(type == ORDER_TYPE_SELL && bid >= ma) return false;
+   if(type == ORDER_TYPE_BUY  && ask <= ma) return false;
+   if(g_filter != INVALID_HANDLE)
+   {
+      double f = GetBuf(g_filter, 0);
+      if(f <= 0.0) return false;
+      if(type == ORDER_TYPE_SELL && bid >= f) return false;
+      if(type == ORDER_TYPE_BUY  && ask <= f) return false;
+   }
+   return true;
+}
+
+//+------------------------------------------------------------------+
 // Costo en USD de cruzar el spread con 'volume' lotes (una posicion recien abierta ya parte en ese negativo).
 double SpreadCostFor(double volume)
 {
@@ -463,7 +501,7 @@ double SpreadCostFor(double volume)
 // -(InpFloorUSD + spread + comision estimada), se cierra solo esa. Las demas siguen con su SL propio y la tendencia
 // se sigue validando en cada vela (si cambia, se cierra todo y se voltea). Despues de un cierre por piso no se apila
 // mas hasta quedar plano.
-void ManageFloor(ulong lastTicket)
+void ManageFloor(ulong lastTicket, int count)
 {
    double floorUsd = MathAbs(InpFloorUSD);   // acepta 2 o -2: es el mismo piso
    if(floorUsd <= 0.0 || lastTicket == 0) return;
@@ -475,7 +513,19 @@ void ManageFloor(ulong lastTicket)
    if(profit < -limit)
    {
       PrintFormat("Piso: la ultima posicion cayo a %.2f USD (limite -%.2f incluye spread y comision) - se cierra solo esa.", profit, limit);
-      if(trade.PositionClose(lastTicket)) g_pyramidBlocked = true;
+      ENUM_POSITION_TYPE pt = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if(trade.PositionClose(lastTicket))
+      {
+         g_pyramidBlocked = true;
+         // Si era la UNICA posicion abierta y el volteo esta activo, queda pendiente abrir en el sentido contrario
+         // (se valida la tendencia antes de abrir).
+         if(InpFlipOnSL && count == 1 && g_flipCount < InpMaxFlips)
+         {
+            g_flipType    = (pt == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+            g_flipPending = true;
+            Print("Volteo pendiente tras el piso: se abrira en el sentido contrario si la tendencia ya cambio.");
+         }
+      }
    }
 }
 
@@ -516,13 +566,34 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    // Una posicion cerro por SL en negativo: se deja de apilar hasta quedar plano.
    if(reason == DEAL_REASON_SL) g_pyramidBlocked = true;
 
-   if(InpFlipOnSL && !InpPyramid && reason == DEAL_REASON_SL && g_flipCount < InpMaxFlips)
+   if(InpFlipOnSL && reason == DEAL_REASON_SL && g_flipCount < InpMaxFlips && CountMine() == 0)
    {
       // El deal de cierre tiene el tipo contrario a la posicion; abrir en el sentido contrario a la posicion = mismo tipo que ese deal.
       ENUM_DEAL_TYPE dt = (ENUM_DEAL_TYPE)HistoryDealGetInteger(trans.deal, DEAL_TYPE);
       g_flipType    = (dt == DEAL_TYPE_SELL) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
       g_flipPending = true;
    }
+}
+
+//+------------------------------------------------------------------+
+// Panel en el grafico: muestra que esta viendo el EA (para comprobar el piso y el volteo en vivo).
+void ShowStatus(int count, double lastProfit, ulong lastTicket)
+{
+   static datetime lastShow = 0;
+   datetime now = TimeCurrent();
+   if(now == lastShow) return;
+   lastShow = now;
+
+   double lim = 0.0;
+   if(MathAbs(InpFloorUSD) > 0.0 && lastTicket != 0 && PositionSelectByTicket(lastTicket))
+      lim = MathAbs(InpFloorUSD) + SpreadCostFor(PositionGetDouble(POSITION_VOLUME)) + InpCommissionUSD;
+
+   Comment("MediaMovilOroPiramide v2.20\n",
+           "Posiciones abiertas: ", count, "\n",
+           "Beneficio de la ultima: ", DoubleToString(lastProfit, 2), " USD\n",
+           "Piso: cierra la ultima si cae a -", DoubleToString(lim, 2), " USD\n",
+           "Pila bloqueada (no apila): ", g_pyramidBlocked ? "SI" : "NO", "\n",
+           "Volteo pendiente: ", g_flipPending ? "SI" : "NO");
 }
 
 //+------------------------------------------------------------------+
@@ -542,8 +613,12 @@ void OnTick()
       if(g_flipPending)
       {
          g_flipPending = false;
-         if(OpenTrade(g_flipType)) g_flipCount++;
-         return;
+         if(!InpFlipNeedTrend || TrendAllows(g_flipType))
+         {
+            if(OpenTrade(g_flipType)) g_flipCount++;
+            return;
+         }
+         Print("Volteo cancelado: el precio sigue del lado de la media, la tendencia aun no cambio. Se espera el siguiente cruce.");
       }
    }
    else
@@ -556,9 +631,11 @@ void OnTick()
          ManageBreakEven(tk[i], pt);
          ManagePeakTrail(tk[i], pt);
       }
-      ManageFloor(lastTicket);
+      ManageFloor(lastTicket, count);
       TryPyramid(count, dir, lastOpen, lastProfit);
    }
+
+   ShowStatus(count, lastProfit, lastTicket);
 
    // ---- Una vez por vela cerrada del marco InpTF ----
    datetime bar = iTime(_Symbol, InpTF, 0);
